@@ -1,0 +1,135 @@
+name: build
+# Runs the suite, then proves the distribution installs and serves.
+#
+#   test   the suite, in a checkout
+#   wheel  a clean install of the built distribution, started in a bare virtualenv
+#
+# Origin is distributed as a Python package. `agience-observe/package/manager` finds a Python,
+# builds a virtualenv under the user's profile, pip-installs the distribution and runs
+# `python -m uvicorn origin.main:app`. The `wheel` job below is that path, end to end.
+#
+# On a tag, the built wheel and sdist are attached to the GitHub release.
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+permissions:
+  contents: write
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Checkout agience-prism-py
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/agience-prism-py
+          path: .prism
+          token: ${{ secrets.WORKSPACE_READ_TOKEN || github.token }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Install
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          pip install ./.prism
+          # The `test` extra carries the runners; the runtime pins come from the declaration in
+          # pyproject, which reads requirements.txt. Editable rather than PYTHONPATH, so the
+          # dependency is declared rather than implied.
+          pip install -e ".[test]"
+      - name: pytest
+        run: python -m pytest src/origin/tests -q
+
+  # The suite above cannot see a packaging defect: it runs against the checkout, where every file is
+  # present whether or not `[tool.setuptools.package-data]` declares it, and every dependency is
+  # present whether or not `[project.dependencies]` names it. Installing the built distribution on
+  # its own is what makes both declarations load-bearing.
+  wheel:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Checkout agience-prism-py
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/agience-prism-py
+          path: .prism
+          token: ${{ secrets.WORKSPACE_READ_TOKEN || github.token }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Build the distribution
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip build
+          python -m build --outdir dist .
+      # Only the trust floor and the built wheel. `requirements.txt` is deliberately NOT installed
+      # here: the installer does not install it either, so anything the wheel needs has to come from
+      # its own dependency declaration or the install is not one a user can reproduce.
+      - name: Install it, and only it
+        run: |
+          set -euo pipefail
+          python -m venv /tmp/venv
+          /tmp/venv/bin/pip install --upgrade pip
+          /tmp/venv/bin/pip install ./.prism
+          /tmp/venv/bin/pip install dist/*.whl
+      - name: Start it outside the checkout and require every surface to answer
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/keys
+          openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 \
+            -out /tmp/keys/origin.private.pem 2>/dev/null
+          openssl rsa -pubout -in /tmp/keys/origin.private.pem \
+            -out /tmp/keys/origin.public.pem 2>/dev/null
+          python3 -c "import base64,os;print(base64.urlsafe_b64encode(os.urandom(32)).decode())" \
+            > /tmp/keys/encryption.key
+          openssl rand -hex 32 > /tmp/keys/inbound_nonce.secret
+
+          # `cd /tmp` on purpose: from the repo root an installed package can still resolve a file
+          # out of the checkout, which is the mistake this job exists to catch.
+          cd /tmp
+          # `-m uvicorn`, and loopback: the same invocation the service supervisor uses.
+          KEYS_DIR=/tmp/keys ORIGIN_DB_PATH=/tmp/origin.db AGIENCE_NO_DOTENV=1 \
+            /tmp/venv/bin/python -m uvicorn origin.main:app --host 127.0.0.1 --port 8080 &
+          for i in $(seq 1 60); do
+            [ "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/healthz)" = "200" ] && break
+            sleep 1
+          done
+
+          # `/.well-known/jwks.json` first: it is the health rule the service supervisor actually
+          # probes for Origin, rather than /healthz. An Origin that listens and publishes no key set
+          # is an authority no peer could verify.
+          failed=0
+          for path in /.well-known/jwks.json /healthz / /login /account /reset-password \
+                      /verify-email /openapi.json /web/app.css \
+                      /.well-known/openid-configuration; do
+            code=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:8080${path}")
+            printf '  %-36s %s\n' "$path" "$code"
+            [ "$code" = "200" ] || failed=1
+          done
+          [ "$failed" -eq 0 ] || { echo "::error::the distribution installs but cannot serve"; exit 1; }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/*
+      # Only on a tag, and only after the install above has been shown to serve.
+      #
+      # `gh` rather than a marketplace action: it ships on every GitHub-hosted runner and
+      # authenticates with the token this job already holds, so attaching a release asset adds no
+      # third party to the supply chain of a security service's own artifact.
+      - name: Attach the distribution to the release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # A tag push does not necessarily have a release behind it yet.
+          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1             || gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes
+          gh release upload "$GITHUB_REF_NAME" dist/* --clobber

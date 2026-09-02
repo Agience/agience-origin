@@ -1,0 +1,52 @@
+/* Agience Origin — lightweight auth surface. Branded background + frosted card. */
+:root { color-scheme: light; }
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; }
+body {
+  font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  color: #1f2328; min-height: 100vh; overflow-x: hidden;
+  display: flex; align-items: center; justify-content: center; padding: 32px 16px;
+  background: #111827;
+}
+/* animated background — the moving conic gradient + drifting blobs are built at runtime by
+   app.js (buildBackground), faithful to Facet's AuthLayout: randomized waypoints per load. */
+.bg { position: fixed; inset: 0; z-index: 0; overflow: hidden; background: #111827; }
+
+.card {
+  position: relative; z-index: 1; width: 100%; max-width: 400px;
+  background: rgba(255,255,255,.96); backdrop-filter: blur(20px);
+  border: 1px solid rgba(255,255,255,.3); border-radius: 20px;
+  box-shadow: 0 35px 60px -15px rgba(0,0,0,.6); padding: 30px 28px;
+}
+.logo { display: block; margin: 4px auto 18px; max-width: 210px; width: 100%; height: auto; }
+h1 { text-align: center; font-size: 18px; font-weight: 600; color: #1f2328; margin: 0 0 18px; }
+label { display: block; font-size: 13px; font-weight: 500; color: #374151; margin: 14px 0 6px; }
+input { width: 100%; padding: 11px 12px; border: 1px solid #d1d5db; border-radius: 10px; font-size: 14px; color: #111; background: #fff; outline: none; }
+input:focus { border-color: #6366f1; box-shadow: 0 0 0 3px rgba(99,102,241,.22); }
+button.primary { width: 100%; margin-top: 20px; padding: 12px; border: 0; border-radius: 10px; background: #111827; color: #fff; font-size: 14px; font-weight: 600; cursor: pointer; transition: background .15s; }
+button.primary:hover { background: #1f2937; }
+button.primary:disabled { opacity: .5; cursor: default; }
+.link { background: none; border: 0; color: #6366f1; font-size: 13px; cursor: pointer; padding: 0; text-decoration: none; }
+.link:hover { text-decoration: underline; }
+.row { text-align: center; margin-top: 16px; }
+.msg { margin-top: 14px; font-size: 13px; min-height: 18px; text-align: center; }
+.ok { color: #16a34a; } .err { color: #dc2626; } .muted { color: #6b7280; }
+.hint { font-size: 12px; color: #6b7280; margin-top: 6px; }
+.between { display: flex; align-items: center; justify-content: space-between; }
+.pill { display: flex; align-items: center; gap: 8px; background: #f3f4f6; border-radius: 10px; padding: 8px 12px; font-size: 13px; color: #374151; margin-bottom: 4px; }
+.pill .link { margin-left: auto; font-size: 12px; }
+.foot { text-align: center; font-size: 12px; color: #9ca3af; margin-top: 22px; }
+.foot a { color: #6366f1; text-decoration: none; }
+.kv { font-size: 13px; color: #374151; padding: 8px 0; border-bottom: 1px solid #eef0f3; display: flex; gap: 10px; }
+.kv .k { color: #6b7280; min-width: 84px; }
+.hidden { display: none !important; }
+
+/* Federated sign-in buttons and the divider between them and the local forms. Used by the
+   `/auth/authorize` chooser. They live HERE, beside the rest of the auth styling, rather than
+   inline in the page that renders them — one stylesheet for one surface, or the two drift and the
+   sign-in screen stops matching the account screen it hands you to. */
+button.provider { width: 100%; margin-top: 10px; padding: 11px 12px; border: 1px solid #d1d5db; border-radius: 10px; background: #fff; color: #1f2328; font-size: 14px; font-weight: 500; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 10px; transition: background .15s, border-color .15s; }
+button.provider:hover { background: #f9fafb; border-color: #9ca3af; }
+button.provider svg { width: 18px; height: 18px; flex: none; }
+.sep { display: flex; align-items: center; gap: 12px; margin: 20px 0 4px; color: #9ca3af; font-size: 12px; }
+.sep::before, .sep::after { content: ""; flex: 1; height: 1px; background: #e5e7eb; }

@@ -1,0 +1,47 @@
+<!doctype html><html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Verify email · Agience</title><link rel="icon" href="/web/favicon.png"><link rel="stylesheet" href="/web/app.css">
+</head><body>
+<div class="bg"><div class="grad"></div><div class="blob b1"></div><div class="blob b2"></div></div>
+<div class="card">
+  <img class="logo" src="/web/logo_v.png" alt="Agience">
+  <h1>Email verification</h1>
+  <div class="msg muted" id="msg">Verifying…</div>
+
+  <div id="resend" class="hidden">
+    <p class="muted" style="text-align:center">Enter your email to get a new verification link.</p>
+    <label for="email">Email</label>
+    <input id="email" type="email" autocomplete="email" placeholder="you@example.com">
+    <button class="primary" type="button" id="resendBtn">Send verification link</button>
+  </div>
+
+  <div class="foot"><a href="/">Back to sign in</a></div>
+</div>
+
+<script src="/web/bg.js"></script>
+<script src="/web/app.js"></script>
+<script>
+const $=(s)=>document.querySelector(s), msg=$("#msg");
+const token = qs("token"), sent = qs("sent");
+function show(t,cls){ msg.className="msg "+(cls||"muted"); msg.innerHTML=t||""; }
+
+async function run(){
+  if (sent && !token) { show("Check your inbox — we sent you a verification link.","ok"); return; }
+  if (!token) { show("No verification token in the link.","err"); $("#resend").classList.remove("hidden"); return; }
+  const r = await post("/auth/email/verify-confirm", { token });
+  if (r.ok) {
+    show("Email verified ✓ — you can now <a href='/'>sign in</a>.","ok");
+    if (r.data.access_token) saveToken(r.data.access_token);
+  } else {
+    show(r.detail || "This verification link is invalid or has expired.","err");
+    $("#resend").classList.remove("hidden");
+  }
+}
+$("#resendBtn").addEventListener("click", async ()=>{
+  const b=$("#resendBtn"); b.disabled=true;
+  await post("/auth/email/verify-request", { email: $("#email").value.trim().toLowerCase() });
+  show("If that account exists, a new link is on its way.","ok");
+});
+run();
+</script>
+</body></html>

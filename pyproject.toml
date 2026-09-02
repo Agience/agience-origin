@@ -1,0 +1,66 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agience-origin"
+version = "0.1.0"
+description = "Agience Origin — the identity authority (IdP): principals, identities, grants, service identity and the trust anchors peers verify against. Import name is `origin`."
+requires-python = ">=3.11"
+# Origin is dual-licensed — AGPL-3.0-only or a commercial licence (see COMMERCIAL_LICENSE.md) — and
+# this manifest declares only the AGPL half on purpose. SPDX `A OR B` means the recipient may choose
+# either, and a recipient of this package cannot: the commercial licence is negotiated, not conveyed
+# by the download. The manifest states what you actually receive; the offer of the other half lives
+# in LICENSE, NOTICE, README and COMMERCIAL_LICENSE.md.
+license = { text = "AGPL-3.0-only" }
+authors = [{ name = "Ikailo Inc." }]
+
+# Read from `requirements.txt` rather than restated here, so there is one list of pinned versions
+# and not two that can drift. Declaring them at all is what makes `pip install agience-origin`
+# produce a package that can serve: undeclared, it installs importable and without a web framework,
+# and the failure lands on whoever starts it.
+dynamic = ["dependencies"]
+
+[project.optional-dependencies]
+# Not runtime dependencies, so they are not in `requirements.txt` — the installer installs that
+# file wholesale and does not need a test runner.
+test = [
+    "pytest==8.4.2",
+    "pytest-asyncio>=1.0.0",
+    "pytest-xdist>=3.5.0",
+    "pytest-timeout>=2.2.0",
+]
+
+[tool.setuptools.dynamic]
+dependencies = { file = ["requirements.txt"] }
+
+# Operator commands. `origin-emit-anchor` prints Origin's public trust anchor in the shape a peer's
+# `authority.manifest.json` expects — the step that makes an Origin-signed token verifiable by a
+# peer that reads its trust inline and never fetches Origin's JWKS.
+#
+# The service is not started this way. It is run as `python -m uvicorn origin.main:app`, which is
+# what the installer's service supervisor invokes; an `origin-serve` console script here would be a
+# second definition of how Origin boots, and it would not be the one in use.
+[project.scripts]
+origin-emit-anchor = "origin.scripts.emit_trust_anchor:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+# `src/origin/web/` is not a package — it has no `__init__.py`, so `packages.find` never sees it and
+# nothing below it reaches a distribution unless it is declared here as data.
+# `src/origin/tests/test_the_package_ships_what_it_serves.py` checks the declaration against the
+# tree, and the `wheel` job in CI installs the built distribution and starts it.
+[tool.setuptools.package-data]
+# The account surface `main.py` serves as `Path(__file__).parent / "web"` — the HTML pages plus the
+# CSS/JS/PNG they reference through the `/web` mount. Enumerated by extension rather than `*` so a
+# stray file (an editor backup, a `.map`) is not silently published as part of the surface.
+"origin" = ["web/*.html", "web/*.css", "web/*.js", "web/*.png", "uvicorn_log_config.json",
+            "alembic.ini", "alembic/script.py.mako"]
+
+# `alembic.ini` and `script.py.mako` are declared so that a wheel install can migrate its own
+# database. The revision modules ship on their own — `origin/alembic/versions/` carries an
+# `__init__.py`, so `packages.find` sees them — but `main.py::_run_migrations` reads `alembic.ini`
+# as a sibling of the package, and `alembic/env.py` passes that path to `fileConfig`, which raises
+# on a missing file. Without the `.ini` the package imports, installs and then fails on the first
+# boot, which is the shape this declaration exists to prevent.

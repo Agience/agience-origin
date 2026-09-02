@@ -1,0 +1,102 @@
+<!doctype html><html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sign in · Agience</title><link rel="icon" href="/web/favicon.png"><link rel="stylesheet" href="/web/app.css">
+</head><body>
+<div class="bg"><div class="grad"></div><div class="blob b1"></div><div class="blob b2"></div></div>
+<div class="card">
+  <img class="logo" src="/web/logo_v.png" alt="Agience">
+
+  <!-- LOGIN -->
+  <div id="login">
+    <h1>Welcome, let's get you signed in</h1>
+    <form id="loginForm">
+      <label for="identifier">Email or username</label>
+      <input id="identifier" type="text" autocomplete="username" required>
+      <label for="password">Password</label>
+      <input id="password" type="password" autocomplete="current-password" required>
+      <div class="between" style="margin-top:8px">
+        <a class="link" href="/reset-password">Forgot your password?</a>
+      </div>
+      <button class="primary" type="submit" id="loginBtn">Sign in</button>
+    </form>
+    <div class="row"><button class="link" id="toRegister">No account yet? Create one</button></div>
+  </div>
+
+  <!-- REGISTER -->
+  <div id="register" class="hidden">
+    <h1>Create your account</h1>
+    <form id="registerForm">
+      <label for="remail">Email</label>
+      <input id="remail" type="email" autocomplete="email" required placeholder="you@example.com">
+      <div class="between"><label for="rpassword" style="margin-bottom:0">Password</label>
+        <button class="link" type="button" id="genPw" style="margin-top:14px">Generate strong password</button></div>
+      <input id="rpassword" type="password" autocomplete="new-password" required placeholder="At least 12 characters">
+      <div class="hint" id="pwHint"></div>
+      <button class="primary" type="submit" id="registerBtn">Create account</button>
+    </form>
+    <div class="row"><button class="link" id="toLogin">Already have an account? Sign in</button></div>
+  </div>
+
+  <div class="msg" id="msg"></div>
+  <div class="foot"><a href="/terms">Terms</a> · <a href="/privacy">Privacy</a></div>
+</div>
+
+<script src="/web/bg.js"></script>
+<script src="/web/app.js"></script>
+<script>
+// already signed in? go to account (unless an SP is waiting for a token)
+if (isAuthed() && !qs("redirect_uri")) location.replace("/account");
+
+const $ = (s) => document.querySelector(s);
+const msg = $("#msg");
+function show(t, cls) { msg.className = "msg " + (cls || "muted"); msg.textContent = t || ""; }
+function swap(to) {
+  $("#login").classList.toggle("hidden", to !== "login");
+  $("#register").classList.toggle("hidden", to !== "register");
+  show("");
+}
+$("#toRegister").onclick = () => swap("register");
+$("#toLogin").onclick = () => swap("login");
+
+// password generator
+$("#genPw").onclick = () => {
+  const U="ABCDEFGHIJKLMNOPQRSTUVWXYZ",L="abcdefghijklmnopqrstuvwxyz",D="0123456789",S="!@#$%^&*-_=+.";
+  const all=U+L+D+S, pick=(cs)=>{const b=new Uint32Array(1);crypto.getRandomValues(b);return cs[b[0]%cs.length];};
+  let ch=[pick(U),pick(L),pick(D),pick(S)]; while(ch.length<20) ch.push(pick(all));
+  for(let i=ch.length-1;i>0;i--){const b=new Uint32Array(1);crypto.getRandomValues(b);const j=b[0]%(i+1);[ch[i],ch[j]]=[ch[j],ch[i]];}
+  const pw=ch.join(""); $("#rpassword").value=pw; $("#rpassword").type="text";
+  $("#pwHint").textContent="Generated — copy it somewhere safe.";
+  navigator.clipboard && navigator.clipboard.writeText(pw).then(()=>{$("#pwHint").textContent="Generated & copied to clipboard.";},()=>{});
+};
+$("#rpassword").addEventListener("input", (e) => {
+  const v = e.target.value; $("#pwHint").textContent = v ? (v.length>=12 ? "✓ at least 12 characters" : "○ at least 12 characters") : "";
+});
+
+// LOGIN submit
+$("#loginForm").addEventListener("submit", async (e) => {
+  e.preventDefault(); const b=$("#loginBtn"); b.disabled=true; show("Signing in…");
+  const r = await post("/auth/password/login", { identifier: $("#identifier").value.trim(), password: $("#password").value });
+  if (r.ok && r.data.access_token) { show("Signed in ✓","ok"); finishLogin(r.data.access_token); return; }
+  if (r.status===401) show("That email/username or password isn't right.","err");
+  else if (r.status===403) show(r.detail || "Please verify your email to sign in — we've sent a link.","err");
+  else show(r.detail || ("Sign-in failed ("+r.status+")"),"err");
+  b.disabled=false;
+});
+
+// REGISTER submit — email IS the username (single field, required)
+$("#registerForm").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const email = $("#remail").value.trim().toLowerCase();
+  if (!email || email.indexOf("@") < 1) { show("Enter a valid email.","err"); return; }
+  if ($("#rpassword").value.length < 12) { show("Password must be at least 12 characters.","err"); return; }
+  const b=$("#registerBtn"); b.disabled=true; show("Creating account…");
+  const r = await post("/auth/password/register", {
+    username: email, name: email.split("@")[0],
+    password: $("#rpassword").value, email: email,
+  });
+  if (r.ok && r.data.verification_required) { location.href="/verify-email?sent=1"; return; }
+  if (r.ok && r.data.access_token) { show("Account created ✓","ok"); finishLogin(r.data.access_token); return; }
+  show(r.detail || ("Could not create account ("+r.status+")"),"err"); b.disabled=false;
+});
+</script>
+</body></html>
