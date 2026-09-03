@@ -1,0 +1,92 @@
+name: publish
+# Publish the distribution to PyPI when a version tag is pushed.
+#
+# Trusted Publishing (OIDC): PyPI is configured to trust this repository, this workflow file and
+# the `pypi` environment, so the job mints a short-lived token at publish time. No API token is
+# stored as a secret, and there is nothing in this repository an attacker could steal and reuse.
+# That is why `id-token: write` is the only unusual permission here, and why the environment name
+# below is load-bearing rather than decorative — PyPI checks it.
+#
+# The build is repeated here rather than pulled from the `build` workflow's artifact. A published
+# distribution should be produced by the job that publishes it, from the tagged tree, so there is no
+# window in which the bytes that were tested and the bytes that were uploaded could differ.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/agience-origin
+    permissions:
+      # Mints the OIDC token PyPI exchanges for a publishing token. Nothing else needs it.
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Build the distribution
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip build
+          python -m build --outdir dist .
+
+      # The tag and the version in the package must agree, or the release is named one thing and
+      # installs as another. Checked before the upload, because PyPI accepts a version once and
+      # forever — a wrong number cannot be replaced, only yanked and superseded.
+      - name: The tag and the packaged version must agree
+        run: |
+          set -euo pipefail
+          packaged=$(python -c "import tomllib;print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
+          tagged="${GITHUB_REF_NAME#v}"
+          echo "tag ${tagged} / pyproject ${packaged}"
+          [ "$packaged" = "$tagged" ] || {
+            echo "::error::tag v${tagged} does not match pyproject version ${packaged}"; exit 1; }
+
+      # The distribution must install and serve from PyPI's point of view: nothing but the built
+      # wheel and whatever its own metadata declares. This is the check that catches an undeclared
+      # dependency, which installs cleanly and fails at startup on somebody else's machine.
+      - name: Install it alone and require it to serve
+        run: |
+          set -euo pipefail
+          python -m venv /tmp/venv
+          /tmp/venv/bin/pip install --upgrade pip
+          /tmp/venv/bin/pip install dist/*.whl
+
+          mkdir -p /tmp/keys
+          openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 \
+            -out /tmp/keys/origin.private.pem 2>/dev/null
+          openssl rsa -pubout -in /tmp/keys/origin.private.pem \
+            -out /tmp/keys/origin.public.pem 2>/dev/null
+          python3 -c "import base64,os;print(base64.urlsafe_b64encode(os.urandom(32)).decode())" \
+            > /tmp/keys/encryption.key
+          openssl rand -hex 32 > /tmp/keys/inbound_nonce.secret
+
+          cd /tmp
+          KEYS_DIR=/tmp/keys ORIGIN_DB_PATH=/tmp/origin.db AGIENCE_NO_DOTENV=1 \
+            /tmp/venv/bin/python -m uvicorn origin.main:app --host 127.0.0.1 --port 8080 &
+          for i in $(seq 1 60); do
+            [ "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/healthz)" = "200" ] && break
+            sleep 1
+          done
+          failed=0
+          for path in /.well-known/jwks.json /healthz / /login /account /web/app.css; do
+            code=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:8080${path}")
+            printf '  %-36s %s\n' "$path" "$code"
+            [ "$code" = "200" ] || failed=1
+          done
+          [ "$failed" -eq 0 ] || { echo "::error::not publishing a distribution that cannot serve"; exit 1; }
+
+      # PyPA's own action, pinned to a commit rather than a tag: a tag can be moved, and this is the
+      # step that holds the publishing token.
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33  # v1.14.2
+        with:
+          packages-dir: dist

@@ -6,6 +6,15 @@
 #
 # Use: pip install -r requirements.txt
 
+# The trust floor. Origin imports `prism.trust` (authority_trust, key_manager, service_identity),
+# `prism.grounding` and `prism.mass` in five modules, three of them on the `origin.main` import
+# path — so this is the one dependency without which the process cannot bind a socket.
+#
+# The `trust` extra is requested rather than relied upon: `prism.trust` needs `jose`, which the base
+# install does not carry. Origin's own python-jose and cryptography pins below satisfy the extra's
+# floors, so asking for it declares the need without moving a version.
+agience-prism[trust]==0.1.0
+
 # Authentication & Security
 authlib==1.6.9
 bcrypt==5.0.0

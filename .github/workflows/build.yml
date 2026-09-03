@@ -26,12 +26,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Checkout agience-prism-py
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ github.repository_owner }}/agience-prism-py
-          path: .prism
-          token: ${{ secrets.WORKSPACE_READ_TOKEN || github.token }}
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -40,10 +34,9 @@ jobs:
         run: |
           set -euo pipefail
           python -m pip install --upgrade pip
-          pip install ./.prism
-          # The `test` extra carries the runners; the runtime pins come from the declaration in
-          # pyproject, which reads requirements.txt. Editable rather than PYTHONPATH, so the
-          # dependency is declared rather than implied.
+          # The `test` extra carries the runners; everything else, including the trust floor, comes
+          # from the declaration in pyproject, which reads requirements.txt. Editable rather than
+          # PYTHONPATH, so the dependency is declared rather than implied.
           pip install -e ".[test]"
       - name: pytest
         run: python -m pytest src/origin/tests -q
@@ -56,12 +49,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Checkout agience-prism-py
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ github.repository_owner }}/agience-prism-py
-          path: .prism
-          token: ${{ secrets.WORKSPACE_READ_TOKEN || github.token }}
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -70,15 +57,14 @@ jobs:
           set -euo pipefail
           python -m pip install --upgrade pip build
           python -m build --outdir dist .
-      # Only the trust floor and the built wheel. `requirements.txt` is deliberately NOT installed
-      # here: the installer does not install it either, so anything the wheel needs has to come from
-      # its own dependency declaration or the install is not one a user can reproduce.
+      # The wheel and nothing else. `requirements.txt` is deliberately NOT installed here, and no
+      # sibling is checked out: everything the distribution needs — the trust floor included — has
+      # to come from its own dependency declaration, or the install is not one a user can reproduce.
       - name: Install it, and only it
         run: |
           set -euo pipefail
           python -m venv /tmp/venv
           /tmp/venv/bin/pip install --upgrade pip
-          /tmp/venv/bin/pip install ./.prism
           /tmp/venv/bin/pip install dist/*.whl
       - name: Start it outside the checkout and require every surface to answer
         run: |
