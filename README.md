@@ -100,16 +100,3 @@ and the facet bases rather than falling back to a wildcard.
 **Dual-licensed: AGPL-3.0-only *or* commercial.** See [`LICENSE`](LICENSE) and [`NOTICE`](NOTICE);
 commercial and white-label terms in [`COMMERCIAL_LICENSE.md`](COMMERCIAL_LICENSE.md). Contributing:
 [`CONTRIBUTING.md`](CONTRIBUTING.md) and [`CLA.md`](CLA.md).
-
-AGPL-compliant use is free, **commercial use included** - "-only" constrains the licence *version*
-(3, not "or later"), not who may use it. The commercial licence drops the copyleft obligation and
-carries the trademark rights the AGPL never grants.
-
-**Trademarks.** "Agience" and the Agience logo are trademarks of Ikailo Inc. The AGPL licenses
-copyright only, so white-label use - replacing Agience identity with your own brand - needs a
-separate trademark licence **whether or not you comply with the AGPL**.
-
-Origin is a network service, so the AGPL's network clause is the one that applies: offering a
-modified Origin over a network obliges you to offer its source, which is what the commercial
-licence exists to release you from.
-

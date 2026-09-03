@@ -60,5 +60,4 @@ Fork, branch from `main`, sign off every commit (`git commit -s`), open a PR. Co
 ## License
 
 **Dual-licensed: AGPL-3.0-only or commercial.** See [`LICENSE`](LICENSE),
-[`COMMERCIAL_LICENSE.md`](COMMERCIAL_LICENSE.md) and [`NOTICE`](NOTICE). "-only" constrains the
-licence *version*, not commercial use: AGPL-compliant commercial use is free.
+[`COMMERCIAL_LICENSE.md`](COMMERCIAL_LICENSE.md) and [`NOTICE`](NOTICE).
