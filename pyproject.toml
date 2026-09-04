@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agience-origin"
-version = "0.1.2"
+version = "0.1.3"
 description = "Agience Origin — the identity authority (IdP): principals, identities, grants, service identity and the trust anchors peers verify against."
 readme = "README.md"
 requires-python = ">=3.11"

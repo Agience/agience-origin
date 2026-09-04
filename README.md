@@ -1,5 +1,10 @@
 # Agience Origin
 
+[![PyPI](https://img.shields.io/pypi/v/agience-origin)](https://pypi.org/project/agience-origin/)
+[![Python](https://img.shields.io/badge/python-3.11%2B-blue)](pyproject.toml)
+[![License](https://img.shields.io/badge/license-AGPL%203.0-blue)](LICENSE)
+[![CI](https://github.com/Agience/agience-origin/actions/workflows/build.yml/badge.svg)](https://github.com/Agience/agience-origin/actions/workflows/build.yml)
+
 **Identity, authority.**
 
 Origin says who. It is the identity and authorization authority — the trust anchor the rest of the
@@ -100,3 +105,13 @@ and the facet bases rather than falling back to a wildcard.
 **Dual-licensed: AGPL-3.0-only *or* commercial.** See [`LICENSE`](LICENSE) and [`NOTICE`](NOTICE);
 commercial and white-label terms in [`COMMERCIAL_LICENSE.md`](COMMERCIAL_LICENSE.md). Contributing:
 [`CONTRIBUTING.md`](CONTRIBUTING.md) and [`CLA.md`](CLA.md).
+
+## Star History
+
+<a href="https://www.star-history.com/?repos=Agience%2Fagience-origin&type=date&legend=top-left">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=Agience/agience-origin&type=date&theme=dark&legend=top-left" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=Agience/agience-origin&type=date&legend=top-left" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=Agience/agience-origin&type=date&legend=top-left" />
+ </picture>
+</a>
