@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agience-origin"
-version = "0.1.0"
+version = "0.1.1"
 description = "Agience Origin — the identity authority (IdP): principals, identities, grants, service identity and the trust anchors peers verify against. Import name is `origin`."
 requires-python = ">=3.11"
 # Origin is dual-licensed — AGPL-3.0-only or a commercial licence (see COMMERCIAL_LICENSE.md) — and
