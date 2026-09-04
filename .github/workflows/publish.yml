@@ -25,6 +25,10 @@ jobs:
       name: pypi
       url: https://pypi.org/p/agience-origin
     permissions:
+      # A job-level `permissions:` REPLACES the workflow-level set rather than adding to it, so
+      # `contents: read` has to be repeated here — without it checkout cannot read the repository
+      # and fails with "Repository not found".
+      contents: read
       # Mints the OIDC token PyPI exchanges for a publishing token. Nothing else needs it.
       id-token: write
     steps:
