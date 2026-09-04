@@ -2,8 +2,9 @@
 
 [![PyPI](https://img.shields.io/pypi/v/agience-origin)](https://pypi.org/project/agience-origin/)
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue)](pyproject.toml)
-[![License](https://img.shields.io/badge/license-AGPL%203.0-blue)](LICENSE)
+[![License](https://img.shields.io/pypi/l/agience-origin)](LICENSE)
 [![CI](https://github.com/Agience/agience-origin/actions/workflows/build.yml/badge.svg)](https://github.com/Agience/agience-origin/actions/workflows/build.yml)
+[![Sponsor](https://img.shields.io/badge/Sponsor-Agience-EA4AAA?logo=githubsponsors&logoColor=white)](https://github.com/sponsors/Agience)
 
 **Identity, authority.**
 
