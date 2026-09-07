@@ -13,7 +13,18 @@
 # The `trust` extra is requested rather than relied upon: `prism.trust` needs `jose`, which the base
 # install does not carry. Origin's own python-jose and cryptography pins below satisfy the extra's
 # floors, so asking for it declares the need without moving a version.
-agience-prism[trust]==0.1.0
+#
+# A FLOOR, never an exact pin. This file IS origin's published metadata — `pyproject.toml` declares
+# `dynamic = ["dependencies"]` reading it — so whatever is written here is what every installer
+# resolves against. An exact pin cannot be co-installed with a sibling that asks for anything else:
+# crystal, ember and chorus all floor prism at >=0.1.2, and an `==` here makes
+# `pip install agience-origin agience-crystal` unsatisfiable. A floor still installs the newest
+# prism; it only refuses to resolve BACKWARDS past the version origin needs.
+#
+# 0.1.2 is the floor because 0.1.0 and 0.1.1 are yanked on PyPI, and PEP 592 ignores a yanked
+# release only when the requirement is not a pinned exact match — so an `==` on a yanked version
+# installs it and reads as working.
+agience-prism[trust]>=0.1.2
 
 # Authentication & Security
 authlib==1.6.9
