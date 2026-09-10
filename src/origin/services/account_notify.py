@@ -74,11 +74,37 @@ def _describe(person: Any) -> tuple[str, str]:
     return subject, body
 
 
+#: Top-level domains RFC 2606 and RFC 6761 reserve so that they can never be delegated. Nothing
+#: under them resolves anywhere, by permanent guarantee of the standard — there is no registrar
+#: that could ever sell one.
+_RESERVED_TLDS = (".invalid", ".test", ".example", ".localhost")
+
+
+def _is_probe(person: Any) -> bool:
+    """True for an address that cannot belong to a person.
+
+    ⚠ NARROW ON PURPOSE. This is not a judgement about whether a sign-up looks genuine — no
+    heuristic, no scoring, nothing about the shape of the name or the address. It is the RFC 2606
+    reserved-TLD list and nothing else, so the set it hides is exactly the set that could never
+    have reached a human being. A real registration cannot be suppressed by it.
+
+    It exists because the platform's own end-to-end check registers an account on every
+    `--allow-write` run, and each one raised "a new account was created" about a probe. An alert
+    that fires for the system's own test traffic is an alert that gets ignored, and this one is
+    the only notice that a real person signed up.
+    """
+    email = (getattr(person, "email", "") or "").strip().lower()
+    return email.endswith(_RESERVED_TLDS)
+
+
 def _send(person: Any) -> None:
     """Runs on a worker thread. Never raises."""
     try:
         from origin.services import email_service
 
+        if _is_probe(person):
+            logger.info("account-created notification skipped: reserved-TLD address (a probe)")
+            return
         if not email_service.is_configured():
             logger.info("account-created notification skipped: no email provider configured")
             return

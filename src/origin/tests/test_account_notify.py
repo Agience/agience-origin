@@ -79,7 +79,12 @@ def test_it_never_mails_the_person_who_registered(monkeypatch):
 def test_the_recipient_cannot_be_chosen_by_the_registering_party(monkeypatch):
     """Everything the new account controls — address, name, username — must not steer delivery."""
     monkeypatch.setenv("ACCOUNT_NOTIFY_TO", "connect@agience.ai")
-    hostile = _Person(email="attacker@evil.example")
+    # A DELIVERABLE domain, deliberately. `evil.example` used to be the address here, and once
+    # `_is_probe` began filtering RFC 2606 reserved TLDs this test started passing vacuously — no
+    # mail was sent at all, so "the recipient was not steered" became true for the wrong reason.
+    # The property under test is that nothing the registrant controls chooses the recipient, and
+    # that has to be checked on a registration the notifier actually acts on.
+    hostile = _Person(email="attacker@evil-domain.com")
     hostile.name = "connect@agience.ai"
     hostile.username = "someone-else@elsewhere.example"
 
@@ -140,3 +145,47 @@ def test_the_body_names_the_account_and_its_verified_state(monkeypatch):
     # `verified` decides whether this is a person or a throwaway — an `.invalid` address is
     # auto-verified by the allowlist and can never receive mail.
     assert "verified" in body
+
+
+# ── probe addresses ──────────────────────────────────────────────────────────────────────────
+def test_a_reserved_tld_address_is_not_announced(monkeypatch):
+    """The platform's own e2e registers an account on every --allow-write run. Announcing those
+    turns the one alert that says a real person signed up into noise."""
+    monkeypatch.setenv("ACCOUNT_NOTIFY_TO", "connect@agience.ai")
+    sent = {}
+
+    async def _capture(to, subject, html, text=None):
+        sent["to"] = to
+        return True
+
+    fake = types.SimpleNamespace(is_configured=lambda: True, send_email=_capture)
+    _install(monkeypatch, fake)
+
+    for domain in ("example.invalid", "example.test", "foo.example", "box.localhost"):
+        account_notify._send(_Person(email=f"e2e-probe@{domain}"))
+    assert "to" not in sent, "a reserved-TLD address was announced as a new account"
+
+
+def test_a_real_address_is_still_announced(monkeypatch):
+    """⛔ THE GUARD ON THE GUARD. Without this, `_is_probe` returning True for everything would
+    silence the notifier entirely and every other test in this file would still pass."""
+    monkeypatch.setenv("ACCOUNT_NOTIFY_TO", "connect@agience.ai")
+    sent = {}
+
+    async def _capture(to, subject, html, text=None):
+        sent["to"] = to
+        return True
+
+    fake = types.SimpleNamespace(is_configured=lambda: True, send_email=_capture)
+    _install(monkeypatch, fake)
+
+    account_notify._send(_Person(email="a.real.person@gmail.com"))
+    assert sent.get("to") == "connect@agience.ai"
+
+
+def test_the_filter_does_not_match_a_lookalike_domain():
+    """`invalid.com` is a real, buyable domain. Matching on the substring rather than the TLD
+    would silence it."""
+    assert not account_notify._is_probe(_Person(email="someone@invalid.com"))
+    assert not account_notify._is_probe(_Person(email="test@example.com"))
+    assert account_notify._is_probe(_Person(email="x@example.invalid"))
