@@ -635,6 +635,7 @@ _LOCAL_LOGIN_PAGE = """<!doctype html><html lang="en"><head>
 __PROVIDERS__
 __PASSWORD__
 __OTP__
+__REGISTER__
   <div class="msg" id="msg"></div>
   <div class="foot"><a href="/terms">Terms</a> · <a href="/privacy">Privacy</a></div>
 </div>
@@ -690,6 +691,37 @@ if (sendForm) sendForm.onsubmit = async (e) => {
     say("If that address has an account, a code is on its way.");
   } catch (err) { say(err.message, "err"); btn.disabled = false; }
 };
+/* Registration shares the chooser's one rule: the page posts, the server computes the redirect.
+   A `verification_required` answer is not a failure — the account exists, the flow simply cannot
+   continue until the mailbox is proved, and saying so is the whole message. */
+const regToggle = $("#regToggle");
+if (regToggle) regToggle.onclick = () => {
+  $("#local").classList.add("hidden");
+  const o = $("#otp"); if (o) o.classList.add("hidden");
+  $("#reg").classList.remove("hidden");
+  $("#remail").focus(); say("");
+};
+const regBack = $("#regBack");
+if (regBack) regBack.onclick = () => {
+  $("#reg").classList.add("hidden");
+  $("#local").classList.remove("hidden"); say("");
+};
+const regForm = $("#regForm");
+if (regForm) regForm.onsubmit = async (e) => {
+  e.preventDefault();
+  const btn = $("#regBtn"); btn.disabled = true; say("Creating your account…");
+  try {
+    const d = await post("/auth/authorize/register", {oauth_state: S,
+      email: $("#remail").value.trim(), password: $("#rpassword").value});
+    if (d.verification_required) {
+      $("#reg").classList.add("hidden");
+      say("Account created. Check " + d.email + " for a link to confirm it, then sign in.", "ok");
+      return;
+    }
+    finish(d);
+  } catch (err) { say(err.message, "err"); btn.disabled = false; }
+};
+
 const codeForm = $("#codeForm");
 if (codeForm) codeForm.onsubmit = async (e) => {
   e.preventDefault();
@@ -713,6 +745,35 @@ _PASSWORD_BLOCK = """  <div id="local">
       <button class="primary" type="submit" id="pwBtn">Sign in</button>
     </form>
 __OTPTOGGLE__
+__REGTOGGLE__
+  </div>
+"""
+
+_REGISTER_TOGGLE = """    <div class="row"><button class="link" type="button" id="regToggle">No account yet? Create one</button></div>
+"""
+
+#: Registration, inside the flow rather than beside it.
+#:
+#: `/login` has carried a registration form all along, and the chooser did not link to it. A
+#: person arriving from a service provider was therefore offered password and OTP, both of which
+#: require an account to already exist — and OTP says "if that address has an account, a code is
+#: on its way" to an address with none, so the dead end did not even announce itself.
+#:
+#: A link to `/login` would not have fixed it: `/login` mints a token directly, which cannot
+#: complete PKCE, so registering there drops the pending authorization request and strands the
+#: person on `/account` instead of back at the service provider they came from. This block posts
+#: to `/auth/authorize/register`, which ends at `_complete_local_signin` like the other two legs
+#: and returns them to the flow they started.
+_REGISTER_BLOCK = """  <div id="reg" class="hidden">
+    <form id="regForm">
+      <label for="remail">Email</label>
+      <input id="remail" type="email" autocomplete="email" required placeholder="you@example.com">
+      <label for="rpassword">Password</label>
+      <input id="rpassword" type="password" autocomplete="new-password" required
+             placeholder="At least __MINLEN__ characters">
+      <button class="primary" type="submit" id="regBtn">Create account</button>
+    </form>
+    <div class="row"><button class="link" type="button" id="regBack">Already have an account? Sign in</button></div>
   </div>
 """
 
@@ -775,19 +836,30 @@ def _render_local_login(
         buttons += '  <div class="sep">or</div>\n'
 
     if password:
-        block = _PASSWORD_BLOCK.replace("__OTPTOGGLE__", _OTP_TOGGLE if otp else "")
+        block = _PASSWORD_BLOCK.replace("__OTPTOGGLE__", _OTP_TOGGLE if otp else "").replace(
+            "__REGTOGGLE__", _REGISTER_TOGGLE
+        )
         otp_block = _OTP_BLOCK.replace("__OTPHIDDEN__", ' class="hidden"').replace(
             "__OTPBACK__", _OTP_BACK
         ) if otp else ""
+        # Registration is a password method: it sets one. With password auth disabled there is
+        # nothing for this form to create, which is why it is rendered on this branch only —
+        # the same rule the rest of this function follows, that a disabled method is omitted
+        # rather than shown and then refused.
+        reg_block = _REGISTER_BLOCK.replace(
+            "__MINLEN__", str(platform_settings.get_int("auth.password.min_length", 12))
+        )
     else:
         block = ""
         # No password to fall back to, so OTP is the only local method: shown, with no way back.
         otp_block = _OTP_BLOCK.replace("__OTPHIDDEN__", "").replace("__OTPBACK__", "") if otp else ""
+        reg_block = ""
 
     return (
         _LOCAL_LOGIN_PAGE.replace("__PROVIDERS__", buttons)
         .replace("__PASSWORD__", block)
         .replace("__OTP__", otp_block)
+        .replace("__REGISTER__", reg_block)
         .replace("__STATE__", oauth_state)
     )
 
@@ -1079,6 +1151,97 @@ async def authorize_local_password(body: _LocalPasswordVerify, db: Session = Dep
     if not is_person_allowed(None, person.email or ""):
         raise HTTPException(status_code=403, detail="User not allowed")
 
+    return _complete_local_signin(db, body.oauth_state, auth_request, person)
+
+
+class _LocalRegister(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    oauth_state: str
+    email: str
+    password: str
+
+
+@auth_router.post("/authorize/register", dependencies=None)
+async def authorize_local_register(
+    body: _LocalRegister,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+):
+    """Create an account for a sign-in already in flight, and continue that sign-in.
+
+    Distinct from `/auth/password/register`, which mints an access + refresh token directly. That
+    grant cannot complete PKCE, so a person who registered there would have their pending
+    authorization request dropped and land on `/account` rather than back at the service provider
+    that sent them. This endpoint creates the same account and ends at `_complete_local_signin`,
+    the same tail the password and OTP legs use, so the caller receives an authorization code for
+    the request they originally made.
+
+    Every gate `/auth/password/register` applies is applied here too, each named at its call site:
+    a gate present on one registration path and missing on the other is a way around it.
+
+    The email IS the username, matching the form on `/login`. Two registration surfaces that
+    disagreed about what identifies an account would produce accounts that only one of them could
+    later find.
+    """
+    auth_request = _pop_local_auth_request(body.oauth_state)
+
+    # The same 404 `/auth/password/register` gives. A disabled method reachable through a second
+    # URL is not disabled.
+    if not platform_settings.get_bool("auth.password.enabled", True):
+        raise HTTPException(status_code=404, detail="Password auth is disabled")
+
+    email = (body.email or "").strip().lower()
+    password = body.password or ""
+    if not email or "@" not in email:
+        raise HTTPException(status_code=400, detail="Enter a valid email address")
+    min_len = platform_settings.get_int("auth.password.min_length", 12)
+    if len(password) < min_len:
+        raise HTTPException(
+            status_code=400, detail=f"Password must be at least {min_len} characters"
+        )
+
+    verify_required = email_verification_required(email)
+    try:
+        person = person_service.create_user_with_password(
+            db,
+            username=email,
+            name=email.split("@")[0],
+            password_hash=hash_password(password),
+            email=email,
+            email_verified=not verify_required,
+        )
+        db.commit()
+    except PermissionError as exc:
+        db.rollback()
+        raise HTTPException(status_code=403, detail=str(exc))
+    except ValueError as exc:
+        db.rollback()
+        # Deliberately not "that address is already registered". This endpoint is reachable
+        # without a session, so a message that distinguished a taken address from a rejected one
+        # would be an account-enumeration oracle — the same property `/auth/authorize/otp/request`
+        # is written to preserve two functions above.
+        logger.info("local-authorize registration failed (%s)", exc)
+        raise HTTPException(status_code=400, detail="Registration failed")
+
+    # Verification required: the account exists but the mailbox is not proved, so the flow stops
+    # here rather than minting a code. `_pop_local_auth_request` reads without popping, so the
+    # pending request survives and the person can sign in on this same page after confirming.
+    if verify_required:
+        _queue_verification_email(background_tasks, person)
+        return {"verification_required": True, "email": person.email}
+
+    from origin.services.auth_service import is_person_allowed
+
+    # The same admission gate the password, OTP and federated legs apply. Creating an account
+    # proves an address, not that this authority admits its holder.
+    if not is_person_allowed(None, person.email or ""):
+        raise HTTPException(status_code=403, detail="User not allowed")
+
+    background_tasks.add_task(
+        person_service.record_person_event,
+        {"sub": str(person.id), "email": person.email, "name": person.name},
+        "password_register",
+    )
     return _complete_local_signin(db, body.oauth_state, auth_request, person)
 
 
