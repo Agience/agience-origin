@@ -60,6 +60,13 @@ PUBLIC = {
     ("POST", "/auth/authorize/otp/request"): _PREAUTH,
     ("POST", "/auth/authorize/otp/verify"): _PREAUTH,
     ("POST", "/auth/authorize/password"): _PREAUTH,
+    # Registration inside a sign-in already in flight. Pre-auth for the plainest reason there is:
+    # the caller is creating the account, so there is no token they could hold. It is the sibling
+    # of the `password` and `otp` legs above and ends at the same `_complete_local_signin`; the
+    # account-creation gates it must not skip (`auth.password.enabled`, the allow-lists, email
+    # verification) are asserted in `test_authorize_local_methods.py`, not here — this file asks
+    # only whether authentication is required, and here it cannot be.
+    ("POST", "/auth/authorize/register"): _PREAUTH + " — creating the account IS the request",
     ("GET", "/auth/callback"): _PREAUTH + " — the redirect target, by definition pre-auth",
     ("GET", "/auth/providers"): _PREAUTH + " — which providers exist, to render the login page",
     ("POST", "/auth/token"): _PREAUTH + " — the token endpoint IS the thing being obtained",

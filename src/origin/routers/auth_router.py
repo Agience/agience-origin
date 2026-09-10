@@ -632,6 +632,10 @@ _LOCAL_LOGIN_PAGE = """<!doctype html><html lang="en"><head>
 <div class="card">
   <img class="logo" src="/web/logo_v.png" alt="Agience">
   <h1>Welcome, let's get you signed in</h1>
+  <div class="beta"><strong>This is beta.</strong> Expect bugs and things not to work. We welcome
+    any feedback to <a href="mailto:connect@agience.ai">connect@agience.ai</a> &mdash; and you are
+    encouraged to contribute as a dev at
+    <a href="https://github.com/Agience" target="_blank" rel="noopener noreferrer">github.com/Agience</a>.</div>
 __PROVIDERS__
 __PASSWORD__
 __OTP__

@@ -6,9 +6,34 @@
 <div class="card">
   <img class="logo" src="/web/logo_v.png" alt="Agience">
 
+  <!-- Above the panels, not inside one: it applies to signing in, creating an account and the
+       emailed code alike, and repeating it three times would read as an error rather than as
+       context. -->
+  <div class="beta"><strong>This is beta.</strong> Expect bugs and things not to work. We welcome
+    any feedback to <a href="mailto:connect@agience.ai">connect@agience.ai</a> &mdash; and you are
+    encouraged to contribute as a dev at
+    <a href="https://github.com/Agience" target="_blank" rel="noopener noreferrer">github.com/Agience</a>.</div>
+
   <!-- LOGIN -->
   <div id="login">
     <h1>Welcome, let's get you signed in</h1>
+
+    <!-- Federated sign-in. Empty until `/auth/providers` answers, and it stays empty on a node
+         with none configured — the same rule the OTP block below follows, that a method is
+         rendered only once it is known to work.
+
+         This existed ONLY on the `/auth/authorize` chooser, so a visitor arriving at
+         origin.agience.ai directly saw password-and-OTP while someone sent here by a service
+         provider saw Google as well. That is the identical bug the OTP comment below describes,
+         with a different method: one authority must not offer different sets of sign-in methods
+         depending on which door you came through.
+
+         ⚠ These buttons DO NOT use this page's implicit flow. They start authorization-code +
+         PKCE at `/auth/authorize`, because federation cannot be done any other way — see
+         `startFederated` in the script. -->
+    <div id="providers"></div>
+    <div class="sep hidden" id="provSep">or</div>
+
     <form id="loginForm">
       <label for="identifier">Email or username</label>
       <input id="identifier" type="text" autocomplete="username" required>
@@ -19,7 +44,35 @@
       </div>
       <button class="primary" type="submit" id="loginBtn">Sign in</button>
     </form>
+    <div class="row"><button class="link" type="button" id="otpToggle">Email me a code instead</button></div>
     <div class="row"><button class="link" id="toRegister">No account yet? Create one</button></div>
+  </div>
+
+  <!-- OTP — the same method the /auth/authorize chooser offers, on this page too.
+       It was only ever on the chooser, so anyone arriving at origin.agience.ai directly saw
+       password-or-nothing while a service provider's visitors saw both. One authority offering
+       two different sets of sign-in methods depending on which door you came through is a bug,
+       not a design.
+       These are the STANDALONE endpoints (`/auth/otp/*`), which mint a token directly, because
+       this page holds a session. The chooser posts to `/auth/authorize/otp/*` instead, which
+       mints an authorization code — different grant, same proof. -->
+  <div id="otp" class="hidden">
+    <h1>Sign in with a code</h1>
+    <div id="otpStep1">
+      <form id="otpSendForm">
+        <label for="otpEmail">Email</label>
+        <input id="otpEmail" type="email" autocomplete="email" required placeholder="you@example.com">
+        <button class="primary" type="submit" id="otpSend">Send code</button>
+      </form>
+    </div>
+    <div id="otpStep2" class="hidden">
+      <form id="otpCodeForm">
+        <label for="otpCode">Code</label>
+        <input id="otpCode" inputmode="numeric" autocomplete="one-time-code" required placeholder="6 digits">
+        <button class="primary" type="submit" id="otpVerify">Sign in</button>
+      </form>
+    </div>
+    <div class="row"><button class="link" type="button" id="otpBack">Use a password instead</button></div>
   </div>
 
   <!-- REGISTER -->
@@ -44,8 +97,10 @@
 <script src="/web/bg.js"></script>
 <script src="/web/app.js"></script>
 <script>
-// already signed in? go to account (unless an SP is waiting for a token)
-if (isAuthed() && !qs("redirect_uri")) location.replace("/account");
+// already signed in? go to account (unless an SP is waiting for a token, or we are mid-handshake:
+// a federated return carries `?code=` and must be exchanged even when a stale token is present,
+// or the person who just chose an account lands back on the old one)
+if (isAuthed() && !qs("redirect_uri") && !qs("code") && !qs("error")) location.replace("/account");
 
 const $ = (s) => document.querySelector(s);
 const msg = $("#msg");
@@ -53,10 +108,178 @@ function show(t, cls) { msg.className = "msg " + (cls || "muted"); msg.textConte
 function swap(to) {
   $("#login").classList.toggle("hidden", to !== "login");
   $("#register").classList.toggle("hidden", to !== "register");
+  $("#otp").classList.toggle("hidden", to !== "otp");
   show("");
 }
 $("#toRegister").onclick = () => swap("register");
 $("#toLogin").onclick = () => swap("login");
+
+// ── Federated sign-in ────────────────────────────────────────────────────────────────────────
+// Authorization code + PKCE, not this page's implicit flow: an upstream IdP returns a code to a
+// registered redirect, so there is no implicit path to take even if one were wanted.
+//
+// ⛔ THE SERVICE-PROVIDER HANDOFF MUST SURVIVE THE ROUND TRIP. When an SP sends someone here it
+// passes `?redirect_uri=…&state=…`, and `finishLogin` reads those from `location.search` to hand
+// the token back. Google's return replaces that query string with `?code=…`, so both are gone by
+// the time the token exists — the person signs in successfully and lands on `/account` instead of
+// the app that sent them, which reads exactly like being kicked out after logging in. They are
+// stashed before the redirect and restored onto the URL afterwards, so `finishLogin` sees what it
+// would have seen had the round trip never happened.
+const FED_KEY = "agience.fed";
+const CLIENT_ID = "platform";
+const FED_REDIRECT = location.origin + "/";
+
+function b64url(bytes) {
+  return btoa(String.fromCharCode(...new Uint8Array(bytes)))
+    .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+async function startFederated(name) {
+  const v = new Uint8Array(32); crypto.getRandomValues(v);
+  const verifier = b64url(v);
+  const challenge = b64url(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier)));
+  // sessionStorage, not localStorage: this is dead the moment the handshake ends, and a verifier
+  // left behind in a shared browser is a replayable half of someone else's sign-in.
+  sessionStorage.setItem(FED_KEY, JSON.stringify({
+    v: verifier, rd: qs("redirect_uri") || "", st: qs("state") || "",
+  }));
+  const p = new URLSearchParams({
+    response_type: "code", client_id: CLIENT_ID, redirect_uri: FED_REDIRECT,
+    scope: "openid email profile", provider: name,
+    state: b64url(crypto.getRandomValues(new Uint8Array(16))),
+    code_challenge: challenge, code_challenge_method: "S256",
+  });
+  location.assign("/auth/authorize?" + p.toString());
+}
+
+async function completeFederated(code) {
+  let saved = null;
+  try { saved = JSON.parse(sessionStorage.getItem(FED_KEY) || "null"); } catch (e) { saved = null; }
+  sessionStorage.removeItem(FED_KEY);
+  if (!saved || !saved.v) {
+    // No verifier means this tab did not start the handshake — a bookmarked callback URL, or a
+    // code pasted in. There is nothing to exchange it with, and saying so is better than a 400.
+    show("That sign-in link has expired. Please try again.", "err");
+    history.replaceState(null, "", location.pathname);
+    return;
+  }
+  show("Signing you in…");
+  // ⚠ FORM-ENCODED, NOT JSON. `/auth/token` declares its parameters as `Form(...)` — it is the
+  // RFC 6749 token endpoint and takes `application/x-www-form-urlencoded`. The shared `post()`
+  // helper sends JSON, which this endpoint answers 422 to, so it is deliberately not used here.
+  const r = await (async () => {
+    try {
+      const res = await fetch("/auth/token", {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          grant_type: "authorization_code", code: code,
+          redirect_uri: FED_REDIRECT, client_id: CLIENT_ID, code_verifier: saved.v,
+        }).toString(),
+      });
+      let data = {};
+      try { data = await res.json(); } catch (e) { /* empty body */ }
+      return { ok: res.ok, status: res.status, data, detail: (data && data.detail) || null };
+    } catch (e) {
+      return { ok: false, status: 0, data: {}, detail: "Network error" };
+    }
+  })();
+  if (r.ok && r.data && r.data.access_token) {
+    // Restore what the SP sent before handing off, so the audited handoff in `finishLogin` is
+    // reused rather than reimplemented here — one copy of the allow-list check, not two.
+    const url = new URL(location.href);
+    url.search = "";
+    if (saved.rd) url.searchParams.set("redirect_uri", saved.rd);
+    if (saved.st) url.searchParams.set("state", saved.st);
+    history.replaceState(null, "", url.toString());
+    show("Signed in ✓", "ok");
+    finishLogin(r.data.access_token);
+    return;
+  }
+  show(r.detail || ("Sign-in failed (" + r.status + ")"), "err");
+  history.replaceState(null, "", location.pathname);
+}
+
+const GOOGLE_MARK = '<svg viewBox="0 0 48 48" aria-hidden="true">'
+  + '<path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"/>'
+  + '<path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"/>'
+  + '<path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"/>'
+  + '<path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"/>'
+  + "</svg>";
+
+async function renderProviders() {
+  let r;
+  try { r = await fetch("/auth/providers", { headers: { Accept: "application/json" } }); }
+  catch (e) { return; }               // offline: the password form still works, so say nothing
+  if (!r.ok) return;
+  let d; try { d = await r.json(); } catch (e) { return; }
+  const list = (d && d.providers) || [];
+  if (!list.length) return;           // none configured — render nothing, not an empty divider
+  const box = $("#providers");
+  for (const p of list) {
+    const b = document.createElement("button");
+    b.type = "button"; b.className = "provider";
+    if (p.name === "google") b.innerHTML = GOOGLE_MARK;
+    // textContent, never innerHTML: the label is operator configuration (`CUSTOM_OIDC_NAME`),
+    // which the settings endpoint can set — the same reason the server-side chooser escapes it.
+    b.appendChild(document.createTextNode("Continue with " + (p.label || p.name)));
+    b.onclick = () => { b.disabled = true; startFederated(p.name); };
+    box.appendChild(b);
+  }
+  $("#provSep").classList.remove("hidden");
+}
+
+
+if (qs("error")) {
+  show(qs("error_description") || ("Sign-in was refused (" + qs("error") + ")"), "err");
+  history.replaceState(null, "", location.pathname);
+  renderProviders();
+} else if (qs("code")) {
+  completeFederated(qs("code"));
+} else {
+  renderProviders();
+}
+
+// OTP
+$("#otpToggle").onclick = () => { swap("otp"); $("#otpEmail").focus(); };
+$("#otpBack").onclick = () => {
+  swap("login");
+  $("#otpStep1").classList.remove("hidden");
+  $("#otpStep2").classList.add("hidden");
+};
+$("#otpSendForm").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const b = $("#otpSend"); b.disabled = true; show("Sending…");
+  const r = await post("/auth/otp/request", { email: $("#otpEmail").value.trim().toLowerCase() });
+  if (r.ok) {
+    $("#otpStep1").classList.add("hidden");
+    $("#otpStep2").classList.remove("hidden");
+    $("#otpCode").focus();
+    // Said the same way whether or not the account exists. The endpoint answers `sent` for an
+    // unknown address on purpose, so that it is not an account-enumeration oracle, and this text
+    // must not give away what the API declines to.
+    show("If that address has an account, a code is on its way.", "muted");
+  } else if (r.status === 503) {
+    show("Email sign-in isn't available on this node — use a password.", "err");
+  } else if (r.status === 429) {
+    show(r.detail || "Too many attempts. Try again in a few minutes.", "err");
+  } else {
+    show(r.detail || ("Could not send a code (" + r.status + ")"), "err");
+  }
+  b.disabled = false;
+});
+$("#otpCodeForm").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const b = $("#otpVerify"); b.disabled = true; show("Checking…");
+  const r = await post("/auth/otp/verify", {
+    email: $("#otpEmail").value.trim().toLowerCase(),
+    code: $("#otpCode").value.trim(),
+  });
+  if (r.ok && r.data.access_token) { show("Signed in ✓", "ok"); finishLogin(r.data.access_token); return; }
+  show(r.status === 401 ? "That code isn't right, or it has expired."
+                        : (r.detail || ("Sign-in failed (" + r.status + ")")), "err");
+  b.disabled = false;
+});
 
 // password generator
 $("#genPw").onclick = () => {

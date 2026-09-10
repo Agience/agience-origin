@@ -42,6 +42,7 @@ from origin.routers.system_router import system_router
 from origin.routers.server_credentials_router import router as server_credentials_router
 from origin.routers.setup_router import setup_router
 from origin.routers.oracle_router import oracle_router
+from origin.services import account_notify
 from origin.services import manifest as manifest_loader
 from origin.services.oidc_providers import reload_oauth_providers
 from origin.services.platform_settings_service import settings as platform_settings
@@ -151,7 +152,31 @@ def _run_migrations() -> None:
     cfg.set_main_option("script_location", str(here / "alembic"))
     cfg.set_main_option("sqlalchemy.url", build_database_url())
     logger.info("Origin: running alembic upgrade to head")
-    command.upgrade(cfg, "head")
+
+    # ⛔ ALEMBIC RECONFIGURES LOGGING FOR THE WHOLE PROCESS, AND IT SILENCES US.
+    # `alembic/env.py` calls `fileConfig(alembic.ini)` at import, and that file declares
+    # `[logger_root] level = WARN` with its own console handler. Run from the CLI that is right.
+    # Run in-process at boot it is not: from this line onward every `logger.info` in Origin was
+    # dropped, because `agience.origin` has no explicit level and inherits root.
+    #
+    # Measured 2026-09-10: "Origin: ready (kid=…, providers=…)" — the line that says startup
+    # finished — has never appeared in the journal on this deployment, and neither did the
+    # account-notification startup line. Only WARNING and above survived, which is exactly the
+    # arrangement where a thing that quietly stops working looks identical to one that works.
+    #
+    # `disable_existing_loggers=False` in `env.py` does not help: it keeps loggers enabled, it
+    # does not preserve the root LEVEL or the handlers that were there before.
+    #
+    # So the level and handlers are captured here and put back afterwards. Alembic keeps its own
+    # behaviour for the duration of the upgrade (its INFO lines still print), and Origin keeps
+    # its logging for the rest of the process.
+    root = logging.getLogger()
+    saved_level, saved_handlers = root.level, list(root.handlers)
+    try:
+        command.upgrade(cfg, "head")
+    finally:
+        root.setLevel(saved_level)
+        root.handlers[:] = saved_handlers
 
 
 # ---------------------------------------------------------------------------
@@ -347,6 +372,10 @@ async def lifespan(app: FastAPI):
                 session.commit()
                 # Re-load cache so downstream code sees manifest-applied values.
                 platform_settings.load_all(session)
+        # Account-created notifications. Installed AFTER the migrations, because it binds a
+        # listener to the Person mapper, and before the app serves, because an account can be
+        # created by the first request. A no-op unless ACCOUNT_NOTIFY_TO is set.
+        account_notify.install()
         _apply_db_settings_to_config()
     reload_oauth_providers()
 

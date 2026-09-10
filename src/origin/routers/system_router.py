@@ -21,6 +21,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
+from origin import config
 from origin.db.session import get_db
 from origin.services.dependencies import AuthContext, get_auth
 from origin.services.platform_settings_service import (
@@ -52,9 +53,41 @@ class UpdateSettingsResponse(BaseModel):
     restart_required: bool = False
 
 
-# Empty on purpose: no current setting requires a restart. Declared here as the home for any
-# future one that does, rather than added ad hoc when the need arises.
-_RESTART_REQUIRED_KEYS: set[str] = set()
+# ⛔ THESE SETTINGS DO REQUIRE A RESTART, and this set was empty while they did.
+#
+# `_apply_db_settings_to_config()` is what copies a stored setting into `config.*`, and
+# `reload_oauth_providers()` is what rebuilds `REGISTERED_PROVIDERS` from `config.*`. Both are
+# called from exactly one place — `main.py`, inside the lifespan. Nothing on this router calls
+# either, so writing `auth.google.client_id` here stores it and changes nothing that is serving:
+# `/auth/providers` still reports `[]` and no button appears.
+#
+# With the set empty the response said `restart_required: false`, which is worse than saying
+# nothing — an operator sets three values, is told no restart is needed, sees no Google button,
+# and has no reason to suspect the write succeeded. Naming the keys is what makes the answer true.
+#
+# ⚠ THE PROVIDER KEYS ARE DERIVED, NOT LISTED. `_SETTING_MAP` is exactly the set
+# `_apply_db_settings_to_config` resolves through `_pref()`, so reading it here cannot drift from
+# what that function reads. A hand-written list here did drift, immediately and silently: it named
+# 13 keys and omitted all four `auth.auth0.*` ones, which would have reported
+# `restart_required: false` on an Auth0 setup that needs a restart exactly as much as Google does.
+# `config.py`'s own comment on that map warns that a second hand-copied list is how one goes stale;
+# this is that second list, so it is not written out.
+_RESTART_REQUIRED_KEYS: set[str] = set(getattr(config, "_SETTING_MAP", {})) | {
+    # The rest of what `_apply_db_settings_to_config` reads. These do NOT go through `_pref`, so
+    # they are not in `_SETTING_MAP` and cannot be derived from it — they are read by name, in that
+    # function, and nowhere else. Changing where Origin thinks its facet lives, or who is allowed
+    # to sign in, takes effect on the next boot and not before.
+    #
+    # `tests/test_system_settings_restart.py` parses `main.py` and fails if this set stops matching
+    # what that function actually reads, which is the only thing keeping the two in step.
+    "branding.facet_uri",
+    "branding.facet_uris",
+    "auth.allowed_emails",
+    "auth.allowed_domains",
+    "auth.allowed_google_ids",
+    "auth.email_verification.enabled",
+    "auth.email_verification.allowlist",
+}
 
 
 def _platform_admin_user_id(auth: AuthContext, db: Session) -> str:

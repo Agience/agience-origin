@@ -50,3 +50,13 @@ button.provider:hover { background: #f9fafb; border-color: #9ca3af; }
 button.provider svg { width: 18px; height: 18px; flex: none; }
 .sep { display: flex; align-items: center; gap: 12px; margin: 20px 0 4px; color: #9ca3af; font-size: 12px; }
 .sep::before, .sep::after { content: ""; flex: 1; height: 1px; background: #e5e7eb; }
+
+/* The pre-login beta notice. Muted rather than alarming: it belongs to every panel on the card
+   (sign in, create account, email a code), so it sits once above them rather than being repeated
+   in each — and a warning repeated three times reads as an error rather than as context. */
+.beta { font-size: 12.5px; line-height: 1.5; color: #6b7280; background: #f8f9fb;
+        border: 1px solid #eef0f3; border-left: 3px solid #6366f1; border-radius: 6px;
+        padding: 10px 12px; margin: 0 0 18px; text-align: left; }
+.beta strong { color: #374151; }
+.beta a { color: #6366f1; text-decoration: none; }
+.beta a:hover { text-decoration: underline; }
