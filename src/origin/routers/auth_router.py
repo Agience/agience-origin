@@ -641,7 +641,7 @@ __PASSWORD__
 __OTP__
 __REGISTER__
   <div class="msg" id="msg"></div>
-  <div class="foot"><a href="/terms">Terms</a> · <a href="/privacy">Privacy</a></div>
+  <div class="foot"><a href="https://agience.ai/terms">Terms</a> · <a href="https://agience.ai/privacy">Privacy</a></div>
 </div>
 <script src="/web/bg.js"></script>
 <script>
