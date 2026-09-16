@@ -76,7 +76,16 @@ internal_router = APIRouter(prefix="/internal", tags=["Internal"], include_in_sc
 #: merged additively by the installer on upgrade. Deriving from it would silently promote every
 #: future anchor to a reader of every person's PII — authentication standing in for authorization,
 #: which is the substitution this whole function exists to refuse.
-_PLATFORM_SERVICES = frozenset({"mantle", "chorus", "crystal", "lumen"})
+#: ⭐ `crystal` AND `lumen` REMOVED [2026-09-16]. This is the trust decision, so a name here is a
+#: grant: `_require_platform_server` admits it to five endpoints that read person records. Neither
+#: name could ever authenticate — `iss` comes from `init_service_identity(<name>)` and nothing in
+#: the platform initialises either — so both were grants to principals that do not exist. That is
+#: not harmless: it is a standing authorisation waiting for someone to mint the matching key, and
+#: `gen_service_key.py` still offers to mint exactly those names.
+#:
+#: The note above about drift with the manifest still holds, and is now the SAFE direction: an
+#: anchor without a name here authenticates and is refused.
+_PLATFORM_SERVICES = frozenset({"mantle", "chorus"})
 
 
 def _require_platform_server(auth: AuthContext) -> None:

@@ -201,7 +201,7 @@ def test_describe_delegation_happy_path(client: TestClient, origin_app):
     import origin.service_identity as ksi
 
     origin_app.dependency_overrides[get_auth] = lambda: AuthContext(
-        principal_id="crystal", principal_type="service", user_id=None,
+        principal_id="chorus", principal_type="service", user_id=None,
     )
     try:
         with patch.object(auth_router.platform_settings, "get", return_value="operator-1"), \
@@ -243,7 +243,7 @@ def test_describe_delegation_409_without_operator(client: TestClient, origin_app
     from origin.services.dependencies import AuthContext, get_auth
 
     origin_app.dependency_overrides[get_auth] = lambda: AuthContext(
-        principal_id="crystal", principal_type="service", user_id=None,
+        principal_id="chorus", principal_type="service", user_id=None,
     )
     try:
         with patch.object(auth_router.platform_settings, "get", return_value=None):

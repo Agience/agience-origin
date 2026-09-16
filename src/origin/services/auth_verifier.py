@@ -19,6 +19,20 @@ from origin.key_manager import get_public_key_pem
 
 JWT_ALGORITHM = "RS256"
 
+#: Service names whose tokens are verified against the authority manifest rather than against
+#: Origin's own key. This answers "CAN this token be verified", which is a different question from
+#: `auth_router._PLATFORM_SERVICES`'s "may this caller read person records" — authentication is not
+#: authorization, and the two lists are deliberately separate so a service can be admitted here
+#: without being granted there.
+#:
+#: They are not independent, though: a name in the authorization list that is absent here can never
+#: authenticate, so its grant is dead. `test_platform_service_lists_agree.py` holds that direction.
+#:
+#: Named rather than inlined so a test can read it. An inline tuple is unreachable from outside this
+#: function, so the relationship above could only ever be asserted by re-typing the names in the
+#: test — a second copy, which is the thing being guarded against.
+PLATFORM_ISSUERS = frozenset({"mantle", "chorus"})
+
 
 def verify_token(token: str, expected_audience: Optional[str] = None) -> Optional[dict[str, Any]]:
     """Verify and decode an incoming JWT.
@@ -37,8 +51,21 @@ def verify_token(token: str, expected_audience: Optional[str] = None) -> Optiona
 
     iss = unverified.get("iss", "")
 
-    # Platform-service mutual JWT
-    if iss in ("mantle", "chorus", "crystal", "lumen"):
+    # Platform-service mutual JWT.
+    #
+    # ⭐ TWO NAMES, NOT FOUR [2026-09-16]. `crystal` and `lumen` were listed here and could never
+    # arrive: `iss` is `identity.name` from `prism.trust.service_identity`, set by
+    # `init_service_identity(<name>)` at lifespan startup, and NOTHING in this platform calls it
+    # with either name — only `"origin"` (origin/main.py) and `"chorus"` (five sites in chorus).
+    # Crystal's own process loads a `CrystalIdentity` and reaches mantle with `MANTLE_API_KEY`
+    # instead; the `sign_service_jwt` calls that live in the crystal REPOSITORY are chorus-host
+    # code (`crystal/push.py` calls `init_service_identity("chorus")` itself), so they sign as
+    # chorus. A repository path is not a runtime identity.
+    #
+    # Listing a name that cannot be produced costs nothing at runtime and is not free: it reads as
+    # "this authority accepts crystal tokens", which is what `_PLATFORM_SERVICES` in
+    # `auth_router.py` then grants five internal endpoints to.
+    if iss in PLATFORM_ISSUERS:
         from origin.authority_trust import verify_jwt as _verify_via_authority
         from jose.exceptions import JWTError as _JoseJWTError
 

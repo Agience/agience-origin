@@ -71,8 +71,21 @@ class TestPersonLookupNamesTheService:
         return 200, None
 
     def test_an_enrolled_platform_service_passes(self):
-        """Positive control — the guard is not simply refusing everything."""
-        for name in ("mantle", "chorus", "crystal"):
+        """Positive control — the guard is not simply refusing everything.
+
+        The names here are the ones a running process can actually present. `crystal` was in this
+        list and is not a platform caller: `iss` comes from `init_service_identity(<name>)` and
+        nothing initialises that name, so this control was asserting a grant to a principal that
+        cannot exist. Removed 2026-09-16 with the grant itself.
+        """
+        from origin.routers.auth_router import _PLATFORM_SERVICES
+
+        # Driven from the list under test so it cannot drift out of date — and asserted non-empty
+        # first, because an emptied list would make the loop below run zero times and this control
+        # would report success having checked nothing.
+        assert _PLATFORM_SERVICES, "no platform services declared — this control would be vacuous"
+
+        for name in sorted(_PLATFORM_SERVICES):
             status, _ = self._call_guard(
                 self._ctx(principal_id=name, principal_type="service")
             )
@@ -104,23 +117,67 @@ class TestPersonLookupNamesTheService:
         assert status == 403
 
     def test_the_allowlist_matches_the_issuers_the_verifier_will_accept(self):
-        """The guard's list and `verify_token`'s dispatch tuple are one decision in two places.
+        """The guard's list and `verify_token`'s dispatch set are one decision in two places.
 
         Drift is fail-closed either way, but a name in only one of them produces a 401/403 that
         looks like a bug in the caller rather than an incomplete enrolment here.
+
+        ⚠ READ AS A VALUE, NOT PARSED OUT OF THE SOURCE. This used to `inspect.getsource` the
+        function and scrape the names out of an `if iss in (...)` literal, which coupled the test
+        to one spelling of that line: naming the set `PLATFORM_ISSUERS` — the ordinary way to make
+        it readable from a test — broke the scrape, and the failure was reported as a drifted
+        allowlist rather than as a test that could no longer find its subject. A test that reads a
+        constant cannot fail that way.
         """
         from origin.routers.auth_router import _PLATFORM_SERVICES
-        from origin.services import auth_verifier
+        from origin.services.auth_verifier import PLATFORM_ISSUERS
 
-        src = inspect.getsource(auth_verifier.verify_token)
-        line = next(ln for ln in src.splitlines() if "if iss in (" in ln)
-        verifier_names = set(
-            n.strip().strip("\"'") for n in line.split("(", 1)[1].rstrip("):").split(",") if n.strip()
-        )
-        assert verifier_names == set(_PLATFORM_SERVICES), (
-            f"verify_token accepts {sorted(verifier_names)} but the /internal guard allows "
+        assert set(PLATFORM_ISSUERS) == set(_PLATFORM_SERVICES), (
+            f"verify_token accepts {sorted(PLATFORM_ISSUERS)} but the /internal guard allows "
             f"{sorted(_PLATFORM_SERVICES)}"
         )
+
+    def test_neither_service_list_is_empty(self):
+        """Equality above is satisfied by two EMPTY sets, which would be a silent pass.
+
+        An empty `_PLATFORM_SERVICES` also turns the positive control above into a zero-iteration
+        loop, so emptiness has to fail here rather than be discovered as green.
+        """
+        from origin.routers.auth_router import _PLATFORM_SERVICES
+        from origin.services.auth_verifier import PLATFORM_ISSUERS
+
+        assert PLATFORM_ISSUERS, "no platform issuers — the equality check above is vacuous"
+        assert _PLATFORM_SERVICES, "no platform services — the equality check above is vacuous"
+
+    def test_the_retired_service_names_have_not_returned(self):
+        """`crystal` and `lumen` are not service identities and must not reappear in either list.
+
+        Named explicitly rather than left to the equality rule, because adding them to BOTH lists
+        satisfies every other assertion here while restoring exactly the defect that was removed —
+        and matching one list to the other is precisely how someone would reintroduce them.
+
+        Removed 2026-09-16. Neither can be produced: `iss` is `identity.name` from
+        `prism.trust.service_identity`, set by `init_service_identity(<name>)` at lifespan startup,
+        and the only names ever passed to it anywhere in the platform are `"origin"` and
+        `"chorus"`. Crystal's process loads a `CrystalIdentity` and reaches mantle with
+        `MANTLE_API_KEY`; the `sign_service_jwt` calls that live in the crystal REPOSITORY are
+        chorus-host code (`crystal/push.py` calls `init_service_identity("chorus")` itself). A
+        repository path is not a runtime identity, and reading one for the other is how two grants
+        to non-existent principals survived.
+
+        If either becomes a real signing service, the change that makes it one adds an
+        `init_service_identity` call — and that is the change that may delete its line here.
+        """
+        from origin.routers.auth_router import _PLATFORM_SERVICES
+        from origin.services.auth_verifier import PLATFORM_ISSUERS
+
+        for name in ("crystal", "lumen"):
+            assert name not in PLATFORM_ISSUERS, (
+                f"{name!r} is back in PLATFORM_ISSUERS — nothing calls "
+                f"init_service_identity({name!r}), so it cannot sign a verifiable token.")
+            assert name not in _PLATFORM_SERVICES, (
+                f"{name!r} is back in _PLATFORM_SERVICES — a person-record grant to a principal "
+                f"that cannot exist.")
 
     def test_the_allowlist_is_not_derived_from_the_trust_anchors(self):
         """Authentication must not stand in for authorization.
