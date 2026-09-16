@@ -65,8 +65,8 @@ def _describe(person: Any) -> tuple[str, str]:
         f"username  : {username}",
         f"name      : {name}",
         # Said plainly because it is the one field that decides whether this is a person or a
-        # throwaway: `.invalid` addresses are auto-verified by the allowlist and cannot receive
-        # mail, so "verified" alone would be misleading for them.
+        # throwaway. An address on a reserved TLD cannot receive mail, so a verified flag on one
+        # records that verification was not required, never that anyone was reached.
         f"verified  : {verified}",
         f"created   : {created}",
         f"id        : {getattr(person, 'id', '')}",

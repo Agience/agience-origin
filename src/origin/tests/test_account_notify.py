@@ -1,13 +1,14 @@
 """The account-created notification goes to the operator, and to nobody else.
 
-⛔ THE FIRST TEST IS THE ONE THAT MATTERS AND IT IS A NEGATIVE.
-This notification carries a new account's address, name and id. Sending it to the person who
-just registered would mail them their own details unprompted, and sending it anywhere derived
-from their input would let the registering party choose the recipient. The recipient is read from
-`ACCOUNT_NOTIFY_TO` and from nowhere else, and that is pinned here rather than left to reading.
+The first test is the one that matters, and it is a negative. This notification carries a new
+account's address, name and id. Sending it to the person who just registered would mail them their
+own details unprompted, and sending it anywhere derived from their input would let the registering
+party choose the recipient. The recipient is read from `ACCOUNT_NOTIFY_TO` and from nowhere else,
+and that is pinned here rather than left to reading.
 
-The rest pin the properties that keep it from touching a registration: it fires once per
-COMMITTED insert, never on a rollback, and a send failure is swallowed.
+The rest pin what this module decides in isolation: which addresses are announced, how a person is
+described, and that a send failure is swallowed. The commit-versus-rollback behaviour lives in the
+listeners `install()` wires, which no test here drives.
 """
 from __future__ import annotations
 
@@ -21,19 +22,18 @@ from origin.services import account_notify
 def _install(monkeypatch, fake):
     """Put `fake` where `account_notify._send` will actually find it.
 
-    ⛔ PATCHING `sys.modules` ALONE IS NOT ENOUGH, and the failure is order-dependent, which is
-    the worst kind. `_send` does `from origin.services import email_service` — that reads the
-    `email_service` ATTRIBUTE off the already-imported `origin.services` package, and the import
-    machinery only consults `sys.modules` while that attribute does not yet exist.
+    Patching `sys.modules` alone is not enough, and what it leaves behind is order-dependent.
+    `_send` does `from origin.services import email_service`, which reads the `email_service`
+    attribute off the already-imported `origin.services` package; the import machinery consults
+    `sys.modules` only while that attribute does not yet exist.
 
     Run this file alone and nothing has imported the real module, so the `sys.modules` entry is
     what gets bound and the fake is used. Run the whole suite and some earlier test has imported
     it, the attribute is set, the real `email_service` is returned, `is_configured()` is False on
-    a test box, `_send` returns without sending, and the capture dict stays empty.
-
-    That is what happened: these two tests passed alone and failed in the suite. They are the ones
-    asserting a new account is never mailed its own details — a guard that only holds when run in
-    isolation is not a guard. Both bindings are patched, so neither import order can bypass it.
+    a test box, `_send` returns without sending, and the capture dict stays empty — the tests
+    asserting that a new account is never mailed its own details would then hold only in
+    isolation, which is not a guard at all. Both bindings are patched, so no import order can
+    bypass the fake.
     """
     import sys
 
@@ -79,12 +79,12 @@ def test_it_never_mails_the_person_who_registered(monkeypatch):
 def test_the_recipient_cannot_be_chosen_by_the_registering_party(monkeypatch):
     """Everything the new account controls — address, name, username — must not steer delivery."""
     monkeypatch.setenv("ACCOUNT_NOTIFY_TO", "connect@agience.ai")
-    # A DELIVERABLE domain, deliberately. `evil.example` used to be the address here, and once
-    # `_is_probe` began filtering RFC 2606 reserved TLDs this test started passing vacuously — no
-    # mail was sent at all, so "the recipient was not steered" became true for the wrong reason.
-    # The property under test is that nothing the registrant controls chooses the recipient, and
-    # that has to be checked on a registration the notifier actually acts on.
-    hostile = _Person(email="attacker@evil-domain.com")
+    # A deliverable domain, deliberately. `_is_probe` filters RFC 2606 reserved TLDs, so a hostile
+    # address on one of those (`evil.example`, say) sends no mail at all and "the recipient was not
+    # steered" holds for the wrong reason. The property under test is that nothing the registrant
+    # controls chooses the recipient, and that has to be checked on a registration the notifier
+    # actually acts on.
+    hostile = _Person(email="attacker@evil.example.com")
     hostile.name = "connect@agience.ai"
     hostile.username = "someone-else@elsewhere.example"
 
@@ -142,8 +142,9 @@ def test_the_body_names_the_account_and_its_verified_state(monkeypatch):
     subject, body = account_notify._describe(_Person(email="someone@example.com"))
     assert "someone@example.com" in subject
     assert "someone@example.com" in body
-    # `verified` decides whether this is a person or a throwaway — an `.invalid` address is
-    # auto-verified by the allowlist and can never receive mail.
+    # `verified` decides whether this is a person or a throwaway, and it is the field a reader
+    # needs: an address on a reserved TLD can never receive mail, so a verified flag on one says
+    # nothing about a person having been reached.
     assert "verified" in body
 
 
@@ -167,7 +168,7 @@ def test_a_reserved_tld_address_is_not_announced(monkeypatch):
 
 
 def test_a_real_address_is_still_announced(monkeypatch):
-    """⛔ THE GUARD ON THE GUARD. Without this, `_is_probe` returning True for everything would
+    """The guard on the guard. Without this, `_is_probe` returning True for everything would
     silence the notifier entirely and every other test in this file would still pass."""
     monkeypatch.setenv("ACCOUNT_NOTIFY_TO", "connect@agience.ai")
     sent = {}
@@ -179,13 +180,17 @@ def test_a_real_address_is_still_announced(monkeypatch):
     fake = types.SimpleNamespace(is_configured=lambda: True, send_email=_capture)
     _install(monkeypatch, fake)
 
-    account_notify._send(_Person(email="a.real.person@gmail.com"))
+    account_notify._send(_Person(email="a.real.person@example.com"))
     assert sent.get("to") == "connect@agience.ai"
 
 
 def test_the_filter_does_not_match_a_lookalike_domain():
-    """`invalid.com` is a real, buyable domain. Matching on the substring rather than the TLD
-    would silence it."""
-    assert not account_notify._is_probe(_Person(email="someone@invalid.com"))
+    """A domain whose name contains a reserved word but whose TLD is not reserved.
+
+    `_is_probe` matches on the TLD, not on a substring. `invalid.example.com` ends in `.com`,
+    so it is a real address that must be notified — while carrying both `invalid` and
+    `.example` inside the name, which is exactly what a substring check would trip on.
+    The fixture sits under `example.com`, itself reserved, never on a buyable domain."""
+    assert not account_notify._is_probe(_Person(email="someone@invalid.example.com"))
     assert not account_notify._is_probe(_Person(email="test@example.com"))
     assert account_notify._is_probe(_Person(email="x@example.invalid"))

@@ -327,7 +327,7 @@ class TestPasswordRegister:
         ):
             resp = anon_client.post(
                 "/auth/password/register",
-                json={"username": "alice", "password": "p" * 12, "email": "a@b.co"},
+                json={"username": "alice", "password": "p" * 12, "email": "a@example.com"},
             )
         assert resp.status_code == 200
         body = resp.json()
@@ -933,23 +933,23 @@ class TestEmailVerificationRequiredHelper:
 
     def test_disabled_returns_false(self, monkeypatch):
         svc = self._set(monkeypatch, enabled=False, allowlist=[])
-        assert svc.email_verification_required("a@b.com") is False
+        assert svc.email_verification_required("a@example.net") is False
 
     def test_enabled_no_allowlist_requires(self, monkeypatch):
         svc = self._set(monkeypatch, enabled=True, allowlist=[])
-        assert svc.email_verification_required("a@b.com") is True
+        assert svc.email_verification_required("a@example.net") is True
 
     def test_allowlisted_email_skips(self, monkeypatch):
-        svc = self._set(monkeypatch, enabled=True, allowlist=["a@b.com"])
-        assert svc.email_verification_required("A@B.com") is False
+        svc = self._set(monkeypatch, enabled=True, allowlist=["a@example.net"])
+        assert svc.email_verification_required("A@Example.net") is False
 
     def test_allowlisted_domain_skips(self, monkeypatch):
-        svc = self._set(monkeypatch, enabled=True, allowlist=["b.com"])
-        assert svc.email_verification_required("x@b.com") is False
+        svc = self._set(monkeypatch, enabled=True, allowlist=["example.net"])
+        assert svc.email_verification_required("x@example.net") is False
 
     def test_non_allowlisted_requires(self, monkeypatch):
-        svc = self._set(monkeypatch, enabled=True, allowlist=["b.com"])
-        assert svc.email_verification_required("x@evil.com") is True
+        svc = self._set(monkeypatch, enabled=True, allowlist=["example.net"])
+        assert svc.email_verification_required("x@evil.example") is True
 
     def test_no_email_not_required(self, monkeypatch):
         svc = self._set(monkeypatch, enabled=True, allowlist=[])

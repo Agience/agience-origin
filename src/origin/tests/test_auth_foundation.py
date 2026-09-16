@@ -180,7 +180,7 @@ def test_is_person_allowed_domain_match(auth_modules):
     cfg.ALLOWED_DOMAINS = ["example.com"]
     cfg.ALLOWED_GOOGLE_IDS = []
     assert auth_service.is_person_allowed(None, "a@example.com")
-    assert not auth_service.is_person_allowed(None, "a@evil.com")
+    assert not auth_service.is_person_allowed(None, "a@evil.example")
 
 
 def test_is_person_allowed_glob_pattern(auth_modules):

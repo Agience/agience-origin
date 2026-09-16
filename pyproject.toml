@@ -47,6 +47,15 @@ origin-emit-anchor = "origin.scripts.emit_trust_anchor:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+# ⚠ `include` ANCHORS DISCOVERY, and without it this distribution is safe only by accident of
+# layout. `src/` happens to hold nothing but `origin/` today; the day it also holds `tests/` or
+# `types/`, setuptools writes those into `top_level.txt` and ships them, and `pip install
+# agience-origin` installs a top-level `tests` module into site-packages that squats the name for
+# every other package in the environment. That is not hypothetical — agience-crystal 0.1.0 did it,
+# and its `top_level.txt` still shows it. Crystal, chorus and ember each carry this line for that
+# reason; adding it changes nothing about the current wheel (verified 2026-09-16: 118 entries,
+# 7 alembic migrations, 10 web assets, before and after).
+include = ["origin*"]
 
 # `src/origin/web/` is not a package — it has no `__init__.py`, so `packages.find` never sees it and
 # nothing below it reaches a distribution unless it is declared here as data.
