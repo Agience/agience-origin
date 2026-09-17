@@ -17,6 +17,55 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi.testclient import TestClient
 
 
+#: Environment variables that carry a REAL platform credential on an operator's machine.
+#:
+#: Derived from the `os.getenv` calls in `services/email_service.py` and `config.py` rather than
+#: remembered — every name here is one the code actually reads, so a test that sets one is asking
+#: about a code path and a test that inherits one is measuring the operator's shell.
+_CREDENTIAL_ENV = (
+    "GMAIL_OAUTH_CLIENT_ID",
+    "GMAIL_OAUTH_CLIENT_SECRET",
+    "GMAIL_OAUTH_REFRESH_TOKEN",
+    "GOOGLE_OAUTH_CLIENT_ID",
+    "GOOGLE_OAUTH_CLIENT_SECRET",
+    "GOOGLE_OAUTH_REFRESH_TOKEN",
+    "EMAIL_PROVIDER",
+    "PLATFORM_EMAIL_ADDRESS",
+    # RFC 7591 §3's initial access token, presented as a bearer credential on dynamic client
+    # registration. A real one exported here would let a registration test authenticate for real.
+    "CLIENT_REGISTRATION_INITIAL_ACCESS_TOKEN",
+)
+
+
+@pytest.fixture(autouse=True)
+def _no_real_credentials_in_the_environment(monkeypatch):
+    """Start every test with the platform credential variables UNSET.
+
+    ⛔ `AGIENCE_NO_DOTENV` ABOVE CLOSES ONE DOOR OF TWO. It stops `origin.config` reading a
+    machine-local `.env`, and its comment says that is so "a machine-local `.env` (real creds) must
+    not leak in". The same credentials exported in the operator's SHELL arrive in `os.environ`
+    before Python starts, where no dotenv switch can reach them.
+
+    Measured 2026-09-16 on the operator's workstation: `GMAIL_OAUTH_CLIENT_ID`,
+    `GMAIL_OAUTH_CLIENT_SECRET` and `GMAIL_OAUTH_REFRESH_TOKEN` were all exported, with
+    `AGIENCE_NO_DOTENV=1` correctly in force. Three tests in `test_email_service.py` failed —
+    `_gmail_config()` returned the real sender's credentials instead of the values the test had
+    just set — and pytest printed the client secret and the refresh token into the failure diff.
+    The tests passed in CI, where no such variables exist, so this could only ever be seen here.
+
+    ⚠ THE PRINTING IS THE SHARP EDGE, NOT THE FAILURE. A red test is recoverable; a red test whose
+    output contains a live OAuth refresh token becomes a credential disclosure the moment anyone
+    pastes it into an issue, a chat, or a CI log. Clearing the variables removes the failure and
+    the disclosure together, because the values never enter the process.
+
+    Autouse and suite-wide rather than local to the email tests: any test that touches config can
+    pick these up, and the next one to do so would rediscover this the same way.
+    """
+    for name in _CREDENTIAL_ENV:
+        monkeypatch.delenv(name, raising=False)
+    yield
+
+
 @pytest.fixture(autouse=True)
 def _reset_password_guess_budget():
     """Give every test a full password guess budget.
