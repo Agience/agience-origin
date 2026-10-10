@@ -67,15 +67,17 @@ def get_latest_valid_for_email(
     ).scalar_one_or_none()
 
 
-def count_recent_issued(db: Session, email: str, since: datetime) -> int:
-    """Codes issued for this email in the window, whatever their attempt count.
+def count_recent_misses(db: Session, email: str, since: datetime) -> int:
+    """Guesses taken against this email's codes issued in the window: every attempt claimed
+    (`claim_attempt`), on every code, used or not.
 
-    Counts every issued row regardless of `attempts`, so a freshly-requested
-    code (attempts = 0) still counts toward the issuance cap.
+    The guess that verified a code is counted too, so one successful sign-in costs one draw. It is
+    not subtracted: `used` also marks a code retired by `supersede_live_for_email`, and a
+    subtraction keyed on it would erase a wrong guess for every replaced code. A code nobody has
+    tried counts nothing.
     """
     return db.execute(
-        select(func.count())
-        .select_from(OtpCode)
+        select(func.coalesce(func.sum(OtpCode.attempts), 0))
         .where(OtpCode.email == email, OtpCode.created_time >= since)
     ).scalar_one()
 
@@ -99,42 +101,49 @@ def supersede_live_for_email(db: Session, email: str, now: datetime | None = Non
     return result.rowcount or 0
 
 
-def increment_attempts(db: Session, otp_id: str | uuid.UUID) -> None:
-    db.execute(
+def claim_attempt(
+    db: Session, otp_id: str | uuid.UUID, max_attempts: int, now: datetime | None = None
+) -> bool:
+    """Spend one attempt on this code if it is still live; True when one was spent.
+
+    One UPDATE conditioned on the code still being live, not a read followed by a write, so
+    verifications of one code arriving together cannot spend more than `max_attempts` between
+    them: once the count reaches the cap, the condition fails for every later one.
+    """
+    cutoff = now or datetime.now(timezone.utc)
+    result = db.execute(
         sa_update(OtpCode)
-        .where(OtpCode.id == _to_uuid(otp_id))
-        .values(attempts=OtpCode.attempts + 1)
-    )
-
-
-def mark_used(db: Session, otp_id: str | uuid.UUID) -> None:
-    db.execute(
-        sa_update(OtpCode).where(OtpCode.id == _to_uuid(otp_id)).values(used=True)
-    )
-
-
-def count_recent_failed(
-    db: Session, email: str, since: datetime, max_attempts: int
-) -> int:
-    return db.execute(
-        select(func.count())
-        .select_from(OtpCode)
         .where(
-            OtpCode.email == email,
-            OtpCode.created_time >= since,
+            OtpCode.id == _to_uuid(otp_id),
             OtpCode.used.is_(False),
-            OtpCode.attempts >= max_attempts,
+            OtpCode.attempts < max_attempts,
+            OtpCode.expires_at > cutoff,
         )
-    ).scalar_one()
+        .values(attempts=OtpCode.attempts + 1)
+        # The condition is decided by the database. Evaluating it again against the code already
+        # loaded in this session would compare a stored naive timestamp with an aware one.
+        .execution_options(synchronize_session=False)
+    )
+    return (result.rowcount or 0) == 1
+
+
+def claim_use(db: Session, otp_id: str | uuid.UUID) -> bool:
+    """Mark this code used if nothing else has; True for the one verification that did."""
+    result = db.execute(
+        sa_update(OtpCode)
+        .where(OtpCode.id == _to_uuid(otp_id), OtpCode.used.is_(False))
+        .values(used=True)
+        .execution_options(synchronize_session=False)
+    )
+    return (result.rowcount or 0) == 1
 
 
 def delete_expired(db: Session, now: datetime | None = None) -> int:
+    """Delete codes that expired more than a day ago. Only by age: a used or superseded code still
+    carries attempts `count_recent_misses` reads, so deleting it early would hand those guesses
+    back."""
     cutoff = (now or datetime.now(timezone.utc)) - timedelta(days=1)
-    result = db.execute(
-        sa_delete(OtpCode).where(
-            (OtpCode.used.is_(True)) | (OtpCode.expires_at <= cutoff)
-        )
-    )
+    result = db.execute(sa_delete(OtpCode).where(OtpCode.expires_at <= cutoff))
     return result.rowcount or 0
 
 

@@ -9,7 +9,8 @@
 
   <div id="details"></div>
 
-  <button class="primary" type="button" id="changePw">Change password</button>
+  <a class="primary hidden" id="continue" href="/">Continue to Agience</a>
+  <div class="row"><button class="link" type="button" id="changePw">Change password</button></div>
   <div class="row"><button class="link" id="signout">Sign out</button></div>
   <div class="msg" id="msg"></div>
 </div>
@@ -31,6 +32,13 @@ const rows = [
 $("#details").innerHTML = rows.map(function(r){
   return '<div class="kv"><span class="k">'+r[0]+'</span><span>'+String(r[1]).replace(/</g,"&lt;")+'</span></div>';
 }).join("");
+
+// The way back to the app: the SP that sent this person here if its return is still stashed,
+// else the app URL Origin is configured with. Hidden when there is neither.
+continueHref().then(function(href){
+  if (!href) return;
+  const a=$("#continue"); a.href=href; a.classList.remove("hidden");
+});
 
 // change password = trigger a reset email to the account's email (needs email on file)
 $("#changePw").addEventListener("click", async ()=>{

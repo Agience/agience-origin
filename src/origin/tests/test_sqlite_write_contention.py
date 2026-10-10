@@ -139,9 +139,9 @@ def test_a_second_writer_waits_instead_of_raising(file_engine, tmp_path):
 
 
 def test_the_timeout_clears_at_least_one_of_the_longest_write_transactions():
-    """Lower bound. `otp_service.request_otp` takes the write lock and then awaits a bcrypt before
-    committing, so the lock is held for a hash rather than for an UPDATE. A timeout under that
-    cannot clear even one writer ahead and buys nothing."""
+    """Lower bound. No write transaction in Origin spans an await, so each holds the lock for a few
+    statements; `_LONGEST_HELD_WRITE_S` is the ceiling one may reach. A timeout under that cannot
+    clear even one writer ahead and buys nothing."""
     assert session_module.sqlite_busy_timeout_ms() / 1000 > session_module._LONGEST_HELD_WRITE_S
 
 

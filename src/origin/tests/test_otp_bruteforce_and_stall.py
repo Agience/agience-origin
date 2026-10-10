@@ -2,10 +2,10 @@
 
 Three properties this pins, covering one route pair:
 
-1. **Issuance is capped.** `count_recent_issued` counts every code issued in the window,
-   including fresh ones with zero attempts. A counter that saw only rows with
-   `attempts >= 3` would leave freshly-requested codes uncounted, letting an attacker draw
-   unboundedly against the 10^6 code space.
+1. **Guessing is capped, requesting is not what is counted.** `count_recent_misses` counts
+   every wrong guess against an address's codes in the window, and a new code is refused once its
+   attempts could carry them past the draw budget. A code nobody guesses at counts nothing, so
+   asking for codes cannot use up the codes the address's owner is due.
 2. **Verification targets exactly one code.** The lookup returns a single row, not a list, so a
    guess is checked against one bcrypt hash rather than every live code.
 3. **The bcrypt comparison runs off the event loop.** `verify_otp` is a coroutine the router
@@ -42,7 +42,8 @@ def db() -> Session:
         yield session
 
 
-def _issue(db: Session, email: str, code: str, *, minutes_ago: int = 0, used: bool = False):
+def _issue(db: Session, email: str, code: str, *, minutes_ago: int = 0, used: bool = False,
+           attempts: int = 0):
     now = datetime.now(timezone.utc) - timedelta(minutes=minutes_ago)
     return db_otp.create(
         db,
@@ -50,7 +51,7 @@ def _issue(db: Session, email: str, code: str, *, minutes_ago: int = 0, used: bo
             "email": email,
             "code_hash": otp_service._hash_code(code),
             "expires_at": now + timedelta(minutes=otp_service._OTP_EXPIRY_MINUTES),
-            "attempts": 0,
+            "attempts": attempts,
             "used": used,
             "created_time": now,
         },
@@ -108,54 +109,68 @@ def test_get_latest_returns_a_single_row_not_a_list(db: Session):
 
 
 # ---------------------------------------------------------------------------
-# 2. Issuance is actually capped
+# 2. Guessing is actually capped
 # ---------------------------------------------------------------------------
 
 
-def test_issuance_counter_counts_fresh_codes(db: Session):
-    """`count_recent_issued` counts codes with attempts < 3, including freshly-issued ones.
+def _since():
+    return datetime.now(timezone.utc) - timedelta(minutes=otp_service._ISSUE_WINDOW_MINUTES)
 
-    `count_recent_failed` counts only codes that have already burned through an attempt, so it
-    returns 0 for a freshly-issued code — issuance is bounded by the counter that sees those.
-    """
+
+def test_the_miss_counter_counts_guesses_not_codes(db: Session):
+    """Untried codes count nothing; each guess counts one, on used and superseded codes alike."""
     for i in range(10):
         _issue(db, "user@example.com", f"{i:06d}")
+    _issue(db, "user@example.com", "100000", attempts=3)
+    _issue(db, "user@example.com", "100001", attempts=2, used=True)
     db.flush()
 
-    since = datetime.now(timezone.utc) - timedelta(minutes=15)
-
-    old_counter = db_otp.count_recent_failed(db, "user@example.com", since, 3)
-    new_counter = db_otp.count_recent_issued(db, "user@example.com", since)
-
-    assert old_counter == 0, "documents WHY the old limiter never fired"
-    assert new_counter == 10, (
-        "issuance counter must see freshly-requested codes, or an attacker can "
-        "mint unlimited draws against the 10^6 code space"
-    )
+    assert db_otp.count_recent_misses(db, "user@example.com", _since()) == 3 + 2
 
 
-def test_issuance_counter_respects_the_window(db: Session):
-    """Old codes fall out of the window, so a legitimate user is not locked
-    out forever after one burst."""
+def test_the_miss_counter_respects_the_window(db: Session):
+    """Old guesses fall out of the window, so a person is not locked out forever after one burst."""
     for i in range(10):
-        _issue(db, "user@example.com", f"{i:06d}", minutes_ago=60)
+        _issue(db, "user@example.com", f"{i:06d}", minutes_ago=60, attempts=3)
     db.flush()
 
-    since = datetime.now(timezone.utc) - timedelta(minutes=15)
-
-    assert db_otp.count_recent_issued(db, "user@example.com", since) == 0
+    assert db_otp.count_recent_misses(db, "user@example.com", _since()) == 0
 
 
-def test_issuance_counter_is_scoped_per_email(db: Session):
+def test_the_miss_counter_is_scoped_per_email(db: Session):
     """One address's burst must not lock out an unrelated user."""
     for i in range(10):
-        _issue(db, "attacker@example.com", f"{i:06d}")
+        _issue(db, "attacker@example.com", f"{i:06d}", attempts=3)
     db.flush()
 
-    since = datetime.now(timezone.utc) - timedelta(minutes=15)
+    assert db_otp.count_recent_misses(db, "attacker@example.com", _since()) == 30
+    assert db_otp.count_recent_misses(db, "victim@example.com", _since()) == 0
 
-    assert db_otp.count_recent_issued(db, "attacker@example.com", since) == 10
-    assert db_otp.count_recent_issued(db, "victim@example.com", since) == 0
+
+def test_a_new_code_is_refused_once_its_attempts_could_pass_the_draw_budget(db: Session):
+    """The bound itself: whatever codes were issued, a window never yields more draws than the
+    stated tolerance buys. Positive control first: one guess short of the edge still gets a code."""
+    budget = otp_service._max_draws_per_window()
+    per_code = otp_service._MAX_ATTEMPTS_PER_CODE
+    now = datetime.now(timezone.utc)
+
+    _issue(db, "user@example.com", "000000", attempts=budget - per_code)
+    db.flush()
+    assert otp_service._limit_reached(db, "user@example.com", now) is None
+
+    _issue(db, "user@example.com", "000001", attempts=1)
+    db.flush()
+    assert otp_service._limit_reached(db, "user@example.com", now) == "guess-rate"
+
+
+def test_requesting_codes_alone_never_locks_the_owner_out(db: Session):
+    """Codes nobody guessed at, however many, leave the owner's next code available. A cap on
+    issued codes let one client asking for codes use up the owner's."""
+    for i in range(otp_service._window_cap() * 4):
+        _issue(db, "owner@example.com", f"{i:06d}")
+    db.flush()
+
+    assert otp_service._limit_reached(db, "owner@example.com", datetime.now(timezone.utc)) is None
 
 
 def test_issuance_cap_is_configured_below_the_old_effective_infinity():
@@ -271,14 +286,14 @@ def test_the_otp_caps_track_the_stated_guess_probability(monkeypatch):
     monkeypatch.setattr(otp_service, "_MAX_GUESS_PROBABILITY_PER_WINDOW",
                         otp_service._MAX_GUESS_PROBABILITY_PER_WINDOW * 10)
     assert otp_service._window_cap() > base, (
-        "a 10x looser guess-probability tolerance left the issuance cap unchanged — the cap is "
+        "a 10x looser guess-probability tolerance left the code cap unchanged — the cap is "
         "not derived from it"
     )
 
     monkeypatch.setattr(otp_service, "_MAX_GUESS_PROBABILITY_PER_WINDOW",
                         base and 1.5e-6)
     assert otp_service._window_cap() < base, (
-        "a 10x tighter guess-probability tolerance left the issuance cap unchanged"
+        "a 10x tighter guess-probability tolerance left the code cap unchanged"
     )
 
 
@@ -328,3 +343,34 @@ def test_the_shipped_cap_is_what_the_shipped_inputs_produce():
     what say the number is derived."""
     assert otp_service._window_cap() == 5
     assert otp_service._max_draws_per_window() == 15
+
+
+
+@pytest.mark.parametrize("guesses_per_code", [1, 2, 3])
+def test_no_schedule_of_codes_and_guesses_exceeds_the_draw_budget(db: Session, monkeypatch,
+                                                                  guesses_per_code):
+    """End to end through `issue_otp` and `verify_otp`: request a code, guess at it, request
+    another, however many times. Replacing a code retires it as `used`, and a count that treated
+    `used` as verified handed those guesses back. The total guesses taken must stay within the
+    budget whatever the schedule."""
+    async def fast_hash(code):
+        return "$2b$04$" + "x" * 53
+
+    async def never_matches(code, code_hash):
+        return False
+
+    monkeypatch.setattr(otp_service, "_hash_code_async", fast_hash)
+    monkeypatch.setattr(otp_service, "_verify_code_hash_async", never_matches)
+
+    async def schedule():
+        for _ in range(60):
+            if await otp_service.issue_otp(db, "target@example.com") is None:
+                continue
+            for _ in range(guesses_per_code):
+                await otp_service.verify_otp(db, "target@example.com", "000000")
+
+    asyncio.run(schedule())
+    taken = sum(r.attempts for r in db.query(db_otp.OtpCode).filter_by(email="target@example.com"))
+    assert taken <= otp_service._max_draws_per_window(), (
+        f"{taken} guesses in one window against a budget of {otp_service._max_draws_per_window()}")
+    assert taken > 0, "the schedule never reached a guess"

@@ -1,5 +1,5 @@
-﻿"""One derivation of "how many guesses does a window buy an attacker", and the store the
-password paths count their guesses in.
+﻿"""One derivation of "how many guesses does a window buy an attacker", the store the password
+paths count their guesses in, and the store unauthenticated mail sends are counted in.
 
 Caps are computed from a stated attacker-guess probability rather than typed in. The derivation
 lives here and both `otp_service` and the password paths call it with their own inputs, so there is
@@ -8,8 +8,8 @@ one implementation of the arithmetic and not two that can drift.
 The two limiters differ in where they count, and the difference is not stylistic:
 
 * OTP counts in the database, because an OTP *is* a row — `otp_codes` records every code issued and
-  every attempt spent against it, so `count_recent_issued` and `count_recent_failed` are reading
-  the attacker's draws off a ledger that exists for other reasons.
+  every attempt spent against it, so `count_recent_misses` reads the attacker's draws off a
+  ledger that exists for other reasons.
 * A password attempt leaves no row. Nothing in Origin's schema records a failed sign-in, so there
   is no ledger to read and the OTP counters cannot be pointed at the password path — they count
   `OtpCode` rows keyed by email, and a password attempt produces neither. Giving passwords their
@@ -27,10 +27,15 @@ right shape then is a shared store, not three private ones.
 
 from __future__ import annotations
 
+import ipaddress
 import logging
+import random
 import threading
 from collections import OrderedDict
 from datetime import datetime, timedelta, timezone
+from typing import Annotated
+
+from pydantic import Field
 
 logger = logging.getLogger(__name__)
 
@@ -95,22 +100,42 @@ _PASSWORD_GUESS_SPACE = 10_000
 _PASSWORD_MAX_GUESS_PROBABILITY_PER_WINDOW = 1e-3
 
 #: How long a window lasts. Sets the *rate*, given the cap: a shorter window with the same cap is a
-#: faster attack, so this is not a free knob. At the shipped values an attacker gets
-#: `password_window_cap()` guesses per 15 minutes against one identifier — 960 a day, so covering
-#: `_PASSWORD_GUESS_SPACE` takes on the order of ten days of continuous, logged failures against a
-#: single account rather than the seconds it takes unthrottled.
+#: faster attack, so this is not a free knob. At the shipped values the cap is 10 guesses per
+#: 15-minute window per identifier: 40 an hour, 960 a day, so covering `_PASSWORD_GUESS_SPACE`
+#: through one name takes about ten and a half days of continuous, logged failures rather than the
+#: seconds it takes unthrottled. Each name is its own budget (see
+#: `auth_router._spend_password_attempt`), so an account reachable by two names, a username that
+#: differs from its email, gets 20 per window: about five and a quarter days.
 _PASSWORD_WINDOW = timedelta(minutes=15)
 
 #: A password attempt is one draw. Unlike an OTP code, it is not a container that several guesses
 #: are spent against, so there is nothing to partition and the cap is the draw budget itself.
 _PASSWORD_DRAWS_PER_ATTEMPT = 1
 
-#: Ceiling on how many identifiers are tracked at once. The counter is reachable unauthenticated
-#: and keyed by whatever string the caller submits, so without a bound a spray of distinct
-#: identifiers is a memory-growth attack on the control that is supposed to stop it. Well above any
-#: plausible count of accounts failing to sign in inside one window; eviction is oldest-first, and
-#: an evicted attacker is back to a full budget, which is the safe direction to fail.
+#: Ceiling on how many keys each store tracks at once. The stores are reachable unauthenticated and
+#: keyed by strings the caller submits (bounded at 254 characters by the request models), so
+#: without a bound a spray of distinct keys is a memory-growth attack on the control meant to stop
+#: it. Well above any plausible count of accounts failing to sign in inside one window.
+#:
+#: When a store is full, a key whose window has passed is dropped first. Writes move a key to the
+#: back of the store, so the front is the key written least recently; since writes arrive in time
+#: order, it is dead whenever any key is, and checking the front finds one in O(1).
+#:
+#: When no key is dead, the key evicted is drawn uniformly at random, so which key goes does not
+#: depend on anything a caller controls: not its count, not its age, not the order keys arrived in.
+#: Each insertion evicts a given key with probability 1/N (N this bound), so a key survives about N
+#: insertions on average. On the password store every insertion is a failed sign-in, for which
+#: Origin runs a key derivation and the attacker makes a request; an eviction hands back at most
+#: one window cap of guesses (`password_window_cap()`) per ~N such failures.
+#:
+#: The store never fails closed: an untracked key reads as unspent, so no volume of junk locks out
+#: an account that has no live window of its own.
 _MAX_TRACKED_IDENTIFIERS = 10_000
+
+#: A caller-submitted email address or username, bounded at RFC 5321's 254-character path limit.
+#: These strings key the stores here (and the OTP ledger), so an unbounded one is memory an
+#: unauthenticated caller chooses the size of. The request models that feed them declare it.
+Identifier = Annotated[str, Field(max_length=254)]
 
 
 def password_window_cap() -> int:
@@ -125,10 +150,32 @@ def password_window_cap() -> int:
 # ---------------------------------------------------------------------------
 # Password login — the store
 # ---------------------------------------------------------------------------
-#: identifier -> failure timestamps inside the window, oldest first. `OrderedDict` so eviction has
-#: an order to work with.
-_failures: "OrderedDict[str, list[datetime]]" = OrderedDict()
-_lock = threading.Lock()
+class _Ledger(OrderedDict):
+    """key -> stamps inside the window, oldest first, in order of last write (least recent first),
+    with the keys also held in a list so one can be drawn uniformly at random in O(1)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.slots: list = []
+        self.slot_of: dict = {}
+
+    def clear(self) -> None:
+        super().clear()
+        self.slots.clear()
+        self.slot_of.clear()
+
+
+#: The eviction draw. `SystemRandom` so the choice cannot be predicted from earlier ones; a test
+#: substitutes a seeded `random.Random` for a deterministic run.
+_rng: random.Random = random.SystemRandom()
+
+
+#: identifier -> failure timestamps inside the window, oldest first. Bounded by
+#: `_MAX_TRACKED_IDENTIFIERS` (see there for which key is evicted).
+_failures: _Ledger = _Ledger()
+#: Re-entrant, so a step made of several store operations (`spend_password_attempt`) can hold it
+#: across all of them.
+_lock = threading.RLock()
 
 
 def _key(identifier: str) -> str:
@@ -143,9 +190,62 @@ def _key(identifier: str) -> str:
     return (identifier or "").strip().lower()
 
 
-def _live(stamps: list[datetime], now: datetime) -> list[datetime]:
-    cutoff = now - _PASSWORD_WINDOW
+def _live(stamps: list[datetime], now: datetime, window: timedelta) -> list[datetime]:
+    cutoff = now - window
     return [s for s in stamps if s > cutoff]
+
+
+def _drop(store: _Ledger, key: str) -> None:
+    """Forget `key`. Caller holds `_lock`."""
+    store.pop(key, None)
+    i = store.slot_of.pop(key, None)
+    if i is None:
+        return
+    last = store.slots.pop()
+    if last != key:
+        store.slots[i] = last
+        store.slot_of[last] = i
+
+
+def _make_room(store: _Ledger, window: timedelta, now: datetime) -> None:
+    """Bring the store under `_MAX_TRACKED_IDENTIFIERS`: dead keys from the front first, then keys
+    drawn uniformly at random. Caller holds `_lock`."""
+    while store and len(store) >= _MAX_TRACKED_IDENTIFIERS:
+        front = next(iter(store))
+        if not _live(store[front], now, window):
+            _drop(store, front)
+            continue
+        _drop(store, store.slots[_rng.randrange(len(store.slots))])
+
+
+def _spent(store: _Ledger, key: str, window: timedelta, cap: int, now: datetime) -> bool:
+    """True when `key` has `cap` stamps inside `window`. An untracked key is unspent. Prunes what
+    has aged out as it reads, without moving the key: its place records its last write."""
+    with _lock:
+        held = store.get(key)
+        if held is None:
+            return False
+        stamps = _live(held, now, window)
+        if not stamps:
+            _drop(store, key)
+            return False
+        if len(stamps) != len(held):
+            store[key] = stamps
+        return len(stamps) >= cap
+
+
+def _charge(store: _Ledger, key: str, window: timedelta, cap: int, now: datetime) -> None:
+    """Add one stamp for `key`, keeping at most `cap`, evicting to stay within the bound."""
+    with _lock:
+        stamps = _live(store.get(key, []), now, window)
+        if key not in store:
+            _make_room(store, window, now)
+            store.slot_of[key] = len(store.slots)
+            store.slots.append(key)
+        stamps.append(now)
+        # Nothing above the cap is ever read, so nothing above the cap is kept.
+        store[key] = stamps[-cap:]
+        store.move_to_end(key)
 
 
 def password_attempts_exhausted(identifier: str, *, now: datetime | None = None) -> bool:
@@ -161,29 +261,57 @@ def password_attempts_exhausted(identifier: str, *, now: datetime | None = None)
     string: an unknown identifier throttles on exactly the same schedule as a known one.
     """
     now = now or datetime.now(timezone.utc)
-    key = _key(identifier)
-    with _lock:
-        stamps = _live(_failures.get(key, []), now)
-        if stamps:
-            _failures[key] = stamps
-        else:
-            _failures.pop(key, None)
-        return len(stamps) >= password_window_cap()
+    return _spent(_failures, _key(identifier), _PASSWORD_WINDOW, password_window_cap(), now)
 
 
 def record_password_failure(identifier: str, *, now: datetime | None = None) -> None:
     """Charge one draw against this identifier's window."""
     now = now or datetime.now(timezone.utc)
+    _charge(_failures, _key(identifier), _PASSWORD_WINDOW, password_window_cap(), now)
+
+
+def spend_password_attempt(identifier: str, *, now: datetime | None = None) -> bool:
+    """Charge one attempt against this identifier's window, unless the window is already spent.
+
+    True when the attempt is admitted (and charged); False when it must be refused. The check and
+    the charge are one step under one lock, and the charge comes before the key derivation, not
+    after: an attempt charged only once its derivation finished would let every guess sent at the
+    same moment pass the check while all of them were still in flight. The charge is taken back by
+    `clear_password_failures` when the password proves correct.
+    """
+    now = now or datetime.now(timezone.utc)
     key = _key(identifier)
     cap = password_window_cap()
     with _lock:
-        stamps = _live(_failures.get(key, []), now)
-        stamps.append(now)
-        # Nothing above the cap is ever read, so nothing above the cap is kept.
-        _failures[key] = stamps[-cap:]
-        _failures.move_to_end(key)
-        while len(_failures) > _MAX_TRACKED_IDENTIFIERS:
-            _failures.popitem(last=False)
+        if _spent(_failures, key, _PASSWORD_WINDOW, cap, now):
+            return False
+        _charge(_failures, key, _PASSWORD_WINDOW, cap, now)
+        return True
+
+
+#: Password attempts at email confirmation (`auth_router.email_verify_confirm`), per account. A
+#: ledger of its own rather than keys in `_failures`: sign-in charges `_failures` under whatever
+#: identifier the caller types, so any key there, prefixed or not, is one anyone can spend.
+_confirmations: _Ledger = _Ledger()
+
+
+def spend_confirmation_attempt(person_id: str, *, now: datetime | None = None) -> bool:
+    """`spend_password_attempt` for the password check that confirms an account's address: the
+    same window and cap, keyed by the account, in `_confirmations`. Only a holder of a valid
+    confirmation link for the account reaches it."""
+    now = now or datetime.now(timezone.utc)
+    cap = password_window_cap()
+    with _lock:
+        if _spent(_confirmations, person_id, _PASSWORD_WINDOW, cap, now):
+            return False
+        _charge(_confirmations, person_id, _PASSWORD_WINDOW, cap, now)
+        return True
+
+
+def clear_confirmation_failures(person_id: str) -> None:
+    """Forget this account's confirmation attempts — called when the password proves correct."""
+    with _lock:
+        _drop(_confirmations, person_id)
 
 
 def clear_password_failures(identifier: str) -> None:
@@ -193,10 +321,223 @@ def clear_password_failures(identifier: str) -> None:
     the window, which is a lockout dressed as a rate limit.
     """
     with _lock:
-        _failures.pop(_key(identifier), None)
+        _drop(_failures, _key(identifier))
+
+
+# ---------------------------------------------------------------------------
+# Unauthenticated mail — a send budget, not a guess budget
+# ---------------------------------------------------------------------------
+# Every unauthenticated route that mails — resend, reset, the sign-in-code requests, and the
+# confirmation link sent on registration or on a password sign-in to an unconfirmed account (see
+# `auth_router._mail_send_admitted`) — hands its caller mail sent to an address of their choosing.
+# They share one budget, so none is the cheaper way to fill an inbox. Three bounds, all on sends:
+#
+# * per (address, client): the one a caller meets. It is `otp_service._window_cap()` over
+#   `_ISSUE_WINDOW_MINUTES` — as many codes as one window's guesses would buy — read from there on
+#   every call so the two cannot drift. Keyed by client as well as address so one remote caller spending its budget
+#   does not spend the address owner's.
+# * per address: `_MAIL_SEND_CLIENTS` times that, so mail to one inbox stays bounded however many
+#   clients ask for it.
+# * per client: across every address, so one client cannot reach an unbounded number of inboxes by
+#   naming a new one each time. Not applied to a client in `SHARED_CLIENT_NETWORKS`, whose
+#   requests are many people's, and logged at WARNING once per window when a client reaches it.
+#
+# Every request with a well-formed address is charged against all three whether or not an account
+# answers to the address: a budget that only accounts could spend would make the limiter an account
+# oracle. A client is its network (`_client_network`), not its exact address.
+_mail_sends: _Ledger = _Ledger()
+
+#: How many distinct clients one person plausibly asks for mail from inside one window — a
+#: laptop, a phone on mobile data, a second network such as work or a VPN, and one spare. This is the
+#: only looseness in the per-address cap: a person resending from more places than this inside one
+#: window meets the per-address cap, and still has signing in, which mails a fresh link itself.
+_MAIL_SEND_CLIENTS = 4
+
+
+def mail_send_window() -> timedelta:
+    """The window mail sends are counted over — the OTP issuance window."""
+    from origin.services import otp_service
+
+    return timedelta(minutes=otp_service._ISSUE_WINDOW_MINUTES)
+
+
+def mail_send_cap() -> int:
+    """Sends one (address, client) pair may request inside `mail_send_window()` —
+    `otp_service._window_cap()`."""
+    from origin.services import otp_service
+
+    return otp_service._window_cap()
+
+
+def mail_send_address_cap() -> int:
+    """Sends one address may receive inside the window, across every client."""
+    return mail_send_cap() * _MAIL_SEND_CLIENTS
+
+
+#: How many people plausibly ask for mail from one client address inside one window. One client
+#: address is often many people: an office, a campus, a carrier-grade NAT that puts hundreds of
+#: subscribers behind one IPv4 address. The per-client cap only has to stop one client from
+#: reaching an unbounded number of inboxes, so it is set well above a busy shared address — 20
+#: people each asking for the pair cap — and a client that reaches it is logged, so a shared
+#: address that outgrows it is seen rather than silently dropping mail.
+_MAIL_SEND_PEOPLE_PER_CLIENT = 20
+
+
+def mail_send_client_cap() -> int:
+    """Sends one client may request inside the window, across every address."""
+    return mail_send_cap() * _MAIL_SEND_PEOPLE_PER_CLIENT
+
+
+def _shared_client_networks() -> tuple:
+    """`config.SHARED_CLIENT_NETWORKS` parsed, cached on the configured value.
+
+    An entry is used only if it says exactly what it covers. `10.0.0.5/8` (host bits set) is
+    refused, not widened to all of 10/8: widening would exempt a whole network from the per-client
+    cap on the strength of what is most likely a typo for one host. An IPv4-mapped IPv6 entry
+    (`::ffff:10.0.0.5`) is refused too, because client addresses are compared as IPv4 and it could
+    never match; the warning says to write it as IPv4. Each refusal is logged at WARNING, naming
+    the entry, whenever the setting is read anew.
+    """
+    from origin import config
+
+    raw = getattr(config, "SHARED_CLIENT_NETWORKS", None) or []
+    if isinstance(raw, str):
+        raw = [u.strip() for u in raw.split(",") if u.strip()]
+    key = tuple(raw)
+    if _shared_networks_cache.get("key") != key:
+        nets = []
+        for entry in raw:
+            try:
+                net = ipaddress.ip_network(entry, strict=True)
+            except ValueError:
+                logger.warning(
+                    "SHARED_CLIENT_NETWORKS entry %r is not an IP network, or has host bits set; "
+                    "ignored (write a single host as a.b.c.d/32, a network by its base address)",
+                    entry)
+                continue
+            if net.version == 6 and net.prefixlen >= 96 \
+                    and net.network_address.ipv4_mapped is not None:
+                logger.warning(
+                    "SHARED_CLIENT_NETWORKS entry %r is an IPv4-mapped IPv6 network, which never "
+                    "matches (clients are compared as IPv4); ignored — write it as IPv4", entry)
+                continue
+            nets.append(net)
+        _shared_networks_cache.update(key=key, nets=tuple(nets))
+    return _shared_networks_cache["nets"]
+
+
+_shared_networks_cache: dict = {}
+
+
+def _is_shared_client_network(client: str) -> bool:
+    try:
+        ip = ipaddress.ip_address((client or "").strip())
+    except ValueError:
+        return False
+    if ip.version == 6 and ip.ipv4_mapped is not None:
+        ip = ip.ipv4_mapped
+    return any(ip.version == n.version and ip in n for n in _shared_client_networks())
+
+
+#: (kind, key) -> when it was last logged, so a condition that holds for a whole window is logged
+#: once per window, not once per request. Bounded: cleared whole past `_MAX_TRACKED_IDENTIFIERS`.
+_logged_at: dict = {}
+
+
+def _log_once_per_window(kind: str, key: str, now: datetime, window: timedelta, message: str,
+                         *args, to: logging.Logger | None = None) -> None:
+    """Log `message` at WARNING, to `to` (this module's logger by default), unless the same
+    (kind, key) was logged inside `window`."""
+    with _lock:
+        last = _logged_at.get((kind, key))
+        if last is not None and now - last < window:
+            return
+        if len(_logged_at) >= _MAX_TRACKED_IDENTIFIERS:
+            _logged_at.clear()
+        _logged_at[(kind, key)] = now
+    (to or logger).warning(message, *args)
+
+
+def _client_network(client: str) -> str:
+    """The unit one client controls: an IPv4 address, or an IPv6 /64, which a single host or
+    subscriber is routinely assigned whole. Keying the full IPv6 address would give one /64 an
+    unlimited number of clients. An IPv4-mapped address is its IPv4 address; anything that does not
+    parse is used as given."""
+    try:
+        ip = ipaddress.ip_address((client or "").strip())
+    except ValueError:
+        return client or ""
+    if ip.version == 6 and ip.ipv4_mapped is not None:
+        ip = ip.ipv4_mapped
+    if ip.version == 4:
+        return str(ip)
+    return str(ipaddress.ip_network(f"{ip}/64", strict=False))
+
+
+def _pair_key(email: str, client: str) -> str:
+    return "c|" + _key(email) + "|" + _client_network(client)
+
+
+def _address_key(email: str) -> str:
+    return "a|" + _key(email)
+
+
+def _client_key(client: str) -> str:
+    return "k|" + _client_network(client)
+
+
+def mail_sends_exhausted(email: str, client: str, *, now: datetime | None = None) -> bool:
+    """True when this client has used its sends for this address, the address has had all its
+    sends from every client, or this client has used its sends across every address. The last is
+    skipped for a client in `SHARED_CLIENT_NETWORKS`."""
+    now = now or datetime.now(timezone.utc)
+    window = mail_send_window()
+    if _spent(_mail_sends, _pair_key(email, client), window, mail_send_cap(), now):
+        return True
+    if _spent(_mail_sends, _address_key(email), window, mail_send_address_cap(), now):
+        from origin.services.auth_service import log_tag
+
+        _log_once_per_window(
+            "address-cap", _key(email), now, window,
+            "address %s reached its cap of %d mailed sends in %s; mail to it is dropped until the "
+            "window passes. Several clients asking for one address is a flood aimed at its owner, "
+            "who can still sign in with a password, a passkey or a federated account",
+            log_tag(email.lower()), mail_send_address_cap(), window)
+        return True
+    network = _client_network(client)
+    if _is_shared_client_network(client):
+        _log_once_per_window(
+            "proxy", network, now, window,
+            "mail sends from %s are not capped per client: it is in SHARED_CLIENT_NETWORKS",
+            network)
+        return False
+    if _spent(_mail_sends, _client_key(client), window, mail_send_client_cap(), now):
+        _log_once_per_window(
+            "client-cap", network, now, window,
+            "client %s reached the per-client mail cap (%d sends in %s); further mail from it is "
+            "dropped this window. If this is a reverse proxy, Origin is not seeing real client "
+            "addresses (FORWARDED_ALLOW_IPS; see SHARED_CLIENT_NETWORKS in config.py)",
+            network, mail_send_client_cap(), window)
+        return True
+    return False
+
+
+def record_mail_send(email: str, client: str, *, now: datetime | None = None) -> None:
+    """Charge one send request against the pair, the address and (unless it is a listed proxy
+    peer) the client."""
+    now = now or datetime.now(timezone.utc)
+    window = mail_send_window()
+    _charge(_mail_sends, _pair_key(email, client), window, mail_send_cap(), now)
+    _charge(_mail_sends, _address_key(email), window, mail_send_address_cap(), now)
+    if not _is_shared_client_network(client):
+        _charge(_mail_sends, _client_key(client), window, mail_send_client_cap(), now)
 
 
 def reset() -> None:
     """Drop all counted state. For tests; nothing in the serving path calls it."""
     with _lock:
         _failures.clear()
+        _confirmations.clear()
+        _mail_sends.clear()
+        _logged_at.clear()
+        _shared_networks_cache.clear()

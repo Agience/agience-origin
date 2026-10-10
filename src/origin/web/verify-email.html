@@ -7,6 +7,14 @@
   <img class="logo" src="/web/logo_v.png" alt="Agience">
   <h1>Email verification</h1>
   <div class="msg muted" id="msg">Verifying…</div>
+  <a class="primary hidden" id="continue" href="/account">Continue to Agience</a>
+
+  <form id="confirm" class="hidden">
+    <label for="cpassword">Password</label>
+    <input id="cpassword" type="password" autocomplete="current-password" required>
+    <button class="primary" type="submit" id="confirmBtn">Confirm my email</button>
+    <div class="row"><button class="link" type="button" id="disownBtn">I didn't create this account</button></div>
+  </form>
 
   <div id="resend" class="hidden">
     <p class="muted" style="text-align:center">Enter your email to get a new verification link.</p>
@@ -15,7 +23,7 @@
     <button class="primary" type="button" id="resendBtn">Send verification link</button>
   </div>
 
-  <div class="foot"><a href="/">Back to sign in</a></div>
+  <div class="foot"><a class="signin" href="/">Back to sign in</a></div>
 </div>
 
 <script src="/web/bg.js"></script>
@@ -23,24 +31,134 @@
 <script>
 const $=(s)=>document.querySelector(s), msg=$("#msg");
 const token = qs("token"), sent = qs("sent");
-function show(t,cls){ msg.className="msg "+(cls||"muted"); msg.innerHTML=t||""; }
+// Messages are text, server detail included; a "sign in" link is built as a node. Every such link
+// carries a live stashed return (see `signInHref` in app.js), so signing in from here still ends in
+// the app that sent the person.
+function show(text, cls, signInText){
+  msg.className="msg "+(cls||"muted");
+  msg.textContent=text||"";
+  if (signInText) {
+    msg.appendChild(document.createTextNode(" "));
+    const a=document.createElement("a");
+    a.className="signin"; a.href=signInHref(); a.textContent=signInText;
+    msg.appendChild(a);
+  }
+}
+$(".foot a.signin").href=signInHref();
+
+// This tab redeemed a link. A token comes back only when this browser held the nonce the link was
+// minted for (see `stashVerification` in app.js); a link opened anywhere else verifies the address
+// and asks the person to sign in. With a token and a stashed return to one of the server's exact
+// return URIs, put the return back on the URL and hand the token to the SP through `finishLogin`,
+// exactly as a sign-in on `/login` would. A session this browser already holds for someone else is
+// never replaced from here.
+async function redeemed(accessToken, email){
+  markVerified(email);
+  if (!accessToken) {
+    show("Email verified ✓ —","ok","Sign in to continue.");
+    return;
+  }
+  if (sessionIsAnotherAccount(accessToken)) {
+    show("Email verified ✓ — this browser is signed in as someone else.","ok","Sign in to continue.");
+    return;
+  }
+  if (restoreReturn(await ssoReturnUris())) {
+    show("Email verified ✓ — taking you back…","ok");
+    finishLogin(accessToken);
+    return;
+  }
+  clearVerification();
+  saveToken(accessToken);
+  show("Email verified ✓","ok");
+  await offerContinue("/account");
+}
+
+async function offerContinue(fallback){
+  const a=$("#continue"); a.href=(await continueHref()) || fallback; a.classList.remove("hidden");
+}
+
+// The tab waiting on `?sent=1` while the link is opened in another tab of this browser. That tab
+// writes `VERIFIED_KEY` when it redeems a link, which reaches this one as a `storage` event. This
+// tab claims verification only when the verified address is the one it registered, and hands
+// nothing off itself: it shows the verified state and a Continue link.
+let waitingDone = false;
+function onStorage(e){
+  if (e.key !== VERIFIED_KEY || !e.newValue || waitingDone || !verifiedIsMine(e.newValue)) return;
+  waitingDone = true;
+  window.removeEventListener("storage", onStorage);
+  show("Email verified ✓","ok");
+  offerContinue("/");
+}
 
 async function run(){
-  if (sent && !token) { show("Check your inbox — we sent you a verification link.","ok"); return; }
+  if (sent && !token) {
+    show("Check your inbox — we sent you a verification link.","ok");
+    window.addEventListener("storage", onStorage);
+    return;
+  }
   if (!token) { show("No verification token in the link.","err"); $("#resend").classList.remove("hidden"); return; }
-  const r = await post("/auth/email/verify-confirm", { token });
-  if (r.ok) {
-    show("Email verified ✓ — you can now <a href='/'>sign in</a>.","ok");
-    if (r.data.access_token) saveToken(r.data.access_token);
+  const r = await post("/auth/email/verify-confirm", { token, verify_nonce: readNonce() || "" });
+  if (r.ok && r.data.password_required) {
+    show("Enter the password you chose for this account to confirm your email.","muted");
+    $("#confirm").classList.remove("hidden");
+    return;
+  }
+  settled(r);
+}
+// What every answer but "password required" and "wrong password" ends in.
+function settled(r){
+  $("#confirm").classList.add("hidden");
+  if (r.ok && r.data.password_cleared) {
+    markVerified(r.data.email || "");
+    show("Email confirmed as yours. The password set when this account was created was removed.",
+      "ok","Sign in with an emailed code.");
+  } else if (r.ok) {
+    redeemed(r.data.access_token || null, r.data.email || "");
+  } else if (r.data && r.data.error === "already_verified") {
+    show(r.detail || "This email is already verified.","ok","Sign in");
   } else {
     show(r.detail || "This verification link is invalid or has expired.","err");
     $("#resend").classList.remove("hidden");
   }
 }
+// Confirming an account with a password takes that password (see `email_verify_confirm`). Whoever
+// holds the mailbox but did not create the account disowns it instead: the address is confirmed as
+// theirs and the password someone else chose is dropped.
+$("#confirm").addEventListener("submit", async (e)=>{
+  e.preventDefault();
+  if (!$("#cpassword").value) { show("Enter the password you chose for this account.","err"); return; }
+  const b=$("#confirmBtn"); b.disabled=true;
+  const r = await post("/auth/email/verify-confirm", {
+    token, verify_nonce: readNonce() || "", password: $("#cpassword").value,
+  });
+  b.disabled=false;
+  // A wrong password, a throttled one, or a busy server: the prompt stays and says why.
+  if (r.status === 401 || r.status === 429 || r.status === 503 || (r.ok && r.data.password_required)) {
+    show(r.detail || "That password doesn't match this account.","err");
+    return;
+  }
+  settled(r);
+});
+// Two clicks, so neither a slip nor a mail scanner that clicks through a page drops a password.
+let disownArmed = false;
+$("#disownBtn").addEventListener("click", async ()=>{
+  const b=$("#disownBtn");
+  if (!disownArmed) {
+    disownArmed = true;
+    b.textContent = "Remove the password and confirm this email as mine";
+    show("If you did not create this account, it becomes yours: the address is confirmed and the "
+      + "password someone else chose is removed. You then sign in with an emailed code.","muted");
+    return;
+  }
+  b.disabled=true;
+  settled(await post("/auth/email/verify-confirm", { token, disown: true }));
+});
 $("#resendBtn").addEventListener("click", async ()=>{
   const b=$("#resendBtn"); b.disabled=true;
-  await post("/auth/email/verify-request", { email: $("#email").value.trim().toLowerCase() });
-  show("If that account exists, a new link is on its way.","ok");
+  await post("/auth/email/verify-request", {
+    email: $("#email").value.trim().toLowerCase(), verify_nonce: readNonce() || "",
+  });
+  show("If that account exists, a new link is on its way. Already verified?","ok","Sign in");
 });
 run();
 </script>

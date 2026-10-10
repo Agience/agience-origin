@@ -16,7 +16,7 @@ from origin import config
 from origin.db import persons as db_persons
 from origin.db.session import get_db
 from origin.services import passkey_service
-from origin.services.auth_service import create_jwt_token
+from origin.services.auth_service import create_jwt_token, person_token_claims
 from origin.services.dependencies import AuthContext, get_auth
 
 logger = logging.getLogger(__name__)
@@ -191,14 +191,9 @@ async def complete_login(
     if person is None:
         raise HTTPException(status_code=401, detail="User not found")
 
-    user_data = {
-        "sub": str(person.id),
-        "email": person.email or "",
-        "name": person.name or "",
-        "picture": person.picture or "",
-        "client_id": getattr(config, "PLATFORM_CLIENT_ID", "platform"),
-        "aud": config.AUTHORITY_ISSUER,
-    }
+    user_data = person_token_claims(
+        person, client_id=getattr(config, "PLATFORM_CLIENT_ID", "platform"),
+    )
     access_token = create_jwt_token(user_data)
     refresh_token = create_jwt_token({**user_data, "token_type": "refresh"}, expires_hours=24 * 30)
     db.commit()

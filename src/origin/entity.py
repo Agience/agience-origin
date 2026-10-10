@@ -96,7 +96,7 @@ def origin_artifact(name: str, *, issuer: str, policy: Optional[dict] = None,
     return {
         "id": oid,
         "content_type": ORIGIN_CONTENT_TYPE,
-        "state": "committed",
+        "state": "live",
         "name": name or oid,
         "issuer": issuer,                       # ← the Authority this Origin owns
         "policy": policy or {},                 # the membrane: what this origin permits

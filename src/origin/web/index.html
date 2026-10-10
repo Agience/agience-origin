@@ -97,10 +97,29 @@
 <script src="/web/bg.js"></script>
 <script src="/web/app.js"></script>
 <script>
-// already signed in? go to account (unless an SP is waiting for a token, or we are mid-handshake:
-// a federated return carries `?code=` and must be exchanged even when a stale token is present,
-// or the person who just chose an account lands back on the old one)
-if (isAuthed() && !qs("redirect_uri") && !qs("code") && !qs("error")) location.replace("/account");
+// Already signed in? With no SP waiting, go to the account page. An SP waiting at one of the exact
+// return URIs the server publishes gets this session's token handed back (silent SSO), at most as
+// often as `ssoHandoffAllowed` permits; any other target gets the form, as does a request carrying
+// `prompt=login`, the OIDC way to ask for a fresh sign-in. Not mid-handshake: a federated return
+// carries `?code=` and must be exchanged even when a stale token is present, or the person who
+// just chose an account lands back on the old one. `isAuthed` is false for an expired token, so an
+// expired session shows the form.
+//
+// The list arrives asynchronously, and the form is live meanwhile. Once the person starts a sign-in
+// of their own (`beginSignIn`), a hand-off still waiting on the list is abandoned, so it cannot
+// replace that sign-in with the session that was here before it.
+let signInBegun = false;
+function beginSignIn() { signInBegun = true; }
+async function silentSso() {
+  if (!isAuthed() || qs("code") || qs("error") || qs("prompt") === "login") return;
+  const rd = qs("redirect_uri");
+  if (!rd) { location.replace("/account"); return; }
+  if (!SP_ALLOW.test(rd)) return;
+  const listed = await ssoReturnUris();
+  if (signInBegun) return;
+  if (isListedReturn(rd, listed) && ssoHandoffAllowed()) finishLogin(getToken());
+}
+silentSso();
 
 const $ = (s) => document.querySelector(s);
 const msg = $("#msg");
@@ -135,6 +154,7 @@ function b64url(bytes) {
 }
 
 async function startFederated(name) {
+  beginSignIn();
   const v = new Uint8Array(32); crypto.getRandomValues(v);
   const verifier = b64url(v);
   const challenge = b64url(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier)));
@@ -248,7 +268,7 @@ $("#otpBack").onclick = () => {
   $("#otpStep2").classList.add("hidden");
 };
 $("#otpSendForm").addEventListener("submit", async (e) => {
-  e.preventDefault();
+  e.preventDefault(); beginSignIn();
   const b = $("#otpSend"); b.disabled = true; show("Sending…");
   const r = await post("/auth/otp/request", { email: $("#otpEmail").value.trim().toLowerCase() });
   if (r.ok) {
@@ -259,6 +279,9 @@ $("#otpSendForm").addEventListener("submit", async (e) => {
     // unknown address on purpose, so that it is not an account-enumeration oracle, and this text
     // must not give away what the API declines to.
     show("If that address has an account, a code is on its way.", "muted");
+  } else if (r.status === 503 && r.data && r.data.error === "busy") {
+    // Shed because too many sign-ins are in progress (`auth_service.kdf_admit`), not unavailable.
+    show("Sign-in is busy right now. Try again in a moment.", "err");
   } else if (r.status === 503) {
     show("Email sign-in isn't available on this node — use a password.", "err");
   } else if (r.status === 429) {
@@ -269,7 +292,7 @@ $("#otpSendForm").addEventListener("submit", async (e) => {
   b.disabled = false;
 });
 $("#otpCodeForm").addEventListener("submit", async (e) => {
-  e.preventDefault();
+  e.preventDefault(); beginSignIn();
   const b = $("#otpVerify"); b.disabled = true; show("Checking…");
   const r = await post("/auth/otp/verify", {
     email: $("#otpEmail").value.trim().toLowerCase(),
@@ -297,27 +320,37 @@ $("#rpassword").addEventListener("input", (e) => {
 
 // LOGIN submit
 $("#loginForm").addEventListener("submit", async (e) => {
-  e.preventDefault(); const b=$("#loginBtn"); b.disabled=true; show("Signing in…");
-  const r = await post("/auth/password/login", { identifier: $("#identifier").value.trim(), password: $("#password").value });
+  e.preventDefault(); beginSignIn(); const b=$("#loginBtn"); b.disabled=true; show("Signing in…");
+  // An unverified account is refused with a fresh link, bound to this nonce (see `stashVerification`).
+  const nonce = newNonce();
+  const r = await post("/auth/password/login", { identifier: $("#identifier").value.trim(), password: $("#password").value, verify_nonce: nonce });
   if (r.ok && r.data.access_token) { show("Signed in ✓","ok"); finishLogin(r.data.access_token); return; }
   if (r.status===401) show("That email/username or password isn't right.","err");
-  else if (r.status===403) show(r.detail || "Please verify your email to sign in — we've sent a link.","err");
+  else if (r.status===403) {
+    // Only the unverified refusal mailed a link; any other 403 leaves the stash as it was.
+    if (r.data && r.data.error === "email_unverified") {
+      const id = $("#identifier").value.trim().toLowerCase();
+      stashVerification(nonce, id.indexOf("@") > 0 ? id : "");
+    }
+    show(r.detail || "Please verify your email to sign in — we've sent a link.","err");
+  }
   else show(r.detail || ("Sign-in failed ("+r.status+")"),"err");
   b.disabled=false;
 });
 
 // REGISTER submit — email IS the username (single field, required)
 $("#registerForm").addEventListener("submit", async (e) => {
-  e.preventDefault();
+  e.preventDefault(); beginSignIn();
   const email = $("#remail").value.trim().toLowerCase();
   if (!email || email.indexOf("@") < 1) { show("Enter a valid email.","err"); return; }
   if ($("#rpassword").value.length < 12) { show("Password must be at least 12 characters.","err"); return; }
   const b=$("#registerBtn"); b.disabled=true; show("Creating account…");
+  const nonce = newNonce();
   const r = await post("/auth/password/register", {
     username: email, name: email.split("@")[0],
-    password: $("#rpassword").value, email: email,
+    password: $("#rpassword").value, email: email, verify_nonce: nonce,
   });
-  if (r.ok && r.data.verification_required) { location.href="/verify-email?sent=1"; return; }
+  if (r.ok && r.data.verification_required) { stashVerification(nonce, email); location.href="/verify-email?sent=1"; return; }
   if (r.ok && r.data.access_token) { show("Account created ✓","ok"); finishLogin(r.data.access_token); return; }
   show(r.detail || ("Could not create account ("+r.status+")"),"err"); b.disabled=false;
 });

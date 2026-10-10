@@ -317,7 +317,7 @@ def test_an_unverified_email_cannot_sign_in_with_a_password(db_client, local_onl
 
     monkeypatch.setattr(ar, "email_verification_required", lambda email: True)
 
-    async def _no_mail(user):
+    async def _no_mail(user, *_args, **_kwargs):
         return None
 
     monkeypatch.setattr(ar, "_send_verification_email", _no_mail)
@@ -402,6 +402,27 @@ def test_an_unverified_local_account_does_not_absorb_a_verified_identity(db_clie
     _make_person(email="squatted@example.com", email_verified=False, password="attacker-password")
     with pytest.raises(IdentityLinkRefused):
         _resolve("google", "real-victim-sub", "squatted@example.com", email_verified=True)
+
+
+def _confirmed(person_id: str) -> bool:
+    from origin.db import persons as db_persons
+
+    with _session() as db:
+        return bool(db_persons.get_by_id(db, person_id).email_verified)
+
+
+def test_a_new_account_is_confirmed_only_when_its_provider_verified_the_address(db_client):
+    """A provider that lets someone type an address must not hand them a confirmed account at it:
+    reset and email invites would then treat it as theirs."""
+    assert not _confirmed(_resolve("custom", "typed-sub", "typed@example.com", email_verified=False))
+    assert _confirmed(_resolve("google", "real-sub", "real@example.com", email_verified=True))
+
+
+def test_a_provider_changing_the_address_carries_its_own_verification(db_client):
+    person_id = _resolve("custom", "moving-sub", "first@example.com", email_verified=True)
+    assert _confirmed(person_id)
+    assert _resolve("custom", "moving-sub", "second@example.com", email_verified=False) == person_id
+    assert not _confirmed(person_id), "an unverified new address inherited the old one's confirmation"
 
 
 def test_a_fresh_address_still_creates_an_account(db_client):

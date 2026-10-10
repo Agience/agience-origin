@@ -144,6 +144,44 @@ FACET_URIS: list = [
     u.strip() for u in os.getenv("FACET_URIS", "").split(",") if u.strip()
 ]
 ORIGIN_URI: str = os.getenv("ORIGIN_URI", "http://localhost:8080")
+# `APP_URI` is where a signed-in person continues to from Origin's own pages — the account page's
+# "Continue to Agience". Named on its own rather than picked out of `FACET_URI`/`FACET_URIS`: on a
+# node that serves its sign-in pages from Origin, `FACET_URI` is Origin itself, and `FACET_URIS`
+# lists every admitted facet in no order that says which one is the app. Unset means no link.
+APP_URI: str = os.getenv("APP_URI", "")
+# `SSO_RETURN_URIS` lists the exact URLs (origin and path) the sign-in pages hand an existing
+# session to without a click, beyond the app's root from `APP_URI`. Anything not listed gets the
+# sign-in form. Comma-separated, https only.
+SSO_RETURN_URIS: list = [
+    u.strip() for u in os.getenv("SSO_RETURN_URIS", "").split(",") if u.strip()
+]
+# `SHARED_CLIENT_NETWORKS` lists client networks (CIDR, comma-separated) whose requests are known to
+# be many people's — a front end that relays `/auth/*` to Origin server-side, for example. Two
+# per-client limits skip them:
+#   * the per-client mail cap on the unauthenticated mail endpoints (the per-address caps still
+#     apply), logged once per window when it is skipped;
+#   * the per-client cap on sign-ins in flight (`auth_service.KDF_IN_FLIGHT_PER_CLIENT`); the
+#     overall shed on derivation-spending requests still applies.
+# Each entry must name exactly what it covers (a host as `a.b.c.d/32`, a network by its base
+# address): one with host bits set, or an IPv4-mapped IPv6 form, is refused with a WARNING naming
+# it.
+#
+# THE TRADE-OFF. A relay that is not listed reaches Origin as one client, so every person behind it
+# shares one client's limits: the mail cap and the in-flight cap then bind the whole relay. A relay
+# that is listed exempts everyone routing through it from both per-client limits, a client abusing
+# it included. Neither is right; listing a relay is the lesser harm when Origin cannot see through
+# it.
+#
+# THE FIX IS FOR ORIGIN TO SEE REAL CLIENT ADDRESSES. Every per-client limit keys on the client
+# address uvicorn reports. Run uvicorn with `FORWARDED_ALLOW_IPS` naming exactly the reverse proxy
+# in front of it (default 127.0.0.1, a proxy on the same host), have that proxy set
+# `X-Forwarded-For` from its own peer, and — where a relay sits in front of that proxy — have the
+# proxy trust the relay (Caddy: `trusted_proxies` naming the relay) so the address it forwards is
+# the person's, not the relay's. Never `FORWARDED_ALLOW_IPS=*`: that lets any caller name its own
+# address. With that in place this list stays empty.
+SHARED_CLIENT_NETWORKS: list = [
+    u.strip() for u in os.getenv("SHARED_CLIENT_NETWORKS", "").split(",") if u.strip()
+]
 PLATFORM_CLIENT_ID: str = os.getenv("PLATFORM_CLIENT_ID", "agience-client")
 # `PLATFORM_CLIENT_IDS` lists every first-party OAuth client this authority mints full user JWTs
 # for, not just the one in `PLATFORM_CLIENT_ID`. Same shape as `FACET_URI`/`FACET_URIS`, for the

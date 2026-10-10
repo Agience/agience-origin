@@ -19,6 +19,7 @@ need extensive OIDC stubbing — out of scope for this fast unit suite.
 
 from __future__ import annotations
 
+import hashlib
 import uuid
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -218,7 +219,7 @@ class TestPasswordRegister:
         ):
             resp = anon_client.post(
                 "/auth/password/register",
-                json={"username": "alice", "password": "p" * 12},
+                json={"username": "alice", "email": "alice@example.com", "password": "p" * 12},
             )
         assert resp.status_code == 404
 
@@ -243,10 +244,25 @@ class TestPasswordRegister:
         ):
             resp = anon_client.post(
                 "/auth/password/register",
-                json={"username": "alice", "password": "short"},
+                json={"username": "alice", "email": "alice@example.com", "password": "short"},
             )
         assert resp.status_code == 400
         assert "12 characters" in resp.json()["detail"]
+
+    def test_an_account_without_an_email_is_refused(self, anon_client):
+        """An account with no address has nothing to confirm, so it would be live at once."""
+        with patch(
+            "origin.routers.auth_router.platform_settings.get_bool", return_value=True,
+        ), patch(
+            "origin.routers.auth_router.person_service.create_user_with_password",
+        ) as create:
+            resp = anon_client.post(
+                "/auth/password/register",
+                json={"username": "no_address", "password": "p" * 12},
+            )
+        assert resp.status_code == 400
+        assert resp.json()["detail"] == "An email address is required"
+        create.assert_not_called()
 
     def test_invalid_email_400(self, anon_client):
         with patch(
@@ -278,7 +294,7 @@ class TestPasswordRegister:
         ):
             resp = anon_client.post(
                 "/auth/password/register",
-                json={"username": "alice", "password": "p" * 12},
+                json={"username": "alice", "email": "alice@example.com", "password": "p" * 12},
             )
         assert resp.status_code == 403
 
@@ -298,11 +314,13 @@ class TestPasswordRegister:
         ):
             resp = anon_client.post(
                 "/auth/password/register",
-                json={"username": "alice", "password": "p" * 12},
+                json={"username": "alice", "email": "alice@example.com", "password": "p" * 12},
             )
         assert resp.status_code == 400
         # Generic message — never leak whether the username/email exists.
-        assert resp.json()["detail"] == "Registration failed"
+        assert resp.json()["detail"] == (
+            "Couldn't create that account. If you already have one, sign in or reset your password."
+        )
 
     def test_success_returns_tokens(self, anon_client):
         person = _person()
@@ -560,14 +578,15 @@ class TestPasswordReset:
         assert resp.json() == {"sent": True}
         send.assert_not_called()
 
-    def test_request_silent_for_passwordless_account(self, anon_client):
+    def _request_for(self, anon_client, person):
         with patch(
             "origin.routers.auth_router.platform_settings.get_bool", return_value=True,
         ), patch(
             "origin.routers.auth_router.email_service.is_configured", return_value=True,
         ), patch(
-            "origin.routers.auth_router.person_service.get_user_by_email",
-            return_value=_person(password_hash=None),
+            "origin.routers.auth_router.person_service.get_user_by_email", return_value=person,
+        ), patch(
+            "origin.routers.auth_router.create_jwt_token", return_value="reset.jwt",
         ), patch(
             "origin.routers.auth_router.email_service.send_password_reset",
         ) as send:
@@ -575,7 +594,17 @@ class TestPasswordReset:
                 "/auth/password/reset-request", json={"email": "alice@example.com"},
             )
         assert resp.status_code == 200
+        return send
+
+    def test_request_silent_for_an_unconfirmed_passwordless_account(self, anon_client):
+        """Confirming comes first; a link here would set a password on an unproved address."""
+        send = self._request_for(anon_client, _person(password_hash=None, email_verified=False))
         send.assert_not_called()
+
+    def test_a_confirmed_passwordless_account_is_sent_a_link_to_set_one(self, anon_client):
+        """Federated, code-made or disowned: the confirmed mailbox may set a first password."""
+        send = self._request_for(anon_client, _person(password_hash=None, email_verified=True))
+        send.assert_called_once()
 
     def test_request_503_when_email_unconfigured(self, anon_client):
         with patch(
@@ -775,14 +804,18 @@ class TestEmailVerification:
 
     def test_verify_confirm_marks_verified_and_returns_tokens(self, anon_client):
         # The link is minted for an account that has NOT verified yet — which is the only state a
-        # real verification link is ever minted in, and the state its `evf` fingerprint binds.
-        unverified = _person(id="person-1", email_verified=False)
+        # real verification link is ever minted in, and the state its `evf` fingerprint binds. The
+        # redeeming browser presents the nonce whose hash the link carries, which is what lets the
+        # redemption sign in (see `test_signup_returns_to_the_app.py` for the refusals).
+        # No password on the account: this pins the nonce's part, not the password prompt.
+        unverified = _person(id="person-1", email_verified=False, password_hash=None)
         with patch(
             "origin.routers.auth_router.verify_token",
             return_value={
                 "token_type": "email_verify",
                 "sub": "person-1",
                 "evf": _email_fingerprint(unverified),
+                "vnh": hashlib.sha256(b"browser-nonce").hexdigest(),
             },
         ), patch(
             "origin.routers.auth_router.person_service.get_user_by_id",
@@ -796,7 +829,10 @@ class TestEmailVerification:
         ), patch(
             "origin.routers.auth_router._compute_roles", return_value=[],
         ):
-            resp = anon_client.post("/auth/email/verify-confirm", json={"token": "verify.jwt"})
+            resp = anon_client.post(
+                "/auth/email/verify-confirm",
+                json={"token": "verify.jwt", "verify_nonce": "browser-nonce"},
+            )
         assert resp.status_code == 200
         assert resp.json()["access_token"] == "access.jwt"
         setv.assert_called_once()

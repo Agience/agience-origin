@@ -237,6 +237,112 @@ def test_tracked_identifiers_are_bounded(monkeypatch):
     assert len(guess_budget._failures) <= 50
 
 
+def test_a_fence_of_cheap_keys_cannot_evict_the_victim_on_demand(monkeypatch):
+    """The attacker must not be able to choose whom a full store evicts.
+
+    The scenario: fill the store with junk keys at the cap, let their window pass, then cycle
+    `cap - 1` guesses at the victim and one new junk key. The store evicts uniformly at random once
+    no key is dead, so the victim is evicted about once per N insertions, and each eviction hands
+    back at most one cap of guesses: over the run, about one cap per N cycles.
+    """
+    import random
+
+    n = 100
+    cycles = 1000
+    cap = guess_budget.password_window_cap()
+    monkeypatch.setattr(guess_budget, "_MAX_TRACKED_IDENTIFIERS", n)
+    monkeypatch.setattr(guess_budget, "_rng", random.Random(20260924), raising=False)
+
+    now = datetime.now(timezone.utc)
+    fence_time = now - guess_budget._PASSWORD_WINDOW - timedelta(minutes=1)
+    for i in range(n - 1):
+        for _ in range(cap):
+            guess_budget.record_password_failure(f"fence-{i}", now=fence_time)
+
+    admitted = 0
+    t = now
+    for c in range(cycles):
+        for _ in range(cap - 1):
+            if not guess_budget.password_attempts_exhausted("victim", now=t):
+                admitted += 1
+                guess_budget.record_password_failure("victim", now=t)
+        guess_budget.record_password_failure(f"new-{c}", now=t)
+        t += timedelta(milliseconds=1)
+
+    # One cap to start, plus one cap per expected eviction (cycles / n), with threefold headroom.
+    bound = cap * (1 + 3 * cycles // n)
+    assert 0 < admitted <= bound, (
+        f"{admitted} victim guesses admitted in {cycles} cycles; random eviction allows about "
+        f"{cap * (1 + cycles // n)} and this test allows {bound}. The attacker is choosing whom the "
+        "store evicts.")
+
+
+def test_dead_keys_are_dropped_before_any_live_one(monkeypatch):
+    monkeypatch.setattr(guess_budget, "_MAX_TRACKED_IDENTIFIERS", 3)
+    now = datetime.now(timezone.utc)
+    stale = now - guess_budget._PASSWORD_WINDOW - timedelta(seconds=1)
+    guess_budget.record_password_failure("dead", now=stale)
+    guess_budget.record_password_failure("live-a", now=now)
+    guess_budget.record_password_failure("live-b", now=now)
+
+    guess_budget.record_password_failure("incoming", now=now)
+
+    assert set(guess_budget._failures) == {"live-a", "live-b", "incoming"}
+
+
+def test_a_keys_count_does_not_change_its_odds_of_eviction(monkeypatch):
+    """A heavily-charged key is as evictable as a fresh one, so a count cannot be used to shield
+    or to target a key."""
+    import random
+
+    monkeypatch.setattr(guess_budget, "_MAX_TRACKED_IDENTIFIERS", 2)
+    monkeypatch.setattr(guess_budget, "_rng", random.Random(7), raising=False)
+    now = datetime.now(timezone.utc)
+    heavy_evicted = 0
+    trials = 2000
+    for _ in range(trials):
+        guess_budget.reset()
+        for _ in range(guess_budget.password_window_cap()):
+            guess_budget.record_password_failure("heavy", now=now)
+        guess_budget.record_password_failure("light", now=now)
+        guess_budget.record_password_failure("incoming", now=now)
+        heavy_evicted += "heavy" not in guess_budget._failures
+    assert 0.4 * trials < heavy_evicted < 0.6 * trials, heavy_evicted
+
+
+def test_a_spray_does_not_lock_out_a_fresh_account(monkeypatch):
+    """The store never fails closed: an account with no live window of its own stays unthrottled
+    however many junk identifiers fill the store."""
+    monkeypatch.setattr(guess_budget, "_MAX_TRACKED_IDENTIFIERS", 50)
+    for i in range(500):
+        guess_budget.record_password_failure(f"junk-{i}")
+    assert len(guess_budget._failures) == 50
+
+    assert guess_budget.password_attempts_exhausted("fresh-account") is False
+    guess_budget.record_password_failure("fresh-account")
+    assert guess_budget.password_attempts_exhausted("fresh-account") is False
+
+
+def test_a_cleared_identifier_leaves_the_store_consistent(monkeypatch):
+    monkeypatch.setattr(guess_budget, "_MAX_TRACKED_IDENTIFIERS", 2)
+    guess_budget.record_password_failure("a")
+    guess_budget.record_password_failure("b")
+    guess_budget.clear_password_failures("a")
+    guess_budget.record_password_failure("c")
+    guess_budget.record_password_failure("d")
+    assert len(guess_budget._failures) <= 2
+
+
+def test_expired_windows_make_room(monkeypatch):
+    monkeypatch.setattr(guess_budget, "_MAX_TRACKED_IDENTIFIERS", 50)
+    stale = datetime.now(timezone.utc) - guess_budget._PASSWORD_WINDOW - timedelta(seconds=1)
+    for i in range(50):
+        guess_budget.record_password_failure(f"old-{i}", now=stale)
+    assert guess_budget.password_attempts_exhausted("fresh") is False
+    guess_budget.record_password_failure("fresh")
+    assert "fresh" in guess_budget._failures
+
+
 # ---------------------------------------------------------------------------
 # 4. Both endpoints enforce it, and it is not an account oracle
 # ---------------------------------------------------------------------------

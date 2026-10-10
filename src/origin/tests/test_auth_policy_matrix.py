@@ -68,7 +68,8 @@ PUBLIC = {
     # only whether authentication is required, and here it cannot be.
     ("POST", "/auth/authorize/register"): _PREAUTH + " — creating the account IS the request",
     ("GET", "/auth/callback"): _PREAUTH + " — the redirect target, by definition pre-auth",
-    ("GET", "/auth/providers"): _PREAUTH + " — which providers exist, to render the login page",
+    ("GET", "/auth/providers"): _PREAUTH + " — which providers exist, to render the login page, "
+                                "and the public app URL the account page continues to",
     ("POST", "/auth/token"): _PREAUTH + " — the token endpoint IS the thing being obtained",
     ("POST", "/auth/register"): _PREAUTH,
     ("POST", "/auth/password/login"): _PREAUTH,

@@ -19,6 +19,14 @@ import pytest
 from origin.services import account_notify
 
 
+@pytest.fixture(autouse=True)
+def _fresh_hour():
+    """The hourly cap is process-wide; each test starts with an empty hour."""
+    account_notify.reset()
+    yield
+    account_notify.reset()
+
+
 def _install(monkeypatch, fake):
     """Put `fake` where `account_notify._send` will actually find it.
 
@@ -194,3 +202,46 @@ def test_the_filter_does_not_match_a_lookalike_domain():
     assert not account_notify._is_probe(_Person(email="someone@invalid.example.com"))
     assert not account_notify._is_probe(_Person(email="test@example.com"))
     assert account_notify._is_probe(_Person(email="x@example.invalid"))
+
+
+# ── the hourly cap ───────────────────────────────────────────────────────────────────────────
+def test_a_bulk_registration_sends_the_cap_then_one_pause_notice(monkeypatch):
+    """Registration is unauthenticated. One notice per account would let anyone registering in
+    bulk flood the operator's inbox from the platform's own sending account."""
+    monkeypatch.setenv("ACCOUNT_NOTIFY_TO", "connect@agience.ai")
+    subjects = []
+
+    async def _capture(to, subject, html, text=None):
+        subjects.append(subject)
+        return True
+
+    _install(monkeypatch, types.SimpleNamespace(is_configured=lambda: True, send_email=_capture))
+
+    cap = account_notify._NOTICES_PER_HOUR
+    for i in range(cap + 5):
+        account_notify._send(_Person(email=f"bulk{i}@example.com"))
+
+    assert len(subjects) == cap + 1, subjects
+    assert all("New account:" in s for s in subjects[:cap])
+    assert "paused" in subjects[-1]
+
+
+def test_the_cap_frees_up_after_an_hour(monkeypatch):
+    """A cap that never lifts would silence the one notice that a real person signed up."""
+    monkeypatch.setenv("ACCOUNT_NOTIFY_TO", "connect@agience.ai")
+    subjects = []
+
+    async def _capture(to, subject, html, text=None):
+        subjects.append(subject)
+        return True
+
+    _install(monkeypatch, types.SimpleNamespace(is_configured=lambda: True, send_email=_capture))
+    clock = [1000.0]
+    monkeypatch.setattr(account_notify, "_now", lambda: clock[0])
+
+    for i in range(account_notify._NOTICES_PER_HOUR + 2):
+        account_notify._send(_Person(email=f"bulk{i}@example.com"))
+    clock[0] += account_notify._HOUR
+    account_notify._send(_Person(email="later@example.com"))
+
+    assert subjects[-1].endswith("New account: later@example.com"), subjects[-1]

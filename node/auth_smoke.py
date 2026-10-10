@@ -62,6 +62,20 @@ def _post(url: str, data: dict, timeout: float = 10.0):
         return 0, str(e).encode()
 
 
+def _post_json(url: str, data: dict, timeout: float = 10.0):
+    """POST a JSON body — the password routes read a JSON model, not a form."""
+    req = urllib.request.Request(url, data=json.dumps(data).encode(), method="POST",
+                                 headers={"Content-Type": "application/json",
+                                          "Accept": "application/json"})
+    try:
+        r = urllib.request.urlopen(req, timeout=timeout)
+        return r.status, r.read()
+    except urllib.error.HTTPError as e:
+        return e.code, e.read()
+    except Exception as e:
+        return 0, str(e).encode()
+
+
 def run(base: str, allow_write: bool, client_id: str = "agience-platform",
         redirect_uri: str = "") -> int:
     base = base.rstrip("/")
@@ -143,8 +157,13 @@ def run(base: str, allow_write: bool, client_id: str = "agience-platform",
         import secrets as _s
         email = "smoke-%s@local.test" % _s.token_hex(4)
         pw = "Smoke-" + _s.token_hex(8)
-        st, _ = _post(base + "/auth/password/register", {"email": email, "password": pw})
-        st2, body2 = _post(base + "/auth/password/login", {"email": email, "password": pw})
+        # Registration requires a username and an email address. A node that requires email
+        # verification for this address answers `verification_required` and refuses the login
+        # until the mailed link is confirmed, so the full flow needs verification off or the
+        # `local.test` domain on EMAIL_VERIFICATION_ALLOWLIST.
+        st, _ = _post_json(base + "/auth/password/register",
+                           {"username": email, "email": email, "password": pw})
+        st2, body2 = _post_json(base + "/auth/password/login", {"identifier": email, "password": pw})
         tok = ""
         try:
             tok = json.loads(body2).get("access_token") or json.loads(body2).get("token") or ""

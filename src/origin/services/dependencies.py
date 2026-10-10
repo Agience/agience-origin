@@ -239,3 +239,52 @@ async def get_person(
     if person is None:
         raise HTTPException(status_code=404, detail="User not found")
     return person
+
+
+class KdfAdmissionRefused(HTTPException):
+    """What a refused admission raises: the status, text and `Retry-After` of
+    `auth_service.KdfRefused`, plus its `error` code (`busy`, `too_many_in_flight`), which
+    `kdf_admission_refused_handler` puts in the body as `{"detail", "error"}` — the shape the
+    sign-in page reads. An app without that handler still answers with the status, text and
+    header."""
+
+    def __init__(self, refused) -> None:
+        super().__init__(
+            status_code=refused.status_code,
+            detail=refused.detail,
+            headers={"Retry-After": str(refused.retry_after)},
+        )
+        self.error = refused.error
+
+
+async def kdf_admission_refused_handler(request: Request, exc: KdfAdmissionRefused):
+    from fastapi.responses import JSONResponse
+
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"detail": exc.detail, "error": exc.error},
+        headers=exc.headers,
+    )
+
+
+async def kdf_admission(request: Request):
+    """Admission for a route that spends a key derivation (`auth_service.kdf_admit`).
+
+    Refuses with 503 (`busy`) when too many derivation-spending requests are already open, and with
+    429 (`too_many_in_flight`) when this client already has too many in flight, each with
+    `Retry-After`. Neither depends on who the request names, so neither is an account oracle.
+
+    Declare it with `Depends(kdf_admission, scope="function")`: the slot is then released as soon
+    as the endpoint returns or raises, not after the response and its background tasks (a mail
+    send) have finished.
+    """
+    from origin.services import auth_service
+
+    try:
+        key = auth_service.kdf_admit(request.client.host if request.client else None)
+    except auth_service.KdfRefused as refused:
+        raise KdfAdmissionRefused(refused) from None
+    try:
+        yield
+    finally:
+        auth_service.kdf_release(key)

@@ -23,8 +23,9 @@ h1 { text-align: center; font-size: 18px; font-weight: 600; color: #1f2328; marg
 label { display: block; font-size: 13px; font-weight: 500; color: #374151; margin: 14px 0 6px; }
 input { width: 100%; padding: 11px 12px; border: 1px solid #d1d5db; border-radius: 10px; font-size: 14px; color: #111; background: #fff; outline: none; }
 input:focus { border-color: #6366f1; box-shadow: 0 0 0 3px rgba(99,102,241,.22); }
-button.primary { width: 100%; margin-top: 20px; padding: 12px; border: 0; border-radius: 10px; background: #111827; color: #fff; font-size: 14px; font-weight: 600; cursor: pointer; transition: background .15s; }
-button.primary:hover { background: #1f2937; }
+button.primary, a.primary { width: 100%; margin-top: 20px; padding: 12px; border: 0; border-radius: 10px; background: #111827; color: #fff; font-size: 14px; font-weight: 600; cursor: pointer; transition: background .15s; }
+a.primary { display: block; text-align: center; text-decoration: none; }
+button.primary:hover, a.primary:hover { background: #1f2937; }
 button.primary:disabled { opacity: .5; cursor: default; }
 .link { background: none; border: 0; color: #6366f1; font-size: 13px; cursor: pointer; padding: 0; text-decoration: none; }
 .link:hover { text-decoration: underline; }

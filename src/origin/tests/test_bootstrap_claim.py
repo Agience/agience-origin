@@ -144,6 +144,31 @@ def test_claim_happy_path(client: TestClient, origin_app, with_authority):
         assert platform_settings.get("platform.operator_id") == operator_id
 
 
+def test_claim_tokens_state_whether_the_operators_address_is_verified(
+    client: TestClient, origin_app, with_authority
+):
+    """Mantle matches invites only on a token's `email_verified`, so the operator's first tokens
+    carry it, equal to the stored fact."""
+    import base64
+
+    resp = client.post(
+        "/auth/bootstrap/claim",
+        json={"token": "the-secret-token", "email": "operator@example.com",
+              "password": "averylongpassword"},
+    )
+    assert resp.status_code == 200, resp.text
+
+    from origin.db.session import SessionLocal
+    from origin.services import person_service
+
+    with SessionLocal() as db:
+        stored = bool(person_service.get_user_by_id(db, resp.json()["person_id"]).email_verified)
+    for kind in ("access_token", "refresh_token"):
+        payload = resp.json()[kind].split(".")[1]
+        claims = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
+        assert claims.get("email_verified") is stored, kind
+
+
 def test_claim_rejects_wrong_token(client: TestClient, origin_app, with_authority):
     resp = client.post(
         "/auth/bootstrap/claim",

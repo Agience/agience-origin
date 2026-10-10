@@ -44,6 +44,7 @@ from origin.routers.setup_router import setup_router
 from origin.routers.oracle_router import oracle_router
 from origin.services import account_notify
 from origin.services import manifest as manifest_loader
+from origin.services.dependencies import KdfAdmissionRefused, kdf_admission_refused_handler
 from origin.services.oidc_providers import reload_oauth_providers
 from origin.services.platform_settings_service import settings as platform_settings
 from origin.logging_utils import configure_logging
@@ -256,6 +257,31 @@ def _apply_db_settings_to_config() -> None:
             config.FACET_URIS = (
                 [u.strip() for u in _fu_db.split(",") if u.strip()]
                 if isinstance(_fu_db, str) else list(_fu_db)
+            )
+
+    # Same precedence again: env, then the stored value, then config.py.
+    config.APP_URI = (
+        os.getenv("APP_URI") or platform_settings.get("branding.app_uri") or config.APP_URI
+    )
+    _scn_env = os.getenv("SHARED_CLIENT_NETWORKS")
+    if _scn_env is not None and _scn_env.strip() != "":
+        config.SHARED_CLIENT_NETWORKS = [u.strip() for u in _scn_env.split(",") if u.strip()]
+    else:
+        _scn_db = platform_settings.get("auth.shared_client_networks")
+        if _scn_db:
+            config.SHARED_CLIENT_NETWORKS = (
+                [u.strip() for u in _scn_db.split(",") if u.strip()]
+                if isinstance(_scn_db, str) else list(_scn_db)
+            )
+    _sso_env = os.getenv("SSO_RETURN_URIS")
+    if _sso_env is not None and _sso_env.strip() != "":
+        config.SSO_RETURN_URIS = [u.strip() for u in _sso_env.split(",") if u.strip()]
+    else:
+        _sso_db = platform_settings.get("branding.sso_return_uris")
+        if _sso_db:
+            config.SSO_RETURN_URIS = (
+                [u.strip() for u in _sso_db.split(",") if u.strip()]
+                if isinstance(_sso_db, str) else list(_sso_db)
             )
 
     config.AUTHORITY_ISSUER = (
@@ -519,6 +545,10 @@ async def unhandled_exception_logger(request: Request, exc: Exception):
         repr(exc),
     )
     return JSONResponse(status_code=500, content={"detail": "Internal Server Error"})
+
+
+# A refused admission to a derivation-spending route carries a machine-readable `error` code.
+app.add_exception_handler(KdfAdmissionRefused, kdf_admission_refused_handler)
 
 
 # ---------------------------------------------------------------------------

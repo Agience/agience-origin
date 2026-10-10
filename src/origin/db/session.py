@@ -34,10 +34,13 @@ _SessionLocal: sessionmaker | None = None
 #
 # The value is bracketed rather than chosen, by two facts about this service.
 
-#: LOWER BOUND — the longest a write transaction stays open here. Origin's writes are single-row
-#: and instant, but `otp_service.request_otp` takes the write lock (`supersede_live_for_email`)
-#: and then awaits a bcrypt before committing, so the lock is held for a hash, not for an UPDATE.
-#: bcrypt at its default cost is ~0.25s. A timeout below this cannot clear even one writer ahead.
+#: LOWER BOUND — the longest a write transaction may stay open here. No write transaction in Origin
+#: spans an await: `otp_service.request_otp` hashes its code before it takes the write lock,
+#: `verify_otp` commits its attempt before it compares, and the password paths release their
+#: session before every key derivation. Each write is a few statements committed at once. This is
+#: the ceiling such a transaction must stay under — a bcrypt's worth, ~0.25s at its default cost,
+#: the one piece of work that must never again be put inside one — and a timeout below it could not
+#: clear even one writer ahead.
 _LONGEST_HELD_WRITE_S = 0.25
 
 #: UPPER BOUND — Origin is served with `--timeout-graceful-shutdown 10`, so ten seconds is the
@@ -50,9 +53,9 @@ def sqlite_busy_timeout_ms() -> int:
     """Half the shutdown window: the whole queue drains inside it with the same margin again spare.
 
     At the values above that is 5s, or twenty writers queued ahead of you — far past any contention
-    a single-worker identity service produces, and still a bounded wait rather than a hang. Both
-    bounds move it: a slower hash inside the write transaction, or a longer shutdown window, widen
-    the room; a shorter shutdown window narrows it.
+    a single-worker identity service produces, and still a bounded wait rather than a hang. The
+    value follows the upper bound — a longer shutdown window widens it, a shorter one narrows it —
+    and the lower bound is what it must stay above.
 
     A function rather than a module constant, for the reason `otp_service._window_cap` gives: a
     constant assigned from an expression is indistinguishable from the same number typed in, so a

@@ -232,7 +232,7 @@ def test_renewing_neither_hashes_a_password_nor_spends_the_guess_budget():
 
     for forbidden in ("verify_password", "hash_password", "dummy_verify_password"):
         assert forbidden not in source, f"the refresh path reaches {forbidden}"
-    for forbidden in ("guess_budget", "_reject_if_password_budget_spent", "_charge_password_failure"):
+    for forbidden in ("guess_budget", "_spend_password_attempt", "_log_password_failure"):
         assert forbidden not in source, f"the refresh path is metered by {forbidden}"
 
     # Positive control: the limiter it must not touch is real and does fire elsewhere.

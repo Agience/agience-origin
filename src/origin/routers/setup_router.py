@@ -24,7 +24,12 @@ from origin import config
 from origin.key_manager import delete_setup_token, get_setup_token
 from origin.db import persons as db_persons
 from origin.db.session import get_db
-from origin.services.auth_service import create_jwt_token, hash_password
+from origin.services.auth_service import (
+    create_jwt_token,
+    hash_password,
+    person_token_claims,
+    run_kdf,
+)
 from origin.services.platform_settings_service import (
     is_secret_key,
     settings as platform_settings,
@@ -232,7 +237,8 @@ async def complete_setup(
         if body.operator.password and len(body.operator.password) < 12:
             raise HTTPException(status_code=422, detail="Password must be at least 12 characters")
         password_hash = (
-            hash_password(body.operator.password) if body.operator.password else None
+            await run_kdf(hash_password, body.operator.password)
+            if body.operator.password else None
         )
         op_email = (body.operator.email or "").lower() if body.operator.email else ""
         person_name = body.operator.name or (op_email.split("@")[0] if op_email else "operator")
@@ -332,15 +338,10 @@ async def complete_setup(
     db.commit()
 
     if operator_id and body.operator:
-        user_data = {
-            "sub": operator_id,
-            "email": op_email,
-            "name": person_name,
-            "picture": "",
-            "roles": ["platform:admin"],
-            "client_id": getattr(config, "PLATFORM_CLIENT_ID", "platform"),
-            "aud": config.AUTHORITY_ISSUER,
-        }
+        user_data = person_token_claims(
+            person, client_id=getattr(config, "PLATFORM_CLIENT_ID", "platform"),
+            roles=["platform:admin"],
+        )
         access_token = create_jwt_token(user_data)
         refresh_token_str = create_jwt_token(
             {**user_data, "token_type": "refresh"}, expires_hours=24 * 30

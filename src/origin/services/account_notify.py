@@ -16,6 +16,11 @@ Best-effort by construction: the send runs on a worker thread and every failure 
 a log line. A notification is not worth failing a registration for, and this is the last thing to
 touch the request.
 
+Capped per hour (`_NOTICES_PER_HOUR`). Registration is unauthenticated, so without a cap anyone
+registering in bulk sends the operator one mail per account, from the platform's own sending
+account. Past the cap one notice says the rest are paused, and each account it holds back is
+logged by id instead.
+
 Configured with:
     ACCOUNT_NOTIFY_TO      where to send. Unset disables the whole thing.
     ACCOUNT_NOTIFY_SUBJECT optional prefix, default "[Agience]".
@@ -26,7 +31,9 @@ import asyncio
 import logging
 import os
 import threading
-from typing import Any, List
+import time
+from collections import deque
+from typing import Any, List, Optional
 
 from sqlalchemy import event
 from sqlalchemy.orm import Session as _Session
@@ -97,6 +104,58 @@ def _is_probe(person: Any) -> bool:
     return email.endswith(_RESERVED_TLDS)
 
 
+#: How many account-created notices one hour may send. A real sign-up is rare, so an hour
+#: with more than this is somebody registering in bulk, and one mail per account is then a flood
+#: in the operator's inbox and a drain on the sending account's daily quota.
+_NOTICES_PER_HOUR = 10
+_HOUR = 3600.0
+
+_budget_lock = threading.Lock()
+_sent_at: deque = deque()
+_paused_at: Optional[float] = None
+
+
+def _now() -> float:
+    return time.monotonic()
+
+
+def _admit(now: float) -> str:
+    """"send" while the hour has room; past it "pause" once per hour, then "hold"."""
+    global _paused_at
+    with _budget_lock:
+        while _sent_at and now - _sent_at[0] >= _HOUR:
+            _sent_at.popleft()
+        if len(_sent_at) < _NOTICES_PER_HOUR:
+            _sent_at.append(now)
+            return "send"
+        if _paused_at is None or now - _paused_at >= _HOUR:
+            _paused_at = now
+            return "pause"
+        return "hold"
+
+
+def reset() -> None:
+    """Drop the hour's count. For tests; nothing in the serving path calls it."""
+    global _paused_at
+    with _budget_lock:
+        _sent_at.clear()
+        _paused_at = None
+
+
+def _describe_pause() -> tuple[str, str]:
+    subject = f"{os.getenv('ACCOUNT_NOTIFY_SUBJECT', '[Agience]')} New-account notices paused"
+    body = "\n".join([
+        f"More than {_NOTICES_PER_HOUR} accounts were created on origin.agience.ai in the last "
+        "hour.",
+        "",
+        "Notices resume as that hour's notices age out, at most "
+        f"{_NOTICES_PER_HOUR} an hour, and this message repeats at most hourly while the rate "
+        "stays above it. Accounts held back are not announced later; each is logged by id in the "
+        "journal (agience.origin.account_notify).",
+    ])
+    return subject, body
+
+
 def _send(person: Any) -> None:
     """Runs on a worker thread. Never raises."""
     try:
@@ -108,10 +167,17 @@ def _send(person: Any) -> None:
         if not email_service.is_configured():
             logger.info("account-created notification skipped: no email provider configured")
             return
-        subject, body = _describe(person)
+        verdict = _admit(_now())
+        if verdict != "send":
+            logger.warning("account-created notification held back (more than %d this hour): "
+                           "person %s", _NOTICES_PER_HOUR, getattr(person, "id", ""))
+            if verdict == "hold":
+                return
+        subject, body = _describe(person) if verdict == "send" else _describe_pause()
         html = "<pre style='font:14px/1.5 ui-monospace,monospace'>" + body + "</pre>"
         asyncio.run(email_service.send_email(_recipient(), subject, html, body))
-        logger.info("account-created notification sent to %s", _recipient())
+        logger.info("account-created %s sent to %s",
+                    "notification" if verdict == "send" else "pause notice", _recipient())
     except Exception:
         # The account exists and the person is signed in. A failed notification changes nothing
         # for them, so it must not change anything for the request either.

@@ -18,18 +18,26 @@ from __future__ import annotations
 
 import base64
 import fnmatch
+import functools
 import hashlib
 import hmac
+import logging
+import os
 import secrets
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Tuple
 from urllib.parse import urlparse
 
+import anyio.to_thread
+from anyio import CapacityLimiter
+from anyio.lowlevel import RunVar
 from jose import jwt
 
 from origin import config
 from origin.key_manager import get_key_id, get_private_key_pem
+
+_logger = logging.getLogger(__name__)
 
 JWT_ALGORITHM = "RS256"
 NONCE_TTL_SECONDS = 1800
@@ -122,6 +130,31 @@ def create_jwt_token(user_data: dict, expires_hours: Optional[float] = None) -> 
     )
 
 
+def person_token_claims(person, *, client_id: str, roles: Optional[list[str]] = None) -> dict:
+    """The claims of an access token that names a person, for every route that signs one in.
+
+    `email_verified` is the stored fact about `email`, and peers decide access from it: Mantle
+    matches an email or domain invite only when the token asserts it, and reads its absence as
+    false. Every person mint goes through here so no sign-in route can issue a token that omits
+    it. A refresh copies these claims forward, so a refreshed token carries it too.
+
+    `roles` is included only when the caller computes it; the OTP and passkey routes mint without
+    it and the refresh grant derives it.
+    """
+    claims = {
+        "sub": str(person.id),
+        "email": person.email or "",
+        "name": person.name or "",
+        "picture": person.picture or "",
+        "email_verified": bool(person.email_verified),
+        "client_id": client_id,
+        "aud": config.AUTHORITY_ISSUER,
+    }
+    if roles is not None:
+        claims["roles"] = roles
+    return claims
+
+
 def issue_delegation_token(server_client_id: str, user_id: str, ttl_seconds: int = 300) -> str:
     """Short-lived RFC 8693 delegation JWT — server acting on behalf of a user.
 
@@ -211,6 +244,186 @@ def _configured_iters() -> int:
     return int(getattr(config, "PASSWORD_PBKDF2_ITERS", 0) or DEFAULT_PBKDF2_ITERS)
 
 
+def kdf_threads() -> int:
+    """How many key derivations (PBKDF2 here, bcrypt for OTP codes and client secrets) run at once.
+
+    `ORIGIN_KDF_THREADS` when set to a positive integer. Otherwise one fewer than the CPUs this
+    process may run on — `os.sched_getaffinity` where the platform has it, so a pinned or
+    cpuset-limited process counts its own CPUs rather than the host's, else `os.cpu_count()`. The
+    derivations are CPU-bound and `hashlib.pbkdf2_hmac` releases the GIL, so they run in parallel up
+    to that many cores; the one held back is for the event loop, which also runs every database
+    query. The floor is 1, not 2: on a single-CPU process the loop and one derivation share the
+    core, and a second derivation thread would only take time from the loop. A CPU quota (cgroup
+    `cpu.max`) is invisible to both calls; a quota-limited deployment sets `ORIGIN_KDF_THREADS`.
+    """
+    raw = os.getenv("ORIGIN_KDF_THREADS", "").strip()
+    if raw:
+        try:
+            n = int(raw)
+        except ValueError:
+            n = 0
+        if n >= 1:
+            return n
+    try:
+        cpus = len(os.sched_getaffinity(0))
+    except AttributeError:
+        cpus = os.cpu_count() or 1
+    return max(1, cpus - 1)
+
+
+#: The limiter those derivations queue on, one per event loop (the same shape anyio uses for its
+#: default limiter), sized by `kdf_threads()` when it is first used. Separate from anyio's default
+#: thread limiter on purpose: that one (40 threads) also runs every synchronous dependency,
+#: `get_db` among them, so derivations sharing it let a spray of failing sign-ins take every thread
+#: and stall each request that touches the database. A derivation waiting here holds no thread.
+_kdf_limiter: RunVar = RunVar("origin_kdf_limiter")
+
+
+def kdf_limiter() -> CapacityLimiter:
+    try:
+        return _kdf_limiter.get()
+    except LookupError:
+        limiter = CapacityLimiter(kdf_threads())
+        _kdf_limiter.set(limiter)
+        return limiter
+
+
+async def run_kdf(func, *args):
+    """Run `func(*args)` — a key derivation, or code that performs one — in a worker thread on
+    `kdf_limiter()`, off the event loop and off the default thread pool."""
+    return await anyio.to_thread.run_sync(func, *args, limiter=kdf_limiter())
+
+
+# ---------------------------------------------------------------------------
+# Admission to the routes that spend a key derivation
+# ---------------------------------------------------------------------------
+#: How many derivation-spending requests may be admitted per derivation thread, beyond the one each
+#: thread is running. A derivation takes a few hundred milliseconds at the configured cost, so at
+#: this depth the last request admitted waits about a second for its turn. Past it, a quick 503
+#: with `Retry-After` serves a person better than a request that sits in a queue for seconds. The
+#: count is of requests admitted — running, queued, or still on their way to the queue — so the
+#: number of derivation-spending requests open at once is at most
+#: `(KDF_QUEUE_PER_THREAD + 1) * kdf_threads()`, however many arrive together. It reads only that
+#: count, never who is asking, so a refusal says nothing about any account.
+KDF_QUEUE_PER_THREAD = 4
+
+#: How many derivation-spending requests one client may have in flight at once. One person signs
+#: in one request at a time; this leaves room for several people behind one address (a household,
+#: an office NAT) and, at a few hundred milliseconds per derivation, still sustains roughly a dozen
+#: sign-ins a second from one address. What it stops is one client occupying the whole queue, so
+#: the shedding above falls on everyone. A client is its network (`guess_budget._client_network`);
+#: a peer in `SHARED_CLIENT_NETWORKS` carries many people's requests and is exempt.
+KDF_IN_FLIGHT_PER_CLIENT = 4
+
+#: Seconds a refused caller is told to wait: about the time the queue above takes to drain.
+KDF_RETRY_AFTER_S = 2
+
+#: How often a refusal is logged: once per client (or once for the shed) per window, the quarter
+#: hour the mail cap logs on, so a sustained refusal is visible without a line per request.
+KDF_LOG_WINDOW = timedelta(minutes=15)
+
+#: client network -> requests in flight. Entries are removed when they reach zero, so the dict
+#: holds at most one entry per client with a request currently open.
+_kdf_in_flight: dict = {}
+
+#: Derivation-spending requests admitted and not yet released, across every client.
+_kdf_admitted = 0
+
+
+class KdfRefused(Exception):
+    """A derivation-spending request refused at admission: the status, the text, a
+    machine-readable `error` (`busy` for the shed, `too_many_in_flight` for the per-client cap), and
+    the wait to report."""
+
+    def __init__(self, status_code: int, detail: str, error: str) -> None:
+        super().__init__(detail)
+        self.status_code = status_code
+        self.detail = detail
+        self.error = error
+        self.retry_after = KDF_RETRY_AFTER_S
+
+
+def kdf_admit(client: Optional[str]) -> Optional[str]:
+    """Admit one derivation-spending request from `client`, or raise `KdfRefused`.
+
+    Every admitted request must be handed to `kdf_release` exactly once when it ends, with what this
+    returned: the client's key, or None for a peer in `SHARED_CLIENT_NETWORKS`, which is exempt from
+    the per-client cap but still counted toward the shed. A request with no client address (a Unix
+    socket, some ASGI servers) is counted as the client "unknown". Runs on the event loop, with no
+    await, so the checks and the counts are one step.
+    """
+    global _kdf_admitted
+    from origin.services import guess_budget
+
+    now = datetime.now(timezone.utc)
+    limiter = kdf_limiter()
+    if _kdf_admitted >= (KDF_QUEUE_PER_THREAD + 1) * limiter.total_tokens:
+        guess_budget._log_once_per_window(
+            "kdf-shed", "all", now, KDF_LOG_WINDOW,
+            "sign-in requests are being shed with 503: %d derivation-spending requests are open, "
+            "the most %d derivation threads admit", _kdf_admitted, limiter.total_tokens, to=_logger)
+        raise KdfRefused(503, "Sign-in is busy. Please try again in a moment.", "busy")
+    client = client or "unknown"
+    key = None
+    if not guess_budget._is_shared_client_network(client):
+        key = guess_budget._client_network(client)
+        if _kdf_in_flight.get(key, 0) >= KDF_IN_FLIGHT_PER_CLIENT:
+            guess_budget._log_once_per_window(
+                "kdf-client", key, now, KDF_LOG_WINDOW,
+                "client %s reached the in-flight sign-in cap (%d); further sign-ins from it get 429 "
+                "while it holds them. If this is a reverse proxy, Origin is not seeing real client "
+                "addresses (FORWARDED_ALLOW_IPS; see SHARED_CLIENT_NETWORKS in config.py)",
+                key, KDF_IN_FLIGHT_PER_CLIENT, to=_logger)
+            raise KdfRefused(
+                429, "Too many sign-ins in progress from your network; retry in a moment.",
+                "too_many_in_flight")
+        _kdf_in_flight[key] = _kdf_in_flight.get(key, 0) + 1
+    _kdf_admitted += 1
+    return key
+
+
+def kdf_release(key: Optional[str]) -> None:
+    """End one admitted request: `key` is what `kdf_admit` returned for it."""
+    global _kdf_admitted
+    _kdf_admitted = max(0, _kdf_admitted - 1)
+    if key is None:
+        return
+    left = _kdf_in_flight.get(key, 0) - 1
+    if left <= 0:
+        _kdf_in_flight.pop(key, None)
+    else:
+        _kdf_in_flight[key] = left
+
+
+# ---------------------------------------------------------------------------
+# Log tags
+# ---------------------------------------------------------------------------
+def log_tag(value: str) -> str:
+    """A short, stable tag for an address or username in the log: enough to correlate lines about
+    one value, without writing what an unauthenticated caller typed into the log.
+
+    Keyed, not a bare hash: an unkeyed hash of an address is reversed by hashing a list of
+    candidate addresses. The key is derived from `platform_internal.secret` (see `_log_tag_key`),
+    so a log that leaves the box cannot be matched against guesses without that file too."""
+    return hmac.new(_log_tag_key(), (value or "").encode(), hashlib.sha256).hexdigest()[:12]
+
+
+@functools.lru_cache(maxsize=1)
+def _log_tag_key() -> bytes:
+    """The log-tag key: derived from the secret the session cookie is signed with
+    (`KEYS_DIR/platform_internal.secret`, which every provisioned node has), under its own label so
+    the signing key itself is never used for anything else. Before that file exists, a random
+    per-process key: tags then correlate within one run only."""
+    path = config.KEYS_DIR / "platform_internal.secret"
+    try:
+        secret = path.read_bytes().strip()
+    except OSError:
+        secret = b""
+    if not secret:
+        return secrets.token_bytes(32)
+    return hmac.new(secret, b"origin log tag v1", hashlib.sha256).digest()
+
+
 def _pbkdf2_sha256(password: str, salt: bytes, iters: int) -> bytes:
     return hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, iters)
 
@@ -232,18 +445,36 @@ def hash_password(password: str) -> str:
 
 
 def verify_password(password: str, stored_hash: str) -> bool:
+    """Whether `password` matches `stored_hash`, at no less than the configured cost.
+
+    A hash stored at a lower count derives faster than `dummy_verify_password`, and one in an
+    unknown format or unparseable derives nothing, so either would tell a caller timing a failed
+    sign-in which accounts carry such a hash. Each spends the difference after its answer is
+    known, so every failed verify costs at least the configured count."""
     if not password or not stored_hash:
         return False
+    configured = _configured_iters()
     try:
         alg, iters_s, salt_b64, dk_b64 = stored_hash.split("$", 3)
         if alg != _PWD_ALG:
+            _spend_derivation(password, configured)
             return False
+        iters = int(iters_s)
         salt = _b64d(salt_b64)
         expected = _b64d(dk_b64)
-        actual = _pbkdf2_sha256(password, salt, int(iters_s))
-        return secrets.compare_digest(actual, expected)
+        actual = _pbkdf2_sha256(password, salt, iters)
     except Exception:
+        _spend_derivation(password, configured)
         return False
+    if iters < configured:
+        _spend_derivation(password, configured - iters)
+    return secrets.compare_digest(actual, expected)
+
+
+def _spend_derivation(password: str, iters: int) -> None:
+    """Run `iters` rounds of the password derivation and discard the result."""
+    if iters > 0:
+        _pbkdf2_sha256(password or "", b"\x00" * 16, iters)
 
 
 def password_hash_is_current(stored_hash: str | None) -> bool:

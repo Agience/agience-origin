@@ -137,7 +137,10 @@ def get_or_create_user_by_oidc_identity(
     if existing:
         dirty = False
         if existing.email != email:
+            # A new address is confirmed only if the provider says so. The account's old address
+            # being confirmed says nothing about this one.
             existing.email = email
+            existing.email_verified = bool(email_verified)
             dirty = True
         if existing.name != name:
             existing.name = name
@@ -191,9 +194,13 @@ def get_or_create_user_by_oidc_identity(
         return claimed
 
     # ── 3. nobody holds this address: a new person ─────────────────────────────────────────────
+    # Confirmed only if the provider says so. The column defaults to confirmed, and a provider that
+    # lets anyone type an address would otherwise hand them a confirmed account at someone else's:
+    # one that password reset and email invites (Mantle's claim by address) then treat as theirs.
     person = db_persons.create(
         db,
-        {"email": email, "name": name, "picture": picture},
+        {"email": email, "name": name, "picture": picture,
+         "email_verified": bool(email_verified)},
     )
     # The identity is a row, attached after the person exists. `verified=True` because reaching
     # here means the provider completed its flow and vouched for this subject.
