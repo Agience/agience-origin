@@ -19,7 +19,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Annotated, Optional
-from urllib.parse import urlencode, urlparse
+from urllib.parse import quote, urlencode, urlparse
 
 import bcrypt
 from authlib.common.security import generate_token
@@ -989,7 +989,7 @@ async def _mail_sign_in_code(
         return
     code = await otp_service.issue_otp(db, email)
     if code is not None:
-        background_tasks.add_task(otp_service.deliver_otp, email, code)
+        background_tasks.add_task(otp_service.deliver_otp, email, code, _mail_context(request))
 
 
 @auth_router.post("/authorize/otp/verify", dependencies=_KDF_ADMISSION)
@@ -2747,6 +2747,13 @@ async def email_verify_request(
     return {"sent": True}
 
 
+def _mail_context(request: Optional[Request]) -> str:
+    """The "requested on ... from ..." line a sign-in mail carries (`email_service.request_context`)."""
+    if request is None:
+        return ""
+    return email_service.request_context(request.headers.get("user-agent"))
+
+
 def _mail_send_admitted(request: Request, email: str, what: str) -> Optional[str]:
     """Charge one unauthenticated mail send to `guess_budget`'s shared send budget. Returns the
     address's log tag when the send may go ahead, None when it must be dropped.
@@ -3006,7 +3013,8 @@ def _queue_verification_email(
     url = _verification_url(user, nonce)
     if db is not None:
         _release_db(db)
-    background_tasks.add_task(email_service.send_email_verification, email, url)
+    background_tasks.add_task(email_service.send_email_verification, email, url,
+                              _mail_context(request))
     return email
 
 
@@ -3035,7 +3043,7 @@ async def _send_verification_email(
     if db is not None:
         _release_db(db)
     try:
-        await email_service.send_email_verification(email, url)
+        await email_service.send_email_verification(email, url, _mail_context(request))
     except Exception:
         logger.warning("Failed to send verification email to address %s", _log_tag(email.lower()),
                        exc_info=True)
@@ -3082,10 +3090,14 @@ async def password_reset_request(
             },
             expires_hours=1,
         )
-        reset_url = f"{config.FACET_URI.rstrip('/')}/reset-password?token={reset_token}"
+        # The address rides along so the page can name the account a password manager saves the
+        # new password under; the link only ever goes to that mailbox.
+        reset_url = (f"{config.FACET_URI.rstrip('/')}/reset-password?token={reset_token}"
+                     f"&email={quote(user.email or '')}")
         to = user.email
         _release_db(db)  # the send runs after the response; see `_queue_verification_email`
-        background_tasks.add_task(email_service.send_password_reset, to, reset_url)
+        background_tasks.add_task(email_service.send_password_reset, to, reset_url,
+                                  _mail_context(request))
         logger.info("Password reset email queued for address %s", tag)
     else:
         logger.info("Password reset requested for an unknown or unconfirmed passwordless "

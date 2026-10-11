@@ -85,9 +85,9 @@ def test_a_deactivated_account_is_mailed_no_code_and_no_reset(db_client, monkeyp
     from origin.services import email_service, otp_service
 
     sent: list[str] = []
-    monkeypatch.setattr(otp_service, "deliver_otp", lambda email, code: sent.append(f"code:{email}"))
+    monkeypatch.setattr(otp_service, "deliver_otp", lambda email, code, context="": sent.append(f"code:{email}"))
     monkeypatch.setattr(email_service, "is_configured", lambda: True)
-    monkeypatch.setattr(email_service, "send_password_reset", lambda to, url: sent.append(f"reset:{to}"))
+    monkeypatch.setattr(email_service, "send_password_reset", lambda to, url, context="": sent.append(f"reset:{to}"))
     monkeypatch.setattr(ar, "_mail_send_admitted", lambda request, email, what: "tag")
 
     _make_person("d3@example.com")

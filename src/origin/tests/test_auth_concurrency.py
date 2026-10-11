@@ -260,7 +260,7 @@ def test_address_variants_share_one_otp_ledger_and_one_cap():
     app.dependency_overrides[session_module.get_db] = _db
     sent = []
 
-    async def fake_send(email, code):
+    async def fake_send(email, code, context=""):
         sent.append((email, code))
         return True
 
@@ -490,7 +490,7 @@ def test_registration_frees_its_admission_slot_before_the_background_mail():
     app = _app(mock_db=True)
     seen = {}
 
-    async def send(email, url):
+    async def send(email, url, context=""):
         seen["admitted"] = auth_service._kdf_admitted
         seen["in_flight"] = dict(auth_service._kdf_in_flight)
         return True

@@ -12,6 +12,7 @@ import logging
 import os
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
+from datetime import datetime, timezone
 from email.utils import formataddr, formatdate, make_msgid
 from typing import Optional
 
@@ -129,6 +130,28 @@ def _platform() -> str:
     return settings.get("branding.title", "Agience")
 
 
+_BROWSERS = (("Edg/", "Edge"), ("OPR/", "Opera"), ("Firefox/", "Firefox"), ("Chrome/", "Chrome"),
+             ("CriOS/", "Chrome"), ("Safari/", "Safari"))
+_SYSTEMS = (("iPhone", "iPhone"), ("iPad", "iPad"), ("Android", "Android"), ("Windows", "Windows"),
+            ("Mac OS X", "macOS"), ("CrOS", "ChromeOS"), ("Linux", "Linux"))
+
+
+def request_context(user_agent: Optional[str], at: Optional[datetime] = None) -> str:
+    """One sentence saying when and from what a mail was asked for, so its recipient can tell
+    whether it was them: "Requested on 11 Oct 2026 at 15:48 UTC from Chrome on Windows." Only names
+    from a fixed list are used: nothing the caller wrote is copied into the mail."""
+    ua = user_agent or ""
+    browser = next((name for mark, name in _BROWSERS if mark in ua), "a web browser")
+    system = next((name for mark, name in _SYSTEMS if mark in ua), "")
+    when = (at or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    return (f"Requested on {when.day} {when:%b %Y} at {when:%H:%M} UTC from {browser}"
+            + (f" on {system}." if system else "."))
+
+
+def _context_html(context: str) -> str:
+    return f'<p style="color:#777;font-size:13px;">{html.escape(context)}</p>' if context else ""
+
+
 def _logo_url() -> str:
     """The logo at the top of every message: `branding.email_logo_url`, else the 320 px copy this
     Origin serves itself (`web/logo_mail.png`). A mail client shows only an image at a public URL."""
@@ -163,7 +186,7 @@ def _button(url: str, label: str) -> str:
             f"{html.escape(label)}</a>")
 
 
-async def send_otp(to_email: str, code: str) -> bool:
+async def send_otp(to_email: str, code: str, context: str = "") -> bool:
     platform = _platform()
     subject = f"Your {platform} sign-in code"
     inner = (
@@ -174,14 +197,15 @@ async def send_otp(to_email: str, code: str) -> bool:
         f'<span style="font-size:32px;font-weight:bold;letter-spacing:8px;">{html.escape(code)}</span></div>'
         '<p style="color:#777;font-size:13px;">The code expires in 10 minutes. If you did not ask to sign in, '
         "you can ignore this message; nobody can sign in without the code.</p>"
+        + _context_html(context)
     )
     text = (f"Your {platform} sign-in code for {to_email} is: {code}\n\n"
             "The code expires in 10 minutes. If you did not ask to sign in, you can ignore this "
-            "message; nobody can sign in without the code.\n")
+            "message; nobody can sign in without the code.\n" + (f"\n{context}\n" if context else ""))
     return await send_email(to_email, subject, _document(subject, f"Your code is {code}", inner), text)
 
 
-async def send_password_reset(to_email: str, reset_url: str) -> bool:
+async def send_password_reset(to_email: str, reset_url: str, context: str = "") -> bool:
     platform = _platform()
     subject = f"Reset your {platform} password"
     inner = (
@@ -191,16 +215,17 @@ async def send_password_reset(to_email: str, reset_url: str) -> bool:
         + _button(reset_url, "Choose a new password")
         + '<p style="color:#777;font-size:13px;">The link works once and expires in 1 hour. If you did not '
         "ask for this, ignore this message: your password stays as it is.</p>"
+        + _context_html(context)
     )
     text = (f"Someone asked to reset the {platform} password for {to_email}.\n\n"
             f"To choose a new one, open this link:\n{reset_url}\n\n"
             "The link works once and expires in 1 hour. If you did not ask for this, ignore this "
-            "message: your password stays as it is.\n")
+            "message: your password stays as it is.\n" + (f"\n{context}\n" if context else ""))
     return await send_email(to_email, subject,
                             _document(subject, "Choose a new password for your account", inner), text)
 
 
-async def send_email_verification(to_email: str, verify_url: str) -> bool:
+async def send_email_verification(to_email: str, verify_url: str, context: str = "") -> bool:
     platform = _platform()
     subject = f"Confirm your email for {platform}"
     inner = (
@@ -210,10 +235,11 @@ async def send_email_verification(to_email: str, verify_url: str) -> bool:
         + _button(verify_url, "Confirm email")
         + '<p style="color:#777;font-size:13px;">The link expires in 24 hours. If you did not create an '
         "account, ignore this message and nothing is set up.</p>"
+        + _context_html(context)
     )
     text = (f"To finish setting up your {platform} account for {to_email}, confirm this address:\n"
             f"{verify_url}\n\nThe link expires in 24 hours. If you did not create an account, "
-            "ignore this message and nothing is set up.\n")
+            "ignore this message and nothing is set up.\n" + (f"\n{context}\n" if context else ""))
     return await send_email(to_email, subject,
                             _document(subject, "One step left to finish your account", inner), text)
 

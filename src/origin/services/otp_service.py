@@ -200,13 +200,13 @@ async def issue_otp(db: Session, email: str) -> Optional[str]:
     return code
 
 
-async def deliver_otp(email: str, code: str) -> bool:
+async def deliver_otp(email: str, code: str, context: str = "") -> bool:
     """Mail a code `issue_otp` returned. The routes run it as a background task, after the
     response, so the time a mail server takes is not part of what a caller can measure."""
     from origin.services import email_service
 
     email = normalize_email(email)
-    sent = await email_service.send_otp(email, code)
+    sent = await email_service.send_otp(email, code, context)
     if not sent:
         logger.warning("Failed to send OTP email to address %s", log_tag(email))
         return False

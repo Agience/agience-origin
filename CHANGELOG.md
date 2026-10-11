@@ -5,6 +5,15 @@ All notable changes to `agience-origin` are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.2.4] - 2026-10-11
+
+### Added
+- Sign-in code, password reset and email verification mails state when and from what they were requested, for example "Requested on 11 Oct 2026 at 15:48 UTC from Chrome on Windows." Browser and system names come only from a set list; nothing a caller sends is copied into the mail.
+- The password reset link carries the account's address (`&email=`), and the reset page shows it in a read-only `username` field beside the new password, so a password manager saves the new password under that account.
+
+### Changed
+- Every input on the sign-in and reset pages has a `name`, so password managers fill them.
+
 ## [0.2.3] - 2026-10-11
 
 ### Added

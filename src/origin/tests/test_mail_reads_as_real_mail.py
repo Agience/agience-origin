@@ -81,3 +81,31 @@ def test_smtp_and_gmail_messages_carry_the_headers_of_real_mail():
     assert [p.get_content_type() for p in msg.get_payload()] == ["text/plain", "text/html"]
     cfg["reply_to"] = "support@agience.ai"
     assert E._mime(cfg, "a@example.com", "S", "<p/>", None)["Reply-To"] == "support@agience.ai"
+
+
+@pytest.mark.parametrize("ua,said", [
+    ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0 Safari/537.36",
+     "from Chrome on Windows."),
+    ("Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 Version/18.0 Mobile/15E148 Safari/604.1",
+     "from Safari on iPhone."),
+    ("Mozilla/5.0 (Macintosh; Intel Mac OS X 14_6; rv:131.0) Gecko/20100101 Firefox/131.0",
+     "from Firefox on macOS."),
+    ("<script>evil()</script>", "from a web browser."),
+    (None, "from a web browser."),
+])
+def test_the_request_line_names_only_known_browsers_and_systems(ua, said):
+    from datetime import datetime, timezone
+
+    line = E.request_context(ua, datetime(2026, 10, 11, 15, 48, tzinfo=timezone.utc))
+    assert line == f"Requested on 11 Oct 2026 at 15:48 UTC {said}"
+
+
+@pytest.mark.parametrize("send", [
+    lambda c: E.send_password_reset("a@example.com", _URL, c),
+    lambda c: E.send_email_verification("a@example.com", _URL, c),
+    lambda c: E.send_otp("a@example.com", "123456", c),
+], ids=["reset", "verify", "code"])
+def test_the_request_line_is_in_both_parts(sent, send):
+    asyncio.run(send("Requested on 11 Oct 2026 at 15:48 UTC from Chrome on Windows."))
+    (_, _, body, text), = sent
+    assert "from Chrome on Windows." in body and "from Chrome on Windows." in text
