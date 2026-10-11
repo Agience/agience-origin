@@ -65,7 +65,7 @@ def test_a_deactivated_account_is_refused_with_one_clear_answer_and_reactivation
         "only the password's holder learns the account is deactivated"
 
     code, said = _admin("person", "reactivate", "d1@example.com")
-    assert code == 0 and "deactivated=no" in said and "password=set" in said
+    assert code == 0 and "deactivated=no" in said and "password=pbkdf2_sha256/" in said
     assert _login(db_client, "d1@example.com").status_code == 200, "reactivation restores it exactly"
 
 
@@ -110,7 +110,7 @@ def test_a_hash_removed_by_hand_is_restored_from_its_backup_and_only_then(db_cli
                                    "password_hash": hash_password(_PW)}]), encoding="utf-8")
     _admin("person", "deactivate", "audit_probe_x", "--reason", "probe")
     code, said = _admin("person", "reactivate", "audit_probe_x", "--restore-password-from", str(backup))
-    assert code == 0 and "password=set" in said and "deactivated=no" in said
+    assert code == 0 and "password=pbkdf2_sha256/" in said and "deactivated=no" in said
     assert _login(db_client, "audit_probe_x").status_code == 200
 
     code, said = _admin("person", "reactivate", "audit_probe_x", "--restore-password-from", str(backup))
@@ -120,5 +120,13 @@ def test_a_hash_removed_by_hand_is_restored_from_its_backup_and_only_then(db_cli
 def test_show_never_prints_a_hash_and_names_an_unknown_person(db_client):
     _make_person("d5@example.com")
     code, said = _admin("person", "show", "d5@example.com")
-    assert code == 0 and "password=set" in said and "$" not in said
+    assert code == 0 and "password=pbkdf2_sha256/" in said and "modified=20" in said and "$" not in said
     assert _admin("person", "show", "nobody@example.com")[0] == 1
+
+
+def test_the_scheme_names_the_algorithm_and_cost_and_nothing_else():
+    from origin.admin import scheme
+
+    assert scheme(None) == "none"
+    assert scheme("pbkdf2_sha256$600000$c2FsdA$aGFzaA") == "pbkdf2_sha256/600000"
+    assert scheme("$2b$12$abcdefghijklmnopqrstuv") == "unreadable"

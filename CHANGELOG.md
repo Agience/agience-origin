@@ -5,6 +5,12 @@ All notable changes to `agience-origin` are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-10-11
+
+### Changed
+- `origin.admin` person output (`person show`, `person reactivate` and related commands) now reports the password hash's algorithm and cost, such as `password=pbkdf2_sha256/600000`, in place of `password=set`. It shows `none` when no password is set and `unreadable` for a hash that cannot be parsed. The hash itself is never printed.
+- `origin.admin` person output now includes a `modified=` field with the person's last modified time, or `-` when none is recorded.
+
 ## [0.2.1] - 2026-10-11
 
 ### Added

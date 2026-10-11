@@ -21,9 +21,22 @@ from origin.db.session import SessionLocal, init_engine
 from origin.services import person_service
 
 
+def scheme(password_hash: str | None) -> str:
+    """The hash's algorithm and cost (`pbkdf2_sha256/600000`), never the hash: `none` when unset,
+    `unreadable` for anything `verify_password` cannot parse."""
+    if not password_hash:
+        return "none"
+    parts = password_hash.split("$")
+    if len(parts) == 4 and parts[1].isdigit():
+        return f"{parts[0]}/{parts[1]}"
+    return "unreadable"
+
+
 def describe(p) -> str:
+    modified = getattr(p, "modified_time", None)
     return (f"{p.id}  username={p.username or '-'}  email={p.email or '-'}  "
-            f"verified={bool(p.email_verified)}  password={'set' if p.password_hash else 'none'}  "
+            f"verified={bool(p.email_verified)}  password={scheme(p.password_hash)}  "
+            f"modified={modified.isoformat() if modified else '-'}  "
             f"deactivated={p.deactivated_at.isoformat() if p.deactivated_at else 'no'}"
             + (f"  reason={p.deactivated_reason!r}" if p.deactivated_reason else ""))
 
