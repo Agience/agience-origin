@@ -1,0 +1,31 @@
+<!doctype html><html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Signing out · Agience</title><link rel="icon" href="/web/favicon.png"><link rel="stylesheet" href="/web/app.css">
+</head><body>
+<div class="bg"><div class="grad"></div><div class="blob b1"></div><div class="blob b2"></div></div>
+<div class="card">
+  <img class="logo" src="/web/logo_v.png" alt="Agience">
+  <h1>Signing out…</h1>
+  <div class="msg muted" id="msg"></div>
+</div>
+<script src="/web/bg.js"></script>
+<script src="/web/app.js"></script>
+<script>
+// The server session was cleared by `/logout` itself; the token this browser holds for Origin goes
+// here. Then back to `return` only when Origin lists it (the app, or an exact SSO return URI), so this
+// page cannot be used to send someone anywhere else.
+(async () => {
+  clearToken();
+  try { sessionStorage.clear(); } catch (e) {}
+  const back = qs("return");
+  let to = "/";
+  if (back) {
+    const r = await get("/auth/providers");
+    const d = (r.ok && r.data) || {};
+    const listed = (Array.isArray(d.sso_return_uris) ? d.sso_return_uris : []).concat(d.app_uri ? [d.app_uri] : []);
+    if (isListedReturn(back, listed)) to = back;
+  }
+  location.replace(to);
+})();
+</script>
+</body></html>

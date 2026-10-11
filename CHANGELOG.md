@@ -5,6 +5,11 @@ All notable changes to `agience-origin` are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.2.6] - 2026-10-11
+
+### Added
+- `GET /logout` ends Origin's session for the browser: it clears the server session, the page clears the stored token, then it returns to the `return` address only when Origin lists it (`app_uri` or an `sso_return_uris` entry), else to Origin's sign-in page. The account page's "Sign out" goes through it.
+
 ## [0.2.5] - 2026-10-11
 
 ### Added

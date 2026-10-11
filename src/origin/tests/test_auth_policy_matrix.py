@@ -47,6 +47,8 @@ PUBLIC = {
     ("GET", "/account"): _SHELL,
     ("GET", "/login"): _SHELL,
     ("GET", "/reset-password"): _SHELL,
+    # Clears this browser's Origin session and serves the sign-out page; it grants nothing.
+    ("GET", "/logout"): _SHELL,
     ("GET", "/verify-email"): _SHELL,
 
     ("GET", "/.well-known/agience"): _DISCOVERY,

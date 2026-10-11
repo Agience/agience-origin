@@ -648,6 +648,16 @@ def account_page() -> Response:
     return _page("account.html")
 
 
+@app.get("/logout", include_in_schema=False)
+def logout_page(request: Request) -> Response:
+    """Ends Origin's session for this browser: the server session here, and the stored token in the
+    page (`logout.html`), which then returns only to an address Origin lists (`app_uri`,
+    `sso_return_uris`). Without both, a service provider's own sign-out is undone at once: Origin
+    still holds a session and hands it a new token on the next visit."""
+    request.session.clear()
+    return _page("logout.html")
+
+
 @app.get("/reset-password", include_in_schema=False)
 def reset_password_page() -> Response:
     """The "Forgot your password?" target on the sign-in form."""
