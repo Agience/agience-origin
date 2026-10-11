@@ -29,6 +29,10 @@ class Person(Base):
     # false explicitly when email verification is required.
     email_verified = Column(Boolean, nullable=False, server_default=text("1"))
     preferences = Column(JSON, nullable=False, default=dict)
+    # Set: the account signs in nowhere and is mailed nothing (`auth_service.refuse_if_deactivated`).
+    # Nothing else about the account changes, so clearing it restores the account exactly.
+    deactivated_at = Column(DateTime(timezone=True), nullable=True)
+    deactivated_reason = Column(Text, nullable=True)
     created_time = Column(DateTime(timezone=True), nullable=False, default=_utcnow)
     modified_time = Column(
         DateTime(timezone=True), nullable=False, default=_utcnow, onupdate=_utcnow

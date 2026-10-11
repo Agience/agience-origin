@@ -50,7 +50,9 @@ from origin.services.auth_service import (
     email_verification_required,
     hash_password,
     is_client_redirect_allowed,
+    is_deactivated,
     person_token_claims,
+    refuse_if_deactivated,
     run_kdf,
     verify_password,
 )
@@ -973,9 +975,10 @@ async def _mail_sign_in_code(
         await otp_service.spend_code_hash()
         return
     person = db_persons.get_by_email(db, email)
-    if person is None:
+    if person is None or is_deactivated(person):
         _release_db(db)
-        logger.info("sign-in code requested for unknown address %s", tag)
+        logger.info("sign-in code requested for %s address %s",
+                    "a deactivated" if person is not None else "an unknown", tag)
         await otp_service.spend_code_hash()
         return
     if not person.email_verified and email_verification_required(person.email):
@@ -1006,6 +1009,7 @@ async def authorize_local_otp_verify(body: _LocalOTPVerify, db: Session = Depend
     person = db_persons.get_by_id(db, person_id)
     if person is None:
         raise HTTPException(status_code=401, detail="User not found")
+    refuse_if_deactivated(person)
 
     from origin.services.auth_service import is_person_allowed
 
@@ -1248,6 +1252,9 @@ async def authorize_local_password(
 
     guess_budget.clear_password_failures(identifier)
     await _upgrade_password_hash_if_stale(db, person_id, stored_hash, password)
+    # After the password, so only its holder learns the account is deactivated; before the
+    # confirmation link below, so a deactivated account is mailed nothing.
+    refuse_if_deactivated(person)
 
     # This gate is why the account-linking rule holds. An unverified password account signing in
     # here would still carry `email_verified=False`, but as a live session on an address nobody
@@ -1833,7 +1840,8 @@ async def token_endpoint(
     if grant_type == "refresh_token":
         if not refresh_token:
             raise HTTPException(status_code=400, detail="Missing required parameter: refresh_token")
-        return await _grant_refresh_token(background_tasks=background_tasks, refresh_token=refresh_token)
+        return await _grant_refresh_token(background_tasks=background_tasks, refresh_token=refresh_token,
+                                          db=db)
     if grant_type == "client_credentials":
         if not client_id or not client_secret:
             return JSONResponse(
@@ -1954,6 +1962,8 @@ async def _grant_authorization_code(
             logger.info("Setup token validated: promoted %s (%s) to platform operator", user.email, user.id)
 
     issuing_client_id = auth_data["client_id"]
+    # Both branches below, the scoped third-party token included.
+    refuse_if_deactivated(user)
 
     if _is_first_party_client(issuing_client_id):
         # First-party client → full user JWT
@@ -2000,7 +2010,8 @@ async def _grant_authorization_code(
     )
 
 
-async def _grant_refresh_token(*, background_tasks: BackgroundTasks, refresh_token: str):
+async def _grant_refresh_token(*, background_tasks: BackgroundTasks, refresh_token: str,
+                               db: Optional[Session] = None):
     """Exchange a refresh token for a fresh access token. Not rotated, and not revocable.
 
     Refresh tokens are stateless JWTs: nothing is written at mint time, so there is nothing to
@@ -2025,6 +2036,15 @@ async def _grant_refresh_token(*, background_tasks: BackgroundTasks, refresh_tok
         raise HTTPException(status_code=400, detail="Refresh token has no audience — please log in again")
 
     user_data = {k: v for k, v in payload.items() if k not in ("exp", "token_type", "iat")}
+
+    # A deactivated person's refresh tokens stop here, whichever client they were minted for.
+    if db is not None and payload.get("sub"):
+        try:
+            holder = person_service.get_user_by_id(db, str(payload["sub"]))
+        except (ValueError, TypeError):
+            holder = None
+        if holder is not None:
+            refuse_if_deactivated(holder)
 
     # Re-derived from current platform state rather than replayed from what the refresh token was
     # minted with. Refresh tokens live 30 days: copying `roles` through would let a demoted operator
@@ -2590,6 +2610,9 @@ async def password_login(
 
     guess_budget.clear_password_failures(identifier)
     await _upgrade_password_hash_if_stale(db, user_id, stored_hash, password)
+    # After the password, so only its holder learns the account is deactivated; before the
+    # confirmation link below, so a deactivated account is mailed nothing.
+    refuse_if_deactivated(user)
 
     # Block sign-in until the email is verified (when verification is required for
     # this email). Resend the link inline (await) so the user recovers in one step.
@@ -2718,7 +2741,7 @@ async def email_verify_request(
     if tag is None:
         return {"sent": True}
     user = person_service.get_user_by_email(db, email)
-    if user and user.email and not user.email_verified:
+    if user and user.email and not user.email_verified and not is_deactivated(user):
         _queue_verification_email(background_tasks, user, payload.verify_nonce, db=db)
         logger.info("Verification email re-queued for address %s", tag)
     return {"sent": True}
@@ -2792,6 +2815,8 @@ async def email_verify_confirm(
     user = person_service.get_user_by_id(db, str(claims["sub"]))
     if user is None:
         raise HTTPException(status_code=400, detail="Invalid or expired verification token")
+    # Before anything below changes the account (verifying it, or disowning its password).
+    refuse_if_deactivated(user)
 
     # Single-use, by the same mechanism the reset tokens use — see `_email_fingerprint`. Without it
     # this endpoint is replayable for the token's full 24 hours, and each replay re-mints a 30-day
@@ -3046,8 +3071,8 @@ async def password_reset_request(
     if tag is None:
         return {"sent": True}
     user = person_service.get_user_by_email(db, email)
-    # Don't reveal either way to the caller.
-    if user and (user.password_hash or user.email_verified):
+    # Don't reveal either way to the caller. A deactivated account is mailed nothing.
+    if user and (user.password_hash or user.email_verified) and not is_deactivated(user):
         reset_token = create_jwt_token(
             {
                 "sub": str(user.id),
@@ -3071,7 +3096,7 @@ async def password_reset_request(
 def _reset_token_still_applies(user, claims: dict) -> bool:
     """The account exists, may have a password set by mail (it has one, or its address is
     confirmed), and has not changed password since the link was minted."""
-    if not user or not (user.password_hash or user.email_verified):
+    if not user or not (user.password_hash or user.email_verified) or is_deactivated(user):
         return False
     return _pw_fingerprint(user.password_hash) == claims.get("pwf")
 

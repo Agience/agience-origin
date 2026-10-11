@@ -5,6 +5,17 @@ All notable changes to `agience-origin` are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-10-11
+
+### Added
+- The `persons` table gains nullable `deactivated_at` and `deactivated_reason` columns (migration `0007_person_deactivation`, applied at startup). Existing accounts stay active. Downgrading drops both columns, so every deactivated account becomes active again.
+- Accounts can be deactivated. A deactivated account cannot sign in through `/auth/password/login`, the local password and one-time-code authorize routes, the authorization-code grant, the `refresh_token` grant on `/auth/token`, or email verification confirmation. Each of these returns a 403 with the same message, `This account is deactivated. Contact support to restore it.`
+- `python -m origin.admin person show|deactivate|reactivate <email|username|id>` lets operators manage account state. `deactivate` requires `--reason`. `reactivate` restores the account exactly, and `--restore-password-from FILE` puts back a password hash from a JSON backup of person rows, only for an account that has no password. Password hashes are never printed.
+
+### Changed
+- The password routes return 403 only after the correct password is supplied, so only the password's holder learns the account is deactivated. Other credentials get the usual 401.
+- A deactivated account is sent no mail. `/auth/otp/request`, `/auth/password/reset-request` and the email verification resend send nothing and give the same reply as for an unknown address. Outstanding password reset links stop working for it.
+
 ## [0.2.0] - 2026-10-09
 
 ### Breaking

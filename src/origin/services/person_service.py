@@ -367,6 +367,50 @@ def set_password(db: Session, user_id: str, password_hash: str) -> Person:
     return user
 
 
+def find(db: Session, identifier: str) -> Optional[Person]:
+    """The person an email address, username or id names."""
+    ident = (identifier or "").strip()
+    if not ident:
+        return None
+    if "@" in ident:
+        return get_user_by_email(db, ident.lower())
+    try:
+        found = get_user_by_id(db, ident)
+    except (ValueError, TypeError):
+        found = None
+    return found or get_user_by_username(db, ident)
+
+
+def deactivate(db: Session, user_id: str, reason: str) -> Person:
+    """Switch an account off. Nothing but the two deactivation fields changes, so `reactivate`
+    restores it exactly. Caller commits the session."""
+    user = get_user_by_id(db, user_id)
+    if user is None:
+        raise ValueError(f"Person {user_id} not found")
+    if user.deactivated_at is None:
+        from datetime import datetime, timezone
+        user.deactivated_at = datetime.now(timezone.utc)
+    user.deactivated_reason = reason
+    db.flush()
+    return user
+
+
+def reactivate(db: Session, user_id: str, password_hash: Optional[str] = None) -> Person:
+    """Switch an account back on. `password_hash` puts back a hash removed by hand before this
+    state existed; it is refused when the account already has one. Caller commits the session."""
+    user = get_user_by_id(db, user_id)
+    if user is None:
+        raise ValueError(f"Person {user_id} not found")
+    if password_hash is not None:
+        if user.password_hash:
+            raise ValueError(f"Person {user_id} already has a password; nothing to restore")
+        user.password_hash = password_hash
+    user.deactivated_at = None
+    user.deactivated_reason = None
+    db.flush()
+    return user
+
+
 def set_email_verified(db: Session, user_id: str, verified: bool = True) -> Person:
     """Mark a person's email as verified (or not). Caller commits the session."""
     user = get_user_by_id(db, user_id)

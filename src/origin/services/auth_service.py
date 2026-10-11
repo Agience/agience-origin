@@ -32,6 +32,7 @@ from urllib.parse import urlparse
 import anyio.to_thread
 from anyio import CapacityLimiter
 from anyio.lowlevel import RunVar
+from fastapi import HTTPException
 from jose import jwt
 
 from origin import config
@@ -130,6 +131,22 @@ def create_jwt_token(user_data: dict, expires_hours: Optional[float] = None) -> 
     )
 
 
+#: The one answer a deactivated account gets, from every route that would sign it in.
+DEACTIVATED_DETAIL = "This account is deactivated. Contact support to restore it."
+
+
+def is_deactivated(person) -> bool:
+    return bool(getattr(person, "deactivated_at", None))
+
+
+def refuse_if_deactivated(person) -> None:
+    """403 for a deactivated account. Called by `person_token_claims`, so no route mints a person
+    token for one, and before that by the routes that would otherwise do something first (send a
+    confirmation link, mint an authorization code, refresh)."""
+    if is_deactivated(person):
+        raise HTTPException(status_code=403, detail=DEACTIVATED_DETAIL)
+
+
 def person_token_claims(person, *, client_id: str, roles: Optional[list[str]] = None) -> dict:
     """The claims of an access token that names a person, for every route that signs one in.
 
@@ -141,6 +158,7 @@ def person_token_claims(person, *, client_id: str, roles: Optional[list[str]] = 
     `roles` is included only when the caller computes it; the OTP and passkey routes mint without
     it and the refresh grant derives it.
     """
+    refuse_if_deactivated(person)
     claims = {
         "sub": str(person.id),
         "email": person.email or "",
