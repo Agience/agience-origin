@@ -5,6 +5,18 @@ All notable changes to `agience-origin` are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.2.3] - 2026-10-11
+
+### Added
+- `email.reply_to` setting sets the `Reply-To` address on outgoing mail; when empty, replies go to the sender address.
+- `branding.email_logo_url` setting chooses the logo shown at the top of every email. By default the message uses the 320 px logo this Origin serves at `/web/logo_mail.png`.
+- Mail sent through the `email_service` SMTP and Gmail providers now carries `Date` and `Message-ID` headers, the latter on the sender's own domain, and its text and HTML parts are encoded as UTF-8.
+
+### Changed
+- Sign-in code, password reset, email verification and invitation messages from `email_service` are complete HTML documents with a preview line, the logo, and a footer saying who sent the message and why. Each has a fuller plain-text version, names the recipient address, and uses new subject lines, for example "Your Agience sign-in code" and "Confirm your email for Agience".
+- Invitation emails escape the inviter's name, the resource name and the personal message, so they show as plain text in the HTML.
+- Links in emails are escaped inside the HTML and appear whole in the plain-text version.
+
 ## [0.2.2] - 2026-10-11
 
 ### Changed

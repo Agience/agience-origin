@@ -7,15 +7,18 @@ Providers: SMTP, AWS SES, SendGrid, Resend, Gmail. Configured through Origin's
 from __future__ import annotations
 
 import base64
+import html
 import logging
 import os
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
+from email.utils import formataddr, formatdate, make_msgid
 from typing import Optional
 
 import aiosmtplib
 import httpx
 
+from origin import config
 from origin.services.platform_settings_service import settings
 
 logger = logging.getLogger(__name__)
@@ -68,6 +71,7 @@ def _get_provider_config() -> dict:
         "provider": _provider(),
         "from_address": _from_address(),
         "from_name": settings.get("email.from_name", "Agience"),
+        "reply_to": settings.get("email.reply_to", "") or "",
         "smtp_host": settings.get("email.smtp.host", ""),
         "smtp_port": settings.get_int("email.smtp.port", 587),
         # username / access_key_id are stored as plain settings by both writers
@@ -121,51 +125,97 @@ async def send_email(
         return False
 
 
-async def send_otp(to_email: str, code: str) -> bool:
-    platform_name = settings.get("branding.title", "Agience")
-    subject = f"Your {platform_name} verification code"
-    html_body = (
-        '<div style="font-family: system-ui, sans-serif; max-width: 400px; margin: 0 auto;">'
-        '<h2 style="color: #1a1a1a;">Verification code</h2>'
-        f'<p style="color: #666; font-size: 14px;">Enter this code to sign in to {platform_name}:</p>'
-        '<div style="background: #f5f5f5; border-radius: 8px; padding: 20px; text-align: center; margin: 20px 0;">'
-        f'<span style="font-size: 32px; font-weight: bold; letter-spacing: 8px; color: #1a1a1a;">{code}</span>'
-        '</div>'
-        '<p style="color: #999; font-size: 12px;">This code expires in 10 minutes. If you didn\'t request this, ignore this email.</p>'
-        '</div>'
+def _platform() -> str:
+    return settings.get("branding.title", "Agience")
+
+
+def _logo_url() -> str:
+    """The logo at the top of every message: `branding.email_logo_url`, else the 320 px copy this
+    Origin serves itself (`web/logo_mail.png`). A mail client shows only an image at a public URL."""
+    return (settings.get("branding.email_logo_url")
+            or f"{str(config.AUTHORITY_ISSUER).rstrip('/')}/web/logo_mail.png")
+
+
+def _document(title: str, preview: str, inner: str) -> str:
+    """A whole HTML document around one message: doctype, language, charset, title, a preview line
+    (what a mail client shows beside the subject), the logo, and a footer saying who sent it and
+    why. A bare fragment holding one button is what phishing looks like to a junk filter."""
+    platform = html.escape(_platform())
+    logo = (f'<img src="{html.escape(_logo_url(), quote=True)}" alt="{platform}" width="160" height="40" '
+            'style="display:block;border:0;margin:0 0 24px;">')
+    return (
+        '<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">'
+        '<meta name="viewport" content="width=device-width, initial-scale=1">'
+        f"<title>{html.escape(title)}</title></head>"
+        '<body style="margin:0;padding:24px;background:#ffffff;font-family:system-ui,sans-serif;color:#1a1a1a;">'
+        f'<div style="display:none;max-height:0;overflow:hidden;">{html.escape(preview)}</div>'
+        f'<div style="max-width:480px;margin:0 auto;">{logo}{inner}'
+        '<hr style="border:none;border-top:1px solid #eee;margin:32px 0 16px;">'
+        f'<p style="color:#999;font-size:12px;">This message was sent by {platform} because this address '
+        "was used on its sign-in page. Replies reach a person.</p>"
+        "</div></body></html>"
     )
-    text_body = f"Your {platform_name} verification code is: {code}\n\nThis code expires in 10 minutes."
-    return await send_email(to_email, subject, html_body, text_body)
+
+
+def _button(url: str, label: str) -> str:
+    return (f'<a href="{html.escape(url, quote=True)}" style="display:inline-block;background:#1a1a1a;'
+            'color:#ffffff;padding:12px 24px;border-radius:6px;text-decoration:none;margin:20px 0;">'
+            f"{html.escape(label)}</a>")
+
+
+async def send_otp(to_email: str, code: str) -> bool:
+    platform = _platform()
+    subject = f"Your {platform} sign-in code"
+    inner = (
+        '<h2 style="margin:0 0 12px;">Your sign-in code</h2>'
+        f'<p style="color:#555;font-size:14px;">Enter this code to sign in to {html.escape(platform)} '
+        f"as {html.escape(to_email)}:</p>"
+        '<div style="background:#f5f5f5;border-radius:8px;padding:20px;text-align:center;margin:20px 0;">'
+        f'<span style="font-size:32px;font-weight:bold;letter-spacing:8px;">{html.escape(code)}</span></div>'
+        '<p style="color:#777;font-size:13px;">The code expires in 10 minutes. If you did not ask to sign in, '
+        "you can ignore this message; nobody can sign in without the code.</p>"
+    )
+    text = (f"Your {platform} sign-in code for {to_email} is: {code}\n\n"
+            "The code expires in 10 minutes. If you did not ask to sign in, you can ignore this "
+            "message; nobody can sign in without the code.\n")
+    return await send_email(to_email, subject, _document(subject, f"Your code is {code}", inner), text)
 
 
 async def send_password_reset(to_email: str, reset_url: str) -> bool:
-    platform_name = settings.get("branding.title", "Agience")
-    subject = f"Reset your {platform_name} password"
-    html_body = (
-        '<div style="font-family: system-ui, sans-serif; max-width: 400px; margin: 0 auto;">'
-        '<h2 style="color: #1a1a1a;">Reset your password</h2>'
-        f'<p style="color: #666; font-size: 14px;">Click the link below to reset your {platform_name} password:</p>'
-        f'<a href="{reset_url}" style="display: inline-block; background: #1a1a1a; color: white; padding: 12px 24px; border-radius: 6px; text-decoration: none; margin: 20px 0;">Reset Password</a>'
-        '<p style="color: #999; font-size: 12px;">This link expires in 1 hour. If you didn\'t request this, ignore this email.</p>'
-        '</div>'
+    platform = _platform()
+    subject = f"Reset your {platform} password"
+    inner = (
+        '<h2 style="margin:0 0 12px;">Reset your password</h2>'
+        f'<p style="color:#555;font-size:14px;">Someone asked to reset the {html.escape(platform)} password '
+        f"for {html.escape(to_email)}. To choose a new one, open this link:</p>"
+        + _button(reset_url, "Choose a new password")
+        + '<p style="color:#777;font-size:13px;">The link works once and expires in 1 hour. If you did not '
+        "ask for this, ignore this message: your password stays as it is.</p>"
     )
-    text_body = f"Reset your {platform_name} password: {reset_url}\n\nThis link expires in 1 hour."
-    return await send_email(to_email, subject, html_body, text_body)
+    text = (f"Someone asked to reset the {platform} password for {to_email}.\n\n"
+            f"To choose a new one, open this link:\n{reset_url}\n\n"
+            "The link works once and expires in 1 hour. If you did not ask for this, ignore this "
+            "message: your password stays as it is.\n")
+    return await send_email(to_email, subject,
+                            _document(subject, "Choose a new password for your account", inner), text)
 
 
 async def send_email_verification(to_email: str, verify_url: str) -> bool:
-    platform_name = settings.get("branding.title", "Agience")
-    subject = f"Verify your {platform_name} email"
-    html_body = (
-        '<div style="font-family: system-ui, sans-serif; max-width: 400px; margin: 0 auto;">'
-        '<h2 style="color: #1a1a1a;">Confirm your email</h2>'
-        f'<p style="color: #666; font-size: 14px;">Click below to verify this email and finish setting up your {platform_name} account:</p>'
-        f'<a href="{verify_url}" style="display: inline-block; background: #1a1a1a; color: white; padding: 12px 24px; border-radius: 6px; text-decoration: none; margin: 20px 0;">Verify email</a>'
-        '<p style="color: #999; font-size: 12px;">This link expires in 24 hours. If you didn\'t create an account, ignore this email.</p>'
-        '</div>'
+    platform = _platform()
+    subject = f"Confirm your email for {platform}"
+    inner = (
+        '<h2 style="margin:0 0 12px;">Confirm your email</h2>'
+        f'<p style="color:#555;font-size:14px;">To finish setting up your {html.escape(platform)} account '
+        f"for {html.escape(to_email)}, confirm this address:</p>"
+        + _button(verify_url, "Confirm email")
+        + '<p style="color:#777;font-size:13px;">The link expires in 24 hours. If you did not create an '
+        "account, ignore this message and nothing is set up.</p>"
     )
-    text_body = f"Verify your {platform_name} email: {verify_url}\n\nThis link expires in 24 hours."
-    return await send_email(to_email, subject, html_body, text_body)
+    text = (f"To finish setting up your {platform} account for {to_email}, confirm this address:\n"
+            f"{verify_url}\n\nThe link expires in 24 hours. If you did not create an account, "
+            "ignore this message and nothing is set up.\n")
+    return await send_email(to_email, subject,
+                            _document(subject, "One step left to finish your account", inner), text)
 
 
 async def send_invite(
@@ -175,33 +225,24 @@ async def send_invite(
     claim_url: str,
     message: Optional[str] = None,
 ) -> bool:
-    platform_name = settings.get("branding.title", "Agience")
-    message_block_html = ""
-    message_block_text = ""
-    if message:
-        message_block_html = (
-            '<p style="color:#444;font-size:14px;margin:16px 0;padding:12px;'
-            'background:#f9f9f9;border-radius:6px;">'
-            f'&ldquo;{message}&rdquo;</p>'
-        )
-        message_block_text = f'\n"{message}"\n'
-    subject = f"{from_name} invited you to collaborate on {platform_name}"
-    html_body = (
-        '<div style="font-family: system-ui, sans-serif; max-width: 480px; margin: 0 auto;">'
-        '<h2 style="color: #1a1a1a;">You\'ve been invited</h2>'
-        f'<p style="color: #666; font-size: 14px;"><strong>{from_name}</strong> invited you to <strong>{resource_name}</strong> on {platform_name}.</p>'
-        f'{message_block_html}'
-        f'<a href="{claim_url}" style="display: inline-block; background: #1a1a1a; color: white; padding: 12px 24px; border-radius: 6px; text-decoration: none; margin: 20px 0;">View in {platform_name}</a>'
-        '<p style="color: #999; font-size: 12px;">If you don\'t have an account yet, one will be created when you sign in.</p>'
-        '</div>'
+    platform = _platform()
+    subject = f"{from_name} invited you to collaborate on {platform}"
+    note = (f'<p style="color:#444;font-size:14px;margin:16px 0;padding:12px;background:#f9f9f9;'
+            f'border-radius:6px;">&ldquo;{html.escape(message)}&rdquo;</p>') if message else ""
+    inner = (
+        '<h2 style="margin:0 0 12px;">You&rsquo;ve been invited</h2>'
+        f'<p style="color:#555;font-size:14px;"><strong>{html.escape(from_name)}</strong> invited you to '
+        f"<strong>{html.escape(resource_name)}</strong> on {html.escape(platform)}.</p>"
+        + note + _button(claim_url, f"View in {platform}")
+        + '<p style="color:#777;font-size:13px;">If you do not have an account yet, one is created when '
+        "you sign in.</p>"
     )
-    text_body = (
-        f"{from_name} invited you to {resource_name} on {platform_name}.\n"
-        f"{message_block_text}\n"
-        f"Open this link to accept: {claim_url}\n\n"
-        "If you don't have an account yet, one will be created when you sign in."
-    )
-    return await send_email(to_email, subject, html_body, text_body)
+    text = (f"{from_name} invited you to {resource_name} on {platform}.\n"
+            + (f'\n"{message}"\n' if message else "")
+            + f"\nOpen this link to accept:\n{claim_url}\n\n"
+            "If you do not have an account yet, one is created when you sign in.\n")
+    return await send_email(to_email, subject,
+                            _document(subject, f"{from_name} invited you to {resource_name}", inner), text)
 
 
 async def test_connection(provider_config: dict) -> tuple[bool, Optional[str]]:
@@ -266,14 +307,24 @@ async def test_connection(provider_config: dict) -> tuple[bool, Optional[str]]:
 # ---------------------------------------------------------------------------
 # Provider implementations
 # ---------------------------------------------------------------------------
-async def _send_smtp(cfg: dict, to: str, subject: str, html: str, text: Optional[str]) -> bool:
+def _mime(cfg: dict, to: str, subject: str, html_body: str, text: Optional[str]) -> MIMEMultipart:
+    """The message SMTP and Gmail send: plain text first, then HTML, with the headers a receiving
+    filter expects of real mail (`Date`, a `Message-ID` on the sender's own domain, `Reply-To`)."""
     msg = MIMEMultipart("alternative")
-    msg["From"] = f"{cfg['from_name']} <{cfg['from_address']}>"
+    msg["From"] = formataddr((cfg["from_name"], cfg["from_address"]))
     msg["To"] = to
     msg["Subject"] = subject
+    msg["Reply-To"] = cfg.get("reply_to") or cfg["from_address"]
+    msg["Date"] = formatdate(localtime=False)
+    msg["Message-ID"] = make_msgid(domain=cfg["from_address"].rpartition("@")[2] or None)
     if text:
-        msg.attach(MIMEText(text, "plain"))
-    msg.attach(MIMEText(html, "html"))
+        msg.attach(MIMEText(text, "plain", "utf-8"))
+    msg.attach(MIMEText(html_body, "html", "utf-8"))
+    return msg
+
+
+async def _send_smtp(cfg: dict, to: str, subject: str, html: str, text: Optional[str]) -> bool:
+    msg = _mime(cfg, to, subject, html, text)
     smtp = aiosmtplib.SMTP(
         hostname=cfg["smtp_host"], port=cfg["smtp_port"], use_tls=cfg["smtp_use_tls"]
     )
@@ -383,13 +434,7 @@ async def _gmail_access_token(gm: dict) -> str:
 
 async def _send_gmail(cfg: dict, to: str, subject: str, html: str, text: Optional[str]) -> bool:
     access_token = await _gmail_access_token(_gmail_config())
-    msg = MIMEMultipart("alternative")
-    msg["From"] = f"{cfg['from_name']} <{cfg['from_address']}>"
-    msg["To"] = to
-    msg["Subject"] = subject
-    if text:
-        msg.attach(MIMEText(text, "plain"))
-    msg.attach(MIMEText(html, "html"))
+    msg = _mime(cfg, to, subject, html, text)
     raw = base64.urlsafe_b64encode(msg.as_bytes()).decode("ascii")
     async with httpx.AsyncClient() as client:
         resp = await client.post(
