@@ -1,6 +1,7 @@
 ﻿"""Origin email service.
 
-Providers: SMTP, AWS SES, SendGrid, Resend, Gmail. Configured through Origin's
+Providers: SMTP, AWS SES, SendGrid, Resend, Gmail, and `outbox`, which sends nothing and writes
+each message to `EMAIL_OUTBOX_DIR` for a test stack to read. Configured through Origin's
 `platform_settings` cache.
 """
 
@@ -9,7 +10,9 @@ from __future__ import annotations
 import base64
 import html
 import logging
+import json
 import os
+import secrets
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from datetime import datetime, timezone
@@ -97,7 +100,13 @@ def is_configured() -> bool:
         # credentials plus a refresh token for the sending mailbox.
         gm = _gmail_config()
         return bool(gm["client_id"] and gm["client_secret"] and gm["refresh_token"])
+    if provider == "outbox":
+        return bool(_outbox_dir())
     return provider in {"smtp", "ses", "sendgrid", "resend"}
+
+
+def _outbox_dir() -> str:
+    return (os.getenv("EMAIL_OUTBOX_DIR", "") or "").strip()
 
 
 async def send_email(
@@ -119,6 +128,8 @@ async def send_email(
             return await _send_resend(cfg, to_email, subject, html_body, text_body)
         if provider == "gmail":
             return await _send_gmail(cfg, to_email, subject, html_body, text_body)
+        if provider == "outbox":
+            return _send_outbox(to_email, subject, html_body, text_body)
         logger.error("Unknown email provider: %s", provider)
         return False
     except Exception:
@@ -347,6 +358,25 @@ def _mime(cfg: dict, to: str, subject: str, html_body: str, text: Optional[str])
         msg.attach(MIMEText(text, "plain", "utf-8"))
     msg.attach(MIMEText(html_body, "html", "utf-8"))
     return msg
+
+
+def _send_outbox(to: str, subject: str, html_body: str, text: Optional[str]) -> bool:
+    """Write the message as one JSON file in `EMAIL_OUTBOX_DIR` and send nothing. The file appears
+    whole: it is written under a temporary name and renamed."""
+    folder = _outbox_dir()
+    if not folder:
+        logger.error("EMAIL_PROVIDER is outbox but EMAIL_OUTBOX_DIR is not set")
+        return False
+    os.makedirs(folder, exist_ok=True)
+    now = datetime.now(timezone.utc)
+    name = f"{now.strftime('%Y%m%dT%H%M%S%fZ')}-{secrets.token_hex(4)}.json"
+    body = {"to": to, "subject": subject, "text": text or "", "html": html_body,
+            "sent_at": now.isoformat()}
+    tmp = os.path.join(folder, "." + name)
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(body, f)
+    os.replace(tmp, os.path.join(folder, name))
+    return True
 
 
 async def _send_smtp(cfg: dict, to: str, subject: str, html: str, text: Optional[str]) -> bool:

@@ -5,6 +5,11 @@ All notable changes to `agience-origin` are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.2.7] - 2026-10-11
+
+### Added
+- `EMAIL_PROVIDER=outbox` sends nothing and writes each message as one JSON file (`to`, `subject`, `text`, `html`, `sent_at`) in `EMAIL_OUTBOX_DIR`, for a test stack to read. Without `EMAIL_OUTBOX_DIR` the provider counts as not configured.
+
 ## [0.2.6] - 2026-10-11
 
 ### Added
