@@ -76,6 +76,8 @@ PUBLIC = {
     ("POST", "/auth/password/register"): _PREAUTH,
     ("POST", "/auth/password/reset-request"): _PREAUTH,
     ("POST", "/auth/password/reset-confirm"): _PREAUTH,
+    # Names the account a reset link resets; the link's signed, single-use token is the credential.
+    ("POST", "/auth/password/reset-check"): _PREAUTH,
     ("POST", "/auth/otp/request"): _PREAUTH,
     ("POST", "/auth/otp/verify"): _PREAUTH,
     ("POST", "/auth/passkey/login-options"): _PREAUTH,
