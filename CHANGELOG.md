@@ -5,6 +5,14 @@ All notable changes to `agience-origin` are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.2.5] - 2026-10-11
+
+### Added
+- `POST /auth/password/reset-check` returns the address of the account a reset link resets, only while the link would still be accepted (signed, unused, unexpired, password unchanged since it was sent).
+
+### Changed
+- The password reset link carries no address. The reset page names the account from `reset-check`, so the account shown is always the one the link resets, and an expired or used link says so before a password is typed. The account field is read-only and is never sent to the server.
+
 ## [0.2.4] - 2026-10-11
 
 ### Added

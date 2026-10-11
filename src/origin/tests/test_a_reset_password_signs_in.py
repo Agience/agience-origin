@@ -42,14 +42,17 @@ def test_the_reset_password_signs_in_and_the_old_one_does_not(db_client, monkeyp
     monkeypatch.setattr(email_service, "send_password_reset", lambda to, url, context="": links.append(url))
     monkeypatch.setattr(ar, "_mail_send_admitted", lambda request, e, what: "tag")
 
-    login = lambda pw: db_client.post("/auth/password/login", json={"identifier": email, "password": pw})
+    def login(pw):
+        return db_client.post("/auth/password/login", json={"identifier": email, "password": pw})
     assert login(_OLD).status_code == 200
 
     assert db_client.post("/auth/password/reset-request", json={"email": email}).json() == {"sent": True}
     (link,) = links
     query = parse_qs(urlparse(link).query)
     token = query["token"][0]
-    assert query["email"] == [email], "the link names the account for a password manager"
+    assert "email" not in query, "the link names no account; the token does"
+    named = db_client.post("/auth/password/reset-check", json={"token": token})
+    assert named.status_code == 200 and named.json() == {"email": email}
     r = db_client.post("/auth/password/reset-confirm", json={"token": token, "new_password": _NEW})
     assert r.status_code == 200, r.text
 
@@ -57,3 +60,6 @@ def test_the_reset_password_signs_in_and_the_old_one_does_not(db_client, monkeyp
     assert login(_OLD).status_code == 401, "the replaced password does not"
     again = db_client.post("/auth/password/reset-confirm", json={"token": token, "new_password": "x" * 12})
     assert again.status_code == 400, "the link works once"
+    used = db_client.post("/auth/password/reset-check", json={"token": token})
+    assert used.status_code == 400, "a used link names nothing"
+    assert db_client.post("/auth/password/reset-check", json={"token": "forged.token.x"}).status_code == 400

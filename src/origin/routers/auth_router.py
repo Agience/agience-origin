@@ -19,7 +19,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Annotated, Optional
-from urllib.parse import quote, urlencode, urlparse
+from urllib.parse import urlencode, urlparse
 
 import bcrypt
 from authlib.common.security import generate_token
@@ -3090,10 +3090,8 @@ async def password_reset_request(
             },
             expires_hours=1,
         )
-        # The address rides along so the page can name the account a password manager saves the
-        # new password under; the link only ever goes to that mailbox.
-        reset_url = (f"{config.FACET_URI.rstrip('/')}/reset-password?token={reset_token}"
-                     f"&email={quote(user.email or '')}")
+        # The link names no account: the page asks `reset-check`, which reads it from the token.
+        reset_url = f"{config.FACET_URI.rstrip('/')}/reset-password?token={reset_token}"
         to = user.email
         _release_db(db)  # the send runs after the response; see `_queue_verification_email`
         background_tasks.add_task(email_service.send_password_reset, to, reset_url,
@@ -3111,6 +3109,26 @@ def _reset_token_still_applies(user, claims: dict) -> bool:
     if not user or not (user.password_hash or user.email_verified) or is_deactivated(user):
         return False
     return _pw_fingerprint(user.password_hash) == claims.get("pwf")
+
+
+class PasswordResetCheckBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    token: str
+
+
+@auth_router.post("/password/reset-check")
+async def password_reset_check(payload: PasswordResetCheckBody, db: Session = Depends(get_db)):
+    """Which account a reset link resets, for the page to name it to a password manager. The token
+    decides, never the URL: the link carries no address, and an altered one names nothing. Answers
+    only while the link would still be accepted by `reset-confirm` (same checks, no derivation), and
+    only to its holder, who read it in that account's own mailbox."""
+    claims = verify_token(payload.token)
+    if not claims or claims.get("token_type") != "pwd_reset" or not claims.get("sub"):
+        raise HTTPException(status_code=400, detail="Invalid or expired reset token")
+    user = person_service.get_user_by_id(db, str(claims["sub"]))
+    if not _reset_token_still_applies(user, claims):
+        raise HTTPException(status_code=400, detail="Invalid or expired reset token")
+    return {"email": user.email or user.username or ""}
 
 
 @auth_router.post("/password/reset-confirm", dependencies=_KDF_ADMISSION)
