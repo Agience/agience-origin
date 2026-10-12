@@ -13,6 +13,7 @@ from origin.models.passkey_challenge import PasskeyChallenge
 from origin.models.otp_code import OtpCode
 from origin.models.server_credential import ServerCredential
 from origin.models.oauth_client import OAuthClient
+from origin.models.password_reset import PasswordReset
 
 __all__ = [
     "Person",
@@ -23,4 +24,5 @@ __all__ = [
     "OtpCode",
     "ServerCredential",
     "OAuthClient",
+    "PasswordReset",
 ]

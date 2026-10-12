@@ -37,6 +37,7 @@ from origin.db import persons as db_persons
 from origin.db import server_credentials as db_server_credentials
 from origin.db.session import get_db
 from origin.models.oauth_client import OAuthClient
+from origin.models.password_reset import PasswordReset
 from origin.models.person import Person as PersonModel
 from origin.services import email_service
 from origin.services import guess_budget
@@ -3081,15 +3082,7 @@ async def password_reset_request(
     user = person_service.get_user_by_email(db, email)
     # Don't reveal either way to the caller. A deactivated account is mailed nothing.
     if user and (user.password_hash or user.email_verified) and not is_deactivated(user):
-        reset_token = create_jwt_token(
-            {
-                "sub": str(user.id),
-                "token_type": "pwd_reset",
-                "pwf": _pw_fingerprint(user.password_hash),
-                "aud": config.AUTHORITY_ISSUER,
-            },
-            expires_hours=1,
-        )
+        reset_token = _issue_reset_token(db, user)
         # The link names no account: the page asks `reset-check`, which reads it from the token.
         reset_url = f"{config.FACET_URI.rstrip('/')}/reset-password?token={reset_token}"
         to = user.email
@@ -3101,6 +3094,41 @@ async def password_reset_request(
         logger.info("Password reset requested for an unknown or unconfirmed passwordless "
                     "address %s", tag)
     return {"sent": True}
+
+
+#: How long a mailed reset link works.
+_RESET_TTL = timedelta(hours=1)
+
+
+def _reset_hash(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def _issue_reset_token(db: Session, user) -> str:
+    """A reset link's token: 32 random URL-safe characters, stored only as their hash. Short on
+    purpose: a mail carrying a long signed token is filed as junk by Outlook where the same mail
+    with a short link is not. Expired rows are removed here."""
+    now = datetime.now(timezone.utc)
+    db.query(PasswordReset).filter(PasswordReset.expires_at < now).delete(synchronize_session=False)
+    token = secrets.token_urlsafe(24)
+    db.add(PasswordReset(token_hash=_reset_hash(token), person_id=user.id,
+                         password_fingerprint=_pw_fingerprint(user.password_hash),
+                         expires_at=now + _RESET_TTL))
+    db.commit()
+    return token
+
+
+def _reset_claims(db: Session, token: str) -> dict | None:
+    """`{"sub", "pwf"}` for a reset token that is stored and unexpired, else None."""
+    if not token or len(token) > 128:
+        return None
+    row = db.get(PasswordReset, _reset_hash(token))
+    if row is None:
+        return None
+    expires = row.expires_at if row.expires_at.tzinfo else row.expires_at.replace(tzinfo=timezone.utc)
+    if expires <= datetime.now(timezone.utc):
+        return None
+    return {"sub": str(row.person_id), "pwf": row.password_fingerprint}
 
 
 def _reset_token_still_applies(user, claims: dict) -> bool:
@@ -3122,8 +3150,8 @@ async def password_reset_check(payload: PasswordResetCheckBody, db: Session = De
     decides, never the URL: the link carries no address, and an altered one names nothing. Answers
     only while the link would still be accepted by `reset-confirm` (same checks, no derivation), and
     only to its holder, who read it in that account's own mailbox."""
-    claims = verify_token(payload.token)
-    if not claims or claims.get("token_type") != "pwd_reset" or not claims.get("sub"):
+    claims = _reset_claims(db, payload.token)
+    if not claims:
         raise HTTPException(status_code=400, detail="Invalid or expired reset token")
     user = person_service.get_user_by_id(db, str(claims["sub"]))
     if not _reset_token_still_applies(user, claims):
@@ -3136,16 +3164,16 @@ async def password_reset_confirm(
     payload: PasswordResetConfirmBody,
     db: Session = Depends(get_db),
 ):
-    """Complete a password reset: verify the reset token, enforce the password
-    policy, and set the new password. The token expires in 1 hour; there is no
-    revocation list, so single-use is enforced by the fingerprint check in
-    `_pw_fingerprint`, not by consuming the token. A confirmed account with no password sets its
-    first one this way; its fingerprint is that of no password, which setting one moves."""
+    """Complete a password reset: look the token up, enforce the password policy, and set the new
+    password. The token expires in 1 hour and works once: setting the password deletes every reset
+    row for the account, and a link also stops working once the password changes any other way
+    (`_pw_fingerprint`). A confirmed account with no password sets its first one this way; its
+    fingerprint is that of no password, which setting one moves."""
     if not platform_settings.get_bool("auth.password.enabled", True):
         raise HTTPException(status_code=404, detail="Password auth is disabled")
 
-    claims = verify_token(payload.token)
-    if not claims or claims.get("token_type") != "pwd_reset" or not claims.get("sub"):
+    claims = _reset_claims(db, payload.token)
+    if not claims:
         raise HTTPException(status_code=400, detail="Invalid or expired reset token")
 
     min_len = platform_settings.get_int("auth.password.min_length", 12)
@@ -3167,6 +3195,7 @@ async def password_reset_confirm(
     if not _reset_token_still_applies(user, claims):
         raise HTTPException(status_code=400, detail="Invalid or expired reset token")
     person_service.set_password(db, user_id, new_hash)
+    db.query(PasswordReset).filter(PasswordReset.person_id == user.id).delete(synchronize_session=False)
     db.commit()
     return {"reset": True}
 

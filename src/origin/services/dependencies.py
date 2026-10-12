@@ -99,7 +99,7 @@ def resolve_auth(token: str, db: Session, request: Optional[Request] = None) -> 
         # A token carrying `token_type` is not an access token. `token_type` is stamped at mint
         # time on every special-purpose token Origin issues, and never on an access token:
         # `create_jwt_token(user_data)` mints one with no `token_type` claim, while
-        # refresh/email_verify/pwd_reset each add one. (`"token_type": "bearer"` elsewhere is an
+        # refresh and email_verify each add one. (`"token_type": "bearer"` elsewhere is an
         # OAuth *response* field sitting beside `access_token`, not a claim.)
         #
         # Each special-purpose token would be a dangerous Bearer session if accepted here:
@@ -107,7 +107,6 @@ def resolve_auth(token: str, db: Session, request: Optional[Request] = None) -> 
         #   * `email_verify` (24h) is lifted straight out of the `?token=` link in a verification
         #     email — accepting it would authenticate the user as themselves for a day before they
         #     had proven control of the mailbox, inverting the token's purpose.
-        #   * `pwd_reset` (1h) — accepting it would make the reset link equivalent to a password.
         #   * `refresh` (30 days) carries identical claims to the access token plus this field, so
         #     accepting it would turn the long-lived refresh credential into a long-lived access
         #     credential — and, with no rotation and no revocation list, leave a compromised

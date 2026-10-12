@@ -545,7 +545,7 @@ class TestPasswordReset:
             "origin.routers.auth_router.person_service.get_user_by_email",
             return_value=_person(),
         ), patch(
-            "origin.routers.auth_router.create_jwt_token", return_value="reset.jwt",
+            "origin.routers.auth_router._issue_reset_token", return_value="reset-token",
         ), patch(
             "origin.routers.auth_router.email_service.send_password_reset",
         ) as send:
@@ -557,7 +557,7 @@ class TestPasswordReset:
         # Reset email queued (TestClient runs background tasks before returning).
         send.assert_called_once()
         assert send.call_args.args[0] == "alice@example.com"
-        assert "reset.jwt" in send.call_args.args[1]
+        assert send.call_args.args[1].endswith("/reset-password?token=reset-token")
 
     def test_request_silent_for_unknown_email(self, anon_client):
         with patch(
@@ -586,7 +586,7 @@ class TestPasswordReset:
         ), patch(
             "origin.routers.auth_router.person_service.get_user_by_email", return_value=person,
         ), patch(
-            "origin.routers.auth_router.create_jwt_token", return_value="reset.jwt",
+            "origin.routers.auth_router._issue_reset_token", return_value="reset-token",
         ), patch(
             "origin.routers.auth_router.email_service.send_password_reset",
         ) as send:
@@ -623,8 +623,8 @@ class TestPasswordReset:
         ), patch(
             "origin.routers.auth_router.platform_settings.get_int", return_value=12,
         ), patch(
-            "origin.routers.auth_router.verify_token",
-            return_value={"token_type": "pwd_reset", "sub": "person-1", "pwf": "fp"},
+            "origin.routers.auth_router._reset_claims",
+            return_value={"sub": "person-1", "pwf": "fp"},
         ), patch(
             "origin.routers.auth_router._pw_fingerprint", return_value="fp",
         ), patch(
@@ -653,8 +653,8 @@ class TestPasswordReset:
         ), patch(
             "origin.routers.auth_router.platform_settings.get_int", return_value=12,
         ), patch(
-            "origin.routers.auth_router.verify_token",
-            return_value={"token_type": "pwd_reset", "sub": "person-1", "pwf": "stale"},
+            "origin.routers.auth_router._reset_claims",
+            return_value={"sub": "person-1", "pwf": "stale"},
         ), patch(
             "origin.routers.auth_router._pw_fingerprint", return_value="current",
         ), patch(
@@ -670,12 +670,12 @@ class TestPasswordReset:
         assert resp.status_code == 400
         set_pw.assert_not_called()
 
-    def test_confirm_rejects_non_reset_token(self, anon_client):
+    def test_confirm_rejects_a_token_that_is_not_stored(self, anon_client):
+        """An access or refresh token, or any string, is no reset link: only a stored one is."""
         with patch(
             "origin.routers.auth_router.platform_settings.get_bool", return_value=True,
         ), patch(
-            "origin.routers.auth_router.verify_token",
-            return_value={"token_type": "refresh", "sub": "person-1"},
+            "origin.routers.auth_router._reset_claims", return_value=None,
         ), patch(
             "origin.routers.auth_router.person_service.set_password",
         ) as set_pw:
@@ -690,7 +690,7 @@ class TestPasswordReset:
         with patch(
             "origin.routers.auth_router.platform_settings.get_bool", return_value=True,
         ), patch(
-            "origin.routers.auth_router.verify_token", return_value=None,
+            "origin.routers.auth_router._reset_claims", return_value=None,
         ), patch(
             "origin.routers.auth_router.person_service.set_password",
         ) as set_pw:
@@ -707,8 +707,8 @@ class TestPasswordReset:
         ), patch(
             "origin.routers.auth_router.platform_settings.get_int", return_value=12,
         ), patch(
-            "origin.routers.auth_router.verify_token",
-            return_value={"token_type": "pwd_reset", "sub": "person-1"},
+            "origin.routers.auth_router._reset_claims",
+            return_value={"sub": "person-1", "pwf": "fp"},
         ), patch(
             "origin.routers.auth_router.person_service.set_password",
         ) as set_pw:

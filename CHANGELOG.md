@@ -5,6 +5,11 @@ All notable changes to `agience-origin` are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.2.8] - 2026-10-12
+
+### Changed
+- A password reset link carries a 32-character random token instead of a signed one of about 600 characters. Origin stores only the token's SHA-256, in the new `password_resets` table (migration `0008_password_resets`, applied at startup), with the account, the password fingerprint at sending and the expiry (1 hour). Setting a password through a link deletes every reset link for that account; a link also stops working once the password changes any other way. Links sent before this version stop working.
+
 ## [0.2.7] - 2026-10-11
 
 ### Added
