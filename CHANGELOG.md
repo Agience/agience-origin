@@ -5,6 +5,11 @@ All notable changes to `agience-origin` are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.2.9] - 2026-10-18
+
+### Fixed
+- `/internal/describe-delegation` admits Crystal, the event-driven describer it serves. Crystal was not among the services the platform-service guard admits, so no event-driven describe could run.
+
 ## [0.2.8] - 2026-10-12
 
 ### Changed

@@ -347,8 +347,13 @@ def internal_issue_describe_delegation(
     the persona that will perform the enrichment. Mantle authorizes it exactly
     like any system-principal call — it only reaches artifacts the system
     principal has been granted, and safely 404s (describer no-ops) otherwise.
+
+    The caller is Crystal, whose event-driven describer this serves; Crystal is not among the
+    services `_require_platform_server` admits for the person reads, and is admitted here only.
+    2026-10-18: Crystal was refused here, so no event-driven describe could run.
     """
-    _require_platform_server(auth)
+    if not (auth.principal_type == "service" and auth.principal_id == "crystal"):
+        _require_platform_server(auth)
 
     if not platform_settings.get("platform.operator_id"):
         raise HTTPException(status_code=409, detail="Platform operator not configured")

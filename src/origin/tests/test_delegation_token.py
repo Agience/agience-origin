@@ -335,3 +335,25 @@ def test_system_delegation_409_without_operator(client: TestClient, origin_app):
 # Origin has no secret-vault endpoints: material custody belongs to the service that owns the
 # encrypted store.
 
+
+
+def test_describe_delegation_admits_crystal_whose_describer_it_serves(client: TestClient, origin_app):
+    """2026-10-18: Crystal, the only caller of this route, was refused by the platform-service
+    guard, so no event-driven describe could run."""
+    from origin.routers import auth_router
+    from origin.services.dependencies import AuthContext, get_auth
+    import origin.service_identity as ksi
+
+    origin_app.dependency_overrides[get_auth] = lambda: AuthContext(
+        principal_id="crystal", principal_type="service", user_id=None,
+    )
+    try:
+        with patch.object(auth_router.platform_settings, "get", return_value="operator-1"), \
+             patch.object(ksi, "get_system_principal_id", return_value="sys-principal-1"), \
+             patch.object(auth_router, "origin_auth_service") as svc:
+            svc.issue_system_delegation_token.return_value = "minted"
+            resp = client.post("/internal/describe-delegation",
+                               json={"persona_client_id": "agience-server-aria", "resource_id": "a"})
+        assert resp.status_code == 200, resp.text
+    finally:
+        origin_app.dependency_overrides.pop(get_auth, None)
