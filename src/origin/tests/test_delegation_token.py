@@ -340,6 +340,39 @@ def test_system_delegation_happy_path(client: TestClient, origin_app):
         origin_app.dependency_overrides.pop(get_auth, None)
 
 
+def test_iris_signing_as_itself_gets_the_platform_mail_delegation_proven(client: TestClient, origin_app):
+    """2026-10-19: platform mail is Iris's operation, and the mail secrets are released only to a
+    persona that proved who it is. Iris, signing with its own key, may ask for the platform-mail
+    delegation; it is recorded as the signer. It may ask for no other purpose."""
+    from origin.routers import auth_router
+    from origin.services.dependencies import get_auth
+    import origin.service_identity as ksi
+
+    _as_service(origin_app, "iris")
+    try:
+        with patch.object(auth_router.platform_settings, "get", return_value="operator-1"),              patch.object(ksi, "get_system_principal_id", return_value="sys-principal-1"),              patch.object(auth_router, "origin_auth_service") as svc:
+            svc.issue_system_delegation_token.return_value = "minted-sys-jwt"
+            mail = client.post("/internal/system-delegation", json={"purpose": "platform-mail"})
+            stripe = client.post("/internal/system-delegation", json={"purpose": "platform-stripe"})
+        assert mail.status_code == 200, mail.text
+        _, kwargs = svc.issue_system_delegation_token.call_args
+        assert kwargs["actor"] == "agience-server-iris" and kwargs["signer"] == "iris"
+        assert stripe.status_code == 403, "Iris carries platform mail and nothing else"
+    finally:
+        origin_app.dependency_overrides.pop(get_auth, None)
+
+
+def test_a_minted_system_delegation_records_its_signer(monkeypatch):
+    from jose import jwt as jose_jwt
+
+    from origin.services import auth_service
+
+    monkeypatch.setattr("origin.service_identity.get_host_id", lambda: "host-1")
+    token = auth_service.issue_system_delegation_token(
+        "sys-1", actor="agience-server-iris", signer="iris", scope="platform.email.send", audience="mantle")
+    assert jose_jwt.get_unverified_claims(token)["act"] == {"sub": "agience-server-iris", "iss": "iris"}
+
+
 def test_system_delegation_rejects_unknown_purpose(client: TestClient, origin_app):
     from origin.services.dependencies import AuthContext, get_auth
 

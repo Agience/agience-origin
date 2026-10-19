@@ -8,6 +8,7 @@ All notable changes to `agience-origin` are recorded here. The format follows
 ## [0.2.9] - 2026-10-18
 
 ### Added
+- A system-delegation purpose may name the persona that carries it out; platform mail names Iris. Iris, signing with its own key, may obtain the platform-mail delegation and no other, recorded as its proven signer (`act.iss`).
 - The delegation exchange (`/internal/delegation-token`) admits a chorus persona signing with its own enrolled key, for its own delegation only, and records the proven signer in the delegation (`act.iss`). The shared `chorus` identity may still ask for any persona; its delegations say `act.iss=chorus`, and Mantle releases no secret on one. A persona is not admitted to any other internal route.
 
 ### Fixed

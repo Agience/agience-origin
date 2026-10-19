@@ -401,7 +401,7 @@ def internal_issue_describe_delegation(
 # for an arbitrary user.
 _SYSTEM_DELEGATION_PURPOSES: dict[str, dict[str, str]] = {
     # Webhook/background email sends (receipts, usage warnings, etc.).
-    "platform-mail": {"scope": "platform.email.send", "audience": "mantle"},
+    "platform-mail": {"scope": "platform.email.send", "audience": "mantle", "persona": "iris"},
     # Resolves the Stripe credential (sandbox or live) for the payment tekton, on behalf of the
     # platform. Scoped to one capability, like every entry here, so it cannot be widened into a
     # general secret-reader.
@@ -426,9 +426,19 @@ def internal_issue_system_delegation(
     For platform automation (e.g. Ophan's Stripe webhook) that has no user delegation but must
     still act under the full identity chain. The requester names a purpose, never a subject, so it
     cannot impersonate a user — Origin fixes the subject to the system principal and stamps a
-    bounded scope. Platform callers only.
+    bounded scope. Platform callers only — and the persona a purpose names, signing as itself.
     """
-    _require_platform_server(auth)
+    # A purpose may name the persona that carries it out (`persona`): that persona, signing with
+    # its own enrolled key, may ask for it, and the delegation is recorded as proven (`act.iss`).
+    # 2026-10-19: platform mail is Iris's own operation; the secrets it uses are released only to
+    # a persona that proved who it is.
+    cfg_for_persona = _SYSTEM_DELEGATION_PURPOSES.get(body.purpose) or {}
+    persona = cfg_for_persona.get("persona")
+    if auth.principal_type == "service" and persona and auth.principal_id == persona:
+        actor, signer = f"agience-server-{persona}", persona
+    else:
+        _require_platform_server(auth)
+        actor, signer = auth.actor or auth.principal_id, auth.principal_id  # the requesting persona, else the service
 
     cfg = _SYSTEM_DELEGATION_PURPOSES.get(body.purpose)
     if cfg is None:
@@ -445,9 +455,9 @@ def internal_issue_system_delegation(
     if not subject_id:
         raise HTTPException(status_code=409, detail="Instance namespace unavailable; cannot derive system principal")
 
-    actor = auth.actor or auth.principal_id  # the requesting persona, else the service
     token = origin_auth_service.issue_system_delegation_token(
         subject_id, actor=actor, scope=cfg["scope"], audience=cfg["audience"], ttl_seconds=body.ttl_seconds,
+        signer=signer,
     )
     logger.info(
         "system-delegation issued: purpose=%s actor=%s sub=%s scope=%s",
