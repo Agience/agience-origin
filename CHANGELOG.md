@@ -7,6 +7,9 @@ All notable changes to `agience-origin` are recorded here. The format follows
 
 ## [0.2.9] - 2026-10-18
 
+### Added
+- The delegation exchange (`/internal/delegation-token`) admits a chorus persona signing with its own enrolled key, for its own delegation only, and records the proven signer in the delegation (`act.iss`). The shared `chorus` identity may still ask for any persona; its delegations say `act.iss=chorus`, and Mantle releases no secret on one. A persona is not admitted to any other internal route.
+
 ### Fixed
 - `/internal/describe-delegation` admits Crystal, the event-driven describer it serves. Crystal was not among the services the platform-service guard admits, so no event-driven describe could run.
 

@@ -173,7 +173,8 @@ def person_token_claims(person, *, client_id: str, roles: Optional[list[str]] = 
     return claims
 
 
-def issue_delegation_token(server_client_id: str, user_id: str, ttl_seconds: int = 300) -> str:
+def issue_delegation_token(server_client_id: str, user_id: str, ttl_seconds: int = 300,
+                           *, signer: str = "") -> str:
     """Short-lived RFC 8693 delegation JWT — server acting on behalf of a user.
 
     `user_id` MUST already be derived from a token Origin itself verified (see
@@ -185,6 +186,10 @@ def issue_delegation_token(server_client_id: str, user_id: str, ttl_seconds: int
     (Authority), host_id (Host). host_id is derived from the shared instance
     namespace (`KEYS_DIR/instance.uuid`) so it matches the host artifact's id
     without Origin needing to read the platform topology.
+
+    `act.iss` names the service whose signature asked for it: the persona itself when it signed
+    with its own enrolled key, `chorus` when the shared identity asked for it. A resource server
+    trusts the actor (`act.sub`) as proven only when the two agree.
     """
     from origin.service_identity import get_host_id
 
@@ -195,7 +200,7 @@ def issue_delegation_token(server_client_id: str, user_id: str, ttl_seconds: int
         "iss": config.AUTHORITY_ISSUER,
         "sub": user_id,
         "aud": server_client_id,
-        "act": {"sub": server_client_id},
+        "act": {"sub": server_client_id, **({"iss": signer} if signer else {})},
         "principal_type": "delegation",
         "host_id": host_id,
         "iat": now.timestamp(),

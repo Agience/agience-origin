@@ -72,10 +72,60 @@ def test_delegation_token_happy_path(client: TestClient, origin_app):
         assert resp.json() == {"token": "minted-jwt"}
         # Subject came from the VERIFIED token, not the request body.
         svc.issue_delegation_token.assert_called_once_with(
-            "agience-server-aria", "user-123", 300
+            "agience-server-aria", "user-123", 300, signer="mantle"
         )
     finally:
         origin_app.dependency_overrides.pop(get_auth, None)
+
+
+def _as_service(origin_app, name):
+    from origin.services.dependencies import AuthContext, get_auth
+    origin_app.dependency_overrides[get_auth] = lambda: AuthContext(
+        principal_id=name, principal_type="service", user_id=None)
+
+
+def test_a_persona_signing_as_itself_gets_its_own_delegation_with_its_proof(client: TestClient, origin_app):
+    """2026-10-19: every persona signed as `chorus` and named itself in the request, so the actor on
+    a delegation was asserted. A persona that signs with its own enrolled key is recorded as the
+    proven signer (`act.iss`)."""
+    from origin.routers import auth_router
+    from origin.services.dependencies import get_auth
+
+    _as_service(origin_app, "lumen")
+    try:
+        with patch.object(auth_router, "verify_token", return_value={"sub": "user-123"}),              patch.object(auth_router, "origin_auth_service") as svc:
+            svc.issue_delegation_token.return_value = "minted-jwt"
+            ok = client.post("/internal/delegation-token", json={
+                "server_client_id": "agience-server-lumen", "subject_token": "user.jwt"})
+            other = client.post("/internal/delegation-token", json={
+                "server_client_id": "agience-server-iris", "subject_token": "user.jwt"})
+        assert ok.status_code == 200
+        svc.issue_delegation_token.assert_called_once_with(
+            "agience-server-lumen", "user-123", 300, signer="lumen")
+        assert other.status_code == 403, "a persona may obtain a delegation for itself only"
+    finally:
+        origin_app.dependency_overrides.pop(get_auth, None)
+
+
+def test_a_persona_is_admitted_to_the_exchange_and_nothing_else(client: TestClient, origin_app):
+    from origin.services.dependencies import get_auth
+
+    _as_service(origin_app, "lumen")
+    try:
+        resp = client.post("/internal/system-delegation", json={"purpose": "platform-mail"})
+        assert resp.status_code == 403
+    finally:
+        origin_app.dependency_overrides.pop(get_auth, None)
+
+
+def test_the_minted_delegation_records_who_signed_for_it(monkeypatch):
+    from jose import jwt as jose_jwt
+
+    from origin.services import auth_service
+
+    monkeypatch.setattr("origin.service_identity.get_host_id", lambda: "host-1")
+    token = auth_service.issue_delegation_token("agience-server-lumen", "user-123", signer="lumen")
+    assert jose_jwt.get_unverified_claims(token)["act"] == {"sub": "agience-server-lumen", "iss": "lumen"}
 
 
 def test_delegation_token_rejects_invalid_subject_token(client: TestClient, origin_app):

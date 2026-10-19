@@ -129,13 +129,16 @@ class TestPersonLookupNamesTheService:
         allowlist rather than as a test that could no longer find its subject. A test that reads a
         constant cannot fail that way.
         """
-        from origin.routers.auth_router import _PLATFORM_SERVICES
+        from origin.routers.auth_router import _PERSONAS, _PLATFORM_SERVICES
         from origin.services.auth_verifier import PLATFORM_ISSUERS
 
-        assert set(PLATFORM_ISSUERS) == set(_PLATFORM_SERVICES), (
+        # The personas are the one deliberate difference (2026-10-19): verified against their own
+        # anchors, and admitted by the delegation exchange alone, each for itself only.
+        assert set(PLATFORM_ISSUERS) == set(_PLATFORM_SERVICES) | set(_PERSONAS), (
             f"verify_token accepts {sorted(PLATFORM_ISSUERS)} but the /internal guard allows "
-            f"{sorted(_PLATFORM_SERVICES)}"
+            f"{sorted(_PLATFORM_SERVICES)} plus the personas {sorted(_PERSONAS)}"
         )
+        assert not set(_PERSONAS) & set(_PLATFORM_SERVICES),             "a persona in the platform-service allowlist could read person records"
 
     def test_neither_service_list_is_empty(self):
         """Equality above is satisfied by two EMPTY sets, which would be a silent pass.
@@ -171,7 +174,9 @@ class TestPersonLookupNamesTheService:
         from origin.routers.auth_router import _PLATFORM_SERVICES
         from origin.services.auth_verifier import PLATFORM_ISSUERS
 
-        for name in ("crystal", "lumen"):
+        # `lumen` left this list on 2026-10-19: it signs its delegation exchange with its own key
+        # (`ServerAuth.sign_exchange_jwt`), and stays out of `_PLATFORM_SERVICES` (checked above).
+        for name in ("crystal",):
             assert name not in PLATFORM_ISSUERS, (
                 f"{name!r} is back in PLATFORM_ISSUERS — nothing calls "
                 f"init_service_identity({name!r}), so it cannot sign a verifiable token.")

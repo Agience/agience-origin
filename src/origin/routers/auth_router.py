@@ -98,6 +98,9 @@ _KDF_ADMISSION = [Depends(kdf_admission, scope="function")]
 #: The note above about drift with the manifest still holds, and is now the SAFE direction: an
 #: anchor without a name here authenticates and is refused.
 _PLATFORM_SERVICES = frozenset({"mantle", "chorus"})
+#: A chorus persona that signs as itself with its own enrolled key. It is admitted to the delegation
+#: exchange for ITSELF only: the delegation's actor is then proven, and recorded as `act.iss`.
+from prism.trust.service_identity import PERSONA_NAMES as _PERSONAS  # noqa: E402
 
 
 def _require_platform_server(auth: AuthContext) -> None:
@@ -301,7 +304,18 @@ def internal_issue_delegation_token(
     caller-supplied subject: a compromised service can only exchange tokens it already possesses,
     never fabricate a delegation for a user it has not authenticated.
     """
-    _require_platform_server(auth)
+    # The actor is proven when a persona signs as itself: it may ask only for its own delegation,
+    # and the delegation records that the signer was the persona (`act.iss`). The shared `chorus`
+    # identity may still ask for any persona, as before, and its delegations say `act.iss=chorus` —
+    # usable for everything except the release of a secret, which demands a proven actor.
+    if auth.principal_type == "service" and auth.principal_id in _PERSONAS:
+        if body.server_client_id != f"agience-server-{auth.principal_id}":
+            raise HTTPException(status_code=403,
+                                detail="a persona may obtain a delegation for itself only")
+        signer = auth.principal_id
+    else:
+        _require_platform_server(auth)
+        signer = auth.principal_id
     claims = verify_token(body.subject_token)
     if not claims:
         raise HTTPException(status_code=401, detail="Invalid or expired subject token")
@@ -314,7 +328,7 @@ def internal_issue_delegation_token(
     if not user_id:
         raise HTTPException(status_code=400, detail="subject_token has no subject")
     token = origin_auth_service.issue_delegation_token(
-        body.server_client_id, str(user_id), body.ttl_seconds
+        body.server_client_id, str(user_id), body.ttl_seconds, signer=signer
     )
     return {"token": token}
 

@@ -31,7 +31,11 @@ JWT_ALGORITHM = "RS256"
 #: Named rather than inlined so a test can read it. An inline tuple is unreachable from outside this
 #: function, so the relationship above could only ever be asserted by re-typing the names in the
 #: test — a second copy, which is the thing being guarded against.
-PLATFORM_ISSUERS = frozenset({"mantle", "chorus"})
+#: The chorus personas sign as themselves once each holds an enrolled key; each is verified against
+#: its own anchor (a persona with none fails verification), and the delegation exchange is the one
+#: route that admits them (`auth_router`).
+from prism.trust.service_identity import PERSONA_NAMES as _PERSONA_NAMES  # noqa: E402
+PLATFORM_ISSUERS = frozenset({"mantle", "chorus", *_PERSONA_NAMES})
 
 
 def verify_token(token: str, expected_audience: Optional[str] = None) -> Optional[dict[str, Any]]:
