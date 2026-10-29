@@ -11,7 +11,7 @@ name: build
 # On a tag, the built wheel and sdist are attached to the GitHub release.
 on:
   push:
-    branches: [main]
+    branches: [main, 'release/**']   # release/<id>: the platform release deploys this run's `dist`
     tags: ['v*']
   pull_request:
     branches: [main]

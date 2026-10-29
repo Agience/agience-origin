@@ -5,6 +5,11 @@ All notable changes to `agience-origin` are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.2.10] - 2026-10-29
+
+### Changed
+- The `build` workflow in `.github/workflows/build.yml` now also runs on pushes to `release/**` branches, so the platform release can deploy the `dist` artifacts from that run.
+
 ## [0.2.9] - 2026-10-18
 
 ### Added
