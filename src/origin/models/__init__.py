@@ -14,6 +14,7 @@ from origin.models.otp_code import OtpCode
 from origin.models.server_credential import ServerCredential
 from origin.models.oauth_client import OAuthClient
 from origin.models.password_reset import PasswordReset
+from origin.models.key_custody import KeyCustodyNonce, KeyCustodyShare
 
 __all__ = [
     "Person",
@@ -25,4 +26,6 @@ __all__ = [
     "ServerCredential",
     "OAuthClient",
     "PasswordReset",
+    "KeyCustodyShare",
+    "KeyCustodyNonce",
 ]

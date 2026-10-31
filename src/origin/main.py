@@ -1,7 +1,8 @@
 ﻿"""Origin — FastAPI app entry point.
 
 Listens on port 8080. Owns identity, OIDC, passkeys, OTP, server credentials, platform settings,
-setup, and the key oracle. It exposes no grant or API-key HTTP surface — see the routers section.
+setup, the key oracle, and one share of each Mantle master key. It exposes no grant or API-key HTTP
+surface — see the routers section.
 """
 
 from __future__ import annotations
@@ -42,6 +43,7 @@ from origin.routers.system_router import system_router
 from origin.routers.server_credentials_router import router as server_credentials_router
 from origin.routers.setup_router import setup_router
 from origin.routers.oracle_router import oracle_router
+from origin.routers.key_share_router import key_share_router
 from origin.services import account_notify
 from origin.services import manifest as manifest_loader
 from origin.services.dependencies import KdfAdmissionRefused, kdf_admission_refused_handler
@@ -565,6 +567,8 @@ app.include_router(server_credentials_router)
 app.include_router(setup_router)
 app.include_router(system_router)
 app.include_router(oracle_router)
+# Origin's share of each Mantle master key, for Mantle's service identity alone.
+app.include_router(key_share_router)
 
 
 # ---------------------------------------------------------------------------

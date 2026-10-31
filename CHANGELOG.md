@@ -5,6 +5,18 @@ All notable changes to `agience-origin` are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.2.11] - 2026-10-31
+
+### Added
+- `/internal/key-shares/{principal_id}` (`PUT`, `GET`) holds Origin's share of each Mantle master key under threshold custody, in its own table (`key_custody_shares`, migration `0009_key_custody`) with the share encrypted under Origin's `encryption.key`. No settings route and no `/oracle` route lists, reads or writes it.
+- Only Mantle's own service JWT, verified against its anchor in the authority manifest, reaches a share; other platform services, the operator and delegations are refused. Each token must be bound to the call: a lifetime of at most 60 seconds, a `jti` accepted once (`key_custody_nonces`), and claims naming the method, the path and the principal of the request.
+- A store is one conditional write: a share of a different key is not overwritten unless the caller names the stored key-check value as superseded, and two stores cannot both act on the same read. A share that cannot be decrypted is refused with 503, never reported absent; an absent share answers 404 with `{"absent": true}`. Every release is logged at WARNING with the principal and the first characters of the key-check value, never the share.
+- Migration `0009_key_custody` refuses to downgrade while `key_custody_shares` holds any share, naming `mantle.system.split_master_keys --combine` as the way back.
+- Platform settings reserve the `custody.` prefix: no route or writer may store a setting under it, and none is listed.
+
+### Changed
+- `origin.services.shamir` is `prism.trust.shamir`, re-exported as one module object; `key_oracle.split_secret` and `combine_shares` are unchanged. The `agience-prism[trust]` floor is 0.1.8, the release that has it.
+
 ## [0.2.10] - 2026-10-29
 
 ### Changed

@@ -158,6 +158,7 @@ def origin_app(monkeypatch, jwt_keypair):
         # to be reloaded alongside them — otherwise it keeps a stale `get_auth` symbol and both
         # dependency_overrides and the reloaded key_manager silently fail to apply to it.
         "origin.routers.oracle_router",
+        "origin.routers.key_share_router",
     ]:
         mod = sys.modules.get(mod_name)
         if mod is not None:

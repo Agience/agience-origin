@@ -25,6 +25,7 @@ from origin import config
 from origin.db.session import get_db
 from origin.services.dependencies import AuthContext, get_auth
 from origin.services.platform_settings_service import (
+    is_reserved_key,
     is_secret_key as platform_settings_is_secret_key,
     settings as platform_settings,
 )
@@ -117,11 +118,15 @@ def _settings_grouped(category: Optional[str] = None) -> dict[str, list[dict]]:
     """Read all settings from the cache, group by category. Secrets masked as None."""
     grouped: dict[str, list[dict]] = {}
     for key, value in platform_settings._values.items():  # noqa: SLF001 — internal
+        if is_reserved_key(key):
+            continue
         cat = key.split(".")[0] if "." in key else "platform"
         if category and cat != category:
             continue
         grouped.setdefault(cat, []).append({"key": key, "value": value, "is_secret": False})
     for key in platform_settings._secrets:  # noqa: SLF001
+        if is_reserved_key(key):
+            continue
         cat = key.split(".")[0] if "." in key else "platform"
         if category and cat != category:
             continue
@@ -164,6 +169,8 @@ async def update_settings(
     settings_dicts = []
     restart_required = False
     for item in body.settings:
+        if is_reserved_key(item.key):
+            raise HTTPException(status_code=400, detail="custody.* keys are not settings")
         # Secrets are masked as None on read, so an unchanged secret comes back
         # empty on a round-trip. Skip those rather than blanking the stored value.
         # Classification is the server's, from the key — not the request.

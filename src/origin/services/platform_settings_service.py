@@ -74,8 +74,19 @@ _NON_SECRET_KEYS = frozenset(
 )
 
 
+#: Reserved: key custody keeps its shares in its own table (`services.key_shares`), and no setting
+#: may be written under this prefix, by any route, so nothing here can stand in for a share.
+RESERVED_PREFIX = "custody."
+
+
+def is_reserved_key(key: str) -> bool:
+    return key.lower().startswith(RESERVED_PREFIX)
+
+
 def is_secret_key(key: str) -> bool:
     """Whether this setting must be stored encrypted. Server-side, not caller-supplied."""
+    if is_reserved_key(key):
+        return True
     if key in _NON_SECRET_KEYS:
         return False
     lowered = key.lower()
@@ -143,7 +154,11 @@ class _SettingsCache:
         server out of encrypting something it considers sensitive.
 
         `commit=False` defers the commit so a batch can be one transaction.
+
+        A key under :data:`RESERVED_PREFIX` is refused with `ValueError`.
         """
+        if is_reserved_key(key):
+            raise ValueError(f"{RESERVED_PREFIX!r} keys are reserved for key custody")
         classified = is_secret_key(key)
         is_secret = classified or bool(is_secret)
 
@@ -222,6 +237,8 @@ class _SettingsCache:
         return len(staged)
 
     def _absorb(self, row: PlatformSetting) -> None:
+        if is_reserved_key(row.key):
+            return
         if row.is_secret and row.secret_value:
             try:
                 self._secrets[row.key] = _fernet().decrypt(row.secret_value.encode("ascii")).decode("utf-8")

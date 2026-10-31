@@ -23,7 +23,14 @@ import pathlib
 
 import pytest
 
-MODULES = ["authority_trust", "key_manager", "service_identity"]
+#: Dotted paths under `origin`; the prism module is the last component (`services.shamir` is
+#: `prism.trust.shamir`, the one Shamir k-of-n implementation that Origin's key oracle and Mantle's
+#: threshold master-key store share).
+MODULES = ["authority_trust", "key_manager", "service_identity", "services.shamir"]
+
+
+def _prism(name: str) -> str:
+    return "prism.trust." + name.rsplit(".", 1)[-1]
 
 ORIGIN_SRC = pathlib.Path(__file__).resolve().parents[1]      # …/src/origin
 
@@ -32,7 +39,7 @@ ORIGIN_SRC = pathlib.Path(__file__).resolve().parents[1]      # …/src/origin
 def test_origin_module_IS_the_prism_module(name):
     """Not 'equivalent to' — the same object. See the SURFACE/IDENTITY note above."""
     o = importlib.import_module(f"origin.{name}")
-    p = importlib.import_module(f"prism.trust.{name}")
+    p = importlib.import_module(_prism(name))
     assert o is p, (
         f"origin.{name} is no longer the same module object as prism.trust.{name}. If this file was "
         f"changed to `from prism.trust.{name} import *`, revert it: a star-import breaks callers "
@@ -43,7 +50,7 @@ def test_origin_module_IS_the_prism_module(name):
 @pytest.mark.parametrize("name", MODULES)
 def test_the_shim_stays_a_shim(name):
     """A re-export that grows a body is the fork coming back."""
-    path = ORIGIN_SRC / f"{name}.py"
+    path = ORIGIN_SRC / (name.replace(".", "/") + ".py")
     # `utf-8-sig`, not `utf-8`: some of this tree's Python files carry a UTF-8 BOM. Python
     # tolerates one on import, so those files run; `ast.parse` on a plain `utf-8` read does not,
     # and raises `invalid non-printable character U+FEFF`. Reading with `utf-8-sig` keeps this
@@ -85,7 +92,7 @@ def test_writes_through_the_origin_name_are_seen_through_the_prism_name(name):
     """The property a consumer's fixtures depend on, exercised directly rather than assumed to still
     hold. It writes a sentinel to a scratch attribute, so it touches no real state."""
     o = importlib.import_module(f"origin.{name}")
-    p = importlib.import_module(f"prism.trust.{name}")
+    p = importlib.import_module(_prism(name))
     sentinel = f"__fork_probe_{name}__"
     try:
         setattr(o, sentinel, "written through origin")
