@@ -103,6 +103,52 @@ def _open(row: KeyCustodyShare) -> dict:
     return {"x": row.x, "y": y, "kcv": row.kcv}
 
 
+def share_history(db: Session, principal_id: str) -> list:
+    """Every share a replacement superseded for `principal_id`, newest first, without its `y`."""
+    from origin.models.key_custody import KeyCustodyShareHistory
+
+    rows = (db.query(KeyCustodyShareHistory)
+            .filter(KeyCustodyShareHistory.principal_id == principal_id)
+            .order_by(KeyCustodyShareHistory.id.desc()))
+    return [{"id": r.id, "x": r.x, "kcv": r.kcv, "superseded_by": r.superseded_by,
+             "superseded_time": r.superseded_time.isoformat() if r.superseded_time else None}
+            for r in rows]
+
+
+def restore_share(db: Session, principal_id: str, history_id: int, operator_id: str) -> dict:
+    """The operator puts back a superseded share. The share it replaces is kept in history, as
+    every replaced share is, and the restored one is not replaceable until marked again."""
+    from origin.models.key_custody import KeyCustodyShareHistory
+
+    old = db.get(KeyCustodyShareHistory, int(history_id))
+    if old is None or old.principal_id != principal_id:
+        raise ShareRejected("no such superseded share for this principal")
+    with _WRITE_LOCK:
+        row = _read(db, principal_id)
+        if row is None:
+            db.add(KeyCustodyShare(principal_id=principal_id, x=old.x, y_sealed=old.y_sealed,
+                                   kcv=old.kcv))
+        else:
+            db.add(KeyCustodyShareHistory(principal_id=principal_id, x=row.x,
+                                          y_sealed=row.y_sealed, kcv=row.kcv,
+                                          superseded_by=f"restore:{old.id}:{operator_id}"))
+            row.x, row.y_sealed, row.kcv = old.x, old.y_sealed, old.kcv
+            row.rekey_pending = False
+            row.updated_time = datetime.now(timezone.utc)
+        db.commit()
+    return {"principal_id": principal_id, "restored": int(history_id), "kcv": old.kcv}
+
+
+def same_share(row: KeyCustodyShare, share: dict) -> bool:
+    """Is `share` exactly the share Origin holds (x, y and key check)? An unreadable stored share
+    is never the same."""
+    try:
+        return _open(row) == {"x": share.get("x"), "y": share.get("y"),
+                              "kcv": share.get("kcv")}
+    except ShareUnreadable:
+        return False
+
+
 def release_share(db: Session, principal_id: str) -> Optional[dict]:
     """The stored share for `principal_id`, None when none is stored, or `ShareUnreadable`."""
     row = _read(db, principal_id)
@@ -134,6 +180,10 @@ def store_share(db: Session, principal_id: str, share: dict, *,
             pass                              # replaceable only by a share of the same key
         if row.kcv != new["kcv"] and row.kcv != supersedes:
             raise ShareConflict(principal_id)
+        # The superseded share is kept, never deleted.
+        from origin.models.key_custody import KeyCustodyShareHistory
+        db.add(KeyCustodyShareHistory(principal_id=principal_id, x=row.x, y_sealed=row.y_sealed,
+                                      kcv=row.kcv, superseded_by=new["kcv"]))
         result = db.execute(
             update(KeyCustodyShare)
             .where(KeyCustodyShare.principal_id == principal_id,

@@ -25,8 +25,10 @@
 # `prism.trust.service_identity.PERSONA_NAMES` lists, which 0.1.5 introduced. (0.1.0 and 0.1.1 are
 # yanked on PyPI, and PEP 592 ignores a yanked release only for a requirement that is not an exact
 # pin, which is a second reason this is a floor and never `==`.) 0.1.8 is the floor now:
-# `origin.services.shamir` re-exports `prism.trust.shamir`, which 0.1.8 introduced.
-agience-prism[trust]>=0.1.8
+# `origin.services.shamir` re-exports `prism.trust.shamir`, which 0.1.8 introduced. 0.1.9 is the
+# floor now: Origin reads `prism.trust.service_identity.SERVER_DELEGATION_SIGNERS` and
+# `prism.trust.use_verdict`, which shipped after the tagged 0.1.8.
+agience-prism[trust]>=0.1.9
 
 # Authentication & Security
 authlib==1.6.9

@@ -89,7 +89,7 @@ def _oauth_state(client, **overrides):
     import re
 
     page = _authorize(client, **overrides).text
-    match = re.search(r'const S = "([^"]+)"', page)
+    match = re.search(r'<body data-state="([^"]+)"', page)
     assert match, "the chooser did not carry an oauth_state"
     return match.group(1)
 
@@ -360,19 +360,26 @@ def _resolve(provider, subject, email, *, email_verified, name="Someone"):
         return str(person.id)
 
 
-def test_a_verified_google_identity_joins_the_existing_verified_account(db_client):
-    """Password, OTP, and Google on one verified address resolve to the same account."""
-    person_id = _make_person(
-        email="linked@example.com", email_verified=True, password="correct-horse-battery"
-    )
-    landed = _resolve("google", "google-sub-1", "linked@example.com", email_verified=True)
-    assert landed == person_id, "Google sign-in created a second account instead of linking"
+def test_a_verified_google_identity_does_not_join_an_account_by_email(db_client):
+    """An address both sides proved is not the account's consent: a new identity at a verified
+    address is refused, and joins only by the account's own act with a fresh step-up
+    (`POST /auth/me/link-provider`)."""
+    from origin.services.person_service import IdentityLinkRefused
+
+    _make_person(email="linked@example.com", email_verified=True, password="correct-horse-battery")
+    with pytest.raises(IdentityLinkRefused):
+        _resolve("google", "google-sub-1", "linked@example.com", email_verified=True)
 
 
-def test_the_link_is_durable_and_survives_the_email_changing(db_client):
-    """After linking, `(provider, subject)` is the key — the email is no longer what resolves it."""
+def test_a_linked_identity_is_durable_and_survives_the_email_changing(db_client):
+    """Once linked, `(provider, subject)` is the key — the email is no longer what resolves it."""
+    from origin.db import person_identities as db_identities
+
     person_id = _make_person(email="durable@example.com", email_verified=True)
-    _resolve("google", "google-sub-2", "durable@example.com", email_verified=True)
+    with _session() as db:
+        db_identities.add(db, person_id=person_id, method="oidc", provider="google",
+                          subject="google-sub-2", verified=True)
+        db.commit()
     again = _resolve("google", "google-sub-2", "renamed@example.com", email_verified=True)
     assert again == person_id
 

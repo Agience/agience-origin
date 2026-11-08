@@ -75,9 +75,37 @@ def _validate_aud_for_principal(payload: dict) -> None:
     elif principal_type == "delegation":
         if not aud:
             raise HTTPException(status_code=401, detail="Missing aud in delegation token")
+        # A delegation is a bearer here only when it is addressed to Origin (review 21, F5): one
+        # Origin issued to a persona, Mantle or anyone else stands for its person there, not here.
+        # A narrowed delegation is bounded to the routes that list it (`NARROWED_ROUTES`) instead.
+        if not _is_narrowed(payload) and aud not in (config.AUTHORITY_ISSUER, "origin"):
+            raise HTTPException(status_code=401,
+                                detail="a delegation addressed to another service is no session "
+                                       "at Origin")
     else:
         if aud != config.AUTHORITY_ISSUER:
             raise HTTPException(status_code=401, detail="Invalid token audience")
+
+
+#: The Origin routes a narrowed delegation (a person's token exchanged for Ember or a persona's
+#: facet, review 8 R3) opens, by method and path: the identity check a proxy in front of Ember asks
+#: (`lumen.agience.ai`'s `forward_auth`). Every other Origin route refuses one (review 10).
+NARROWED_ROUTES = frozenset({("GET", "/auth/userinfo")})
+
+
+def _is_narrowed(payload: dict) -> bool:
+    """A narrowed delegation, by Origin's own claim (`narrowed`, set by `issue_narrow_delegation`),
+    or by its shape for one issued before the claim: a delegation whose audience is its actor and a
+    narrow audience. The claim decides even when no narrow audience is configured."""
+    if payload.get("principal_type") != "delegation":
+        return False
+    if payload.get("narrowed") is True:
+        return True
+    aud, act = payload.get("aud"), (payload.get("act") or {}).get("sub")
+    if not isinstance(aud, str) or aud != act:
+        return False
+    from origin.services.auth_service import narrow_audiences
+    return aud in narrow_audiences()
 
 
 def resolve_auth(token: str, db: Session, request: Optional[Request] = None) -> AuthContext:
@@ -95,6 +123,17 @@ def resolve_auth(token: str, db: Session, request: Optional[Request] = None) -> 
     # nor resolves them. Such a token simply fails identity resolution below → 401.
 
     payload = verify_token(raw_token)
+    if payload and "sub" in payload and isinstance(db, Session):
+        # Sign-out, sign-out-everywhere and a signing-key rollover end what was issued before them
+        # (review 10, R5).
+        from origin.services import not_before
+        if not_before.ended(db, payload):
+            raise HTTPException(status_code=401, detail="this sign-in has ended; sign in again")
+    if payload and "sub" in payload and _is_narrowed(payload):
+        route = (request.method, request.url.path) if request is not None else None
+        if route not in NARROWED_ROUTES:
+            raise HTTPException(status_code=401, detail="a narrowed delegation opens only "
+                                "the routes that list it")
     if payload and "sub" in payload:
         # A token carrying `token_type` is not an access token. `token_type` is stamped at mint
         # time on every special-purpose token Origin issues, and never on an access token:
@@ -155,6 +194,13 @@ def resolve_auth(token: str, db: Session, request: Optional[Request] = None) -> 
                 user_id=str(payload.get("sub")) if payload.get("sub") else None,
             )
         if jwt_principal_type == "delegation":
+            # Custody credentials (a background, seed or bootstrap delegation addressed to Origin)
+            # are read only where they act: as `X-Acting-Credential` or a bootstrap submission.
+            # As a bearer they would sign in as their subject, the operator for a bootstrap.
+            if payload.get("aud") == "origin" and payload.get("scope") in (
+                    "custody.share.release", "authority.seed", "authority.bootstrap"):
+                raise HTTPException(status_code=401,
+                                    detail="a custody credential is not an access token")
             d_sub = payload.get("sub")
             d_act = (payload.get("act") or {}).get("sub")
             if not d_sub:

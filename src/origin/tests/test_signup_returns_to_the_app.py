@@ -204,7 +204,7 @@ def _oauth_state(client) -> str:
         "redirect_uri": "http://localhost:8080/cb", "scope": "openid email profile", "state": "st",
         "code_challenge": challenge, "code_challenge_method": "S256",
     }).text
-    match = re.search(r'const S = "([^"]+)"', page)
+    match = re.search(r'<body data-state="([^"]+)"', page)
     assert match, "the chooser did not carry an oauth_state"
     return match.group(1)
 
@@ -715,7 +715,7 @@ def test_the_account_page_leads_back_to_the_app_before_offering_a_password_chang
     html = (_WEB_DIR / "account.html").read_text(encoding="utf-8-sig")
     assert 'id="continue"' in html and "Continue to Agience" in html
     assert html.index('id="continue"') < html.index('id="changePw"')
-    assert "continueHref()" in html
+    assert "continueHref()" in (_WEB_DIR / "account-page.js").read_text(encoding="utf-8-sig")
     assert re.search(r'<button class="link"[^>]*id="changePw"', html), (
         "Change password is a secondary action once Continue is the primary one")
 

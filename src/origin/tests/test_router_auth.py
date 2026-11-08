@@ -184,7 +184,9 @@ class TestPasswordLogin:
             return_value=True,
         ), patch(
             "origin.routers.auth_router.create_jwt_token",
-            side_effect=["access.jwt", "refresh.jwt"],
+            return_value="access.jwt",
+        ), patch(
+            "origin.routers.auth_router._refresh_tokens.issue", return_value="refresh.jwt",
         ), patch(
             "origin.routers.auth_router._compute_roles",
             return_value=["operator"],
@@ -338,7 +340,9 @@ class TestPasswordRegister:
             return_value=person,
         ), patch(
             "origin.routers.auth_router.create_jwt_token",
-            side_effect=["access.jwt", "refresh.jwt"],
+            return_value="access.jwt",
+        ), patch(
+            "origin.routers.auth_router._refresh_tokens.issue", return_value="refresh.jwt",
         ), patch(
             "origin.routers.auth_router._compute_roles",
             return_value=[],
@@ -765,7 +769,9 @@ class TestEmailVerification:
             "origin.routers.auth_router.person_service.create_user_with_password",
             return_value=_person(),
         ), patch(
-            "origin.routers.auth_router.create_jwt_token", side_effect=["access.jwt", "refresh.jwt"],
+            "origin.routers.auth_router.create_jwt_token", return_value="access.jwt",
+        ), patch(
+            "origin.routers.auth_router._refresh_tokens.issue", return_value="refresh.jwt",
         ), patch(
             "origin.routers.auth_router.person_service.record_person_event",
         ), patch(
@@ -823,7 +829,9 @@ class TestEmailVerification:
         ), patch(
             "origin.routers.auth_router.person_service.set_email_verified",
         ) as setv, patch(
-            "origin.routers.auth_router.create_jwt_token", side_effect=["access.jwt", "refresh.jwt"],
+            "origin.routers.auth_router.create_jwt_token", return_value="access.jwt",
+        ), patch(
+            "origin.routers.auth_router._refresh_tokens.issue", return_value="refresh.jwt",
         ), patch(
             "origin.routers.auth_router.person_service.record_person_event",
         ), patch(

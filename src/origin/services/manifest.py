@@ -30,19 +30,52 @@ from origin.services.platform_settings_service import settings as platform_setti
 logger = logging.getLogger(__name__)
 
 
-def manifest_path() -> Path:
-    """Default manifest location. Override with `MANIFEST_PATH` env."""
-    explicit = os.getenv("MANIFEST_PATH")
-    if explicit:
-        return Path(explicit)
-    data_path = os.getenv("DATA_PATH", "/data")
-    return Path(data_path) / "manifest.yml"
+def manifest_path() -> Path | None:
+    """`manifest.yml` in Origin's own folder, the one that holds its database (`ORIGIN_DB_PATH`),
+    or None when that is not set (review 18). No other path is read: not a default, not a
+    `DATA_PATH`."""
+    db = (os.getenv("ORIGIN_DB_PATH") or "").strip()
+    if not db:
+        return None
+    return Path(db).parent / "manifest.yml"
+
+
+def _euid():
+    geteuid = getattr(os, "geteuid", None)
+    return geteuid() if geteuid is not None else None
+
+
+def _owner_mode(path: Path) -> dict:
+    import stat
+    st = os.stat(path, follow_symlinks=False)
+    return {"uid": st.st_uid, "mode": stat.S_IMODE(st.st_mode)}
+
+
+def _refusal(p: Path) -> str | None:
+    """Why the manifest at `p` is not read, or None: the folder this process's own at 0700 (as
+    `custody_refusal` asks of KEYS_DIR), the file its own and writable by no one else."""
+    me = _euid()
+    if me is None:
+        return "this platform shows no process user to check the manifest's owner against"
+    try:
+        folder, file = _owner_mode(p.parent), _owner_mode(p)
+    except OSError as exc:
+        return f"its folder or file could not be checked ({exc})"
+    if folder["uid"] != me or folder["mode"] & 0o077:
+        return f"its folder {p.parent} is not this service's own at 0700"
+    if file["uid"] != me or file["mode"] & 0o022:
+        return "the file is not this service's own, or others may write it"
+    return None
 
 
 def load(path: Path | None = None) -> dict[str, Any]:
-    """Read + parse the manifest. Returns `{}` when missing or empty."""
+    """Read + parse the manifest. Returns `{}` when missing, empty, or not Origin's own."""
     p = path or manifest_path()
-    if not p.exists():
+    if p is None or not p.exists():
+        return {}
+    why = _refusal(p)
+    if why:
+        logger.warning("manifest %s is not applied: %s", p, why)
         return {}
     try:
         with p.open("r", encoding="utf-8") as fh:
@@ -108,6 +141,7 @@ def _ensure_operator(db: Session, operator: dict) -> bool:
             "name": name,
             "username": name,
             "password_hash": password_hash,
+            "email_verified": True,          # the operator's own address, from the manifest
         },
     )
     db.flush()

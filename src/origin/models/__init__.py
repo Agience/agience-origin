@@ -14,9 +14,29 @@ from origin.models.otp_code import OtpCode
 from origin.models.server_credential import ServerCredential
 from origin.models.oauth_client import OAuthClient
 from origin.models.password_reset import PasswordReset
-from origin.models.key_custody import KeyCustodyNonce, KeyCustodyShare
+from origin.models.person_step_up import PersonStepUp
+from origin.models.refresh_token import RefreshToken
+from origin.models.origin_session import OriginSession
+from origin.models.sign_in_bounds import LinkAttempt, PersonNotBefore
+from origin.models.service_account import ServiceAccount
+from origin.models.narrow_hop import NarrowHop
+from origin.models.billing_recipient import BillingRecipient, BillingRecipientLookup
+from origin.models.credential_seal import CredentialSeal
+from origin.models.key_custody import (
+    DelegationRecord, SeedCredential, KeyCustodyBackground, KeyCustodyDelegation, KeyCustodyNonce,
+    KeyCustodyRelease, KeyCustodyShare, UseNonce,
+)
+from origin.models.authority_ledger import (
+    AuthorityBootstrapWindow, AuthorityEdge, AuthorityEntry, AuthorityGrant, AuthorityNode,
+    AuthorityRoot, AuthoritySigningKey, OperatorAlert, AuthorityJobGrant,
+)
 
 __all__ = [
+    "UseNonce",
+    "CredentialSeal",
+    "BillingRecipient",
+    "BillingRecipientLookup",
+    "NarrowHop",
     "Person",
     "PlatformSetting",
     "PasskeyCredential",
@@ -26,6 +46,26 @@ __all__ = [
     "ServerCredential",
     "OAuthClient",
     "PasswordReset",
+    "PersonStepUp",
+    "OriginSession",
+    "PersonNotBefore",
+    "LinkAttempt",
+    "ServiceAccount",
+    "RefreshToken",
     "KeyCustodyShare",
     "KeyCustodyNonce",
+    "KeyCustodyDelegation",
+    "KeyCustodyRelease",
+    "KeyCustodyBackground",
+    "AuthorityEntry",
+    "AuthorityGrant",
+    "AuthorityEdge",
+    "AuthorityRoot",
+    "AuthorityNode",
+    "AuthorityBootstrapWindow",
+    "AuthoritySigningKey",
+    "OperatorAlert",
+    "AuthorityJobGrant",
+    "DelegationRecord",
+    "SeedCredential",
 ]

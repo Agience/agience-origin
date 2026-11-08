@@ -9,6 +9,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import json
 import logging
 from datetime import datetime, timezone
 from typing import Optional
@@ -20,13 +21,16 @@ from webauthn import (
     verify_authentication_response,
     verify_registration_response,
 )
+from webauthn.helpers import (
+    parse_authentication_credential_json,
+    parse_registration_credential_json,
+)
 from webauthn.helpers.cose import COSEAlgorithmIdentifier
 from webauthn.helpers.structs import (
-    AuthenticationCredential,
+    AttestationConveyancePreference,
     AuthenticatorSelectionCriteria,
     AuthenticatorTransport,
     PublicKeyCredentialDescriptor,
-    RegistrationCredential,
     ResidentKeyRequirement,
     UserVerificationRequirement,
 )
@@ -40,19 +44,31 @@ from origin.services.platform_settings_service import settings
 logger = logging.getLogger(__name__)
 
 
+def _own_uri() -> str:
+    return (getattr(config, "ORIGIN_URI", "") or getattr(config, "AUTHORITY_ISSUER", "")
+            or "http://localhost:8080")
+
+
 def _get_rp_id() -> str:
-    """Derive the Relying Party ID from the frontend hostname.
+    """The Relying Party ID: Origin's own host, never the front end's (review 7, F1).
 
-    Origin runs at a different host than the frontend; WebAuthn binds to the
-    frontend origin (`config.FACET_URI`), so the rpId must match its host.
-    """
+    Every passkey ceremony (registration, sign-in, each step-up) runs on Origin's own pages, so the
+    relying party is Origin and a page served from any other host, Mantle's or the web app's,
+    cannot obtain an assertion Origin accepts."""
+    from urllib.parse import urlparse
+
     try:
-        from urllib.parse import urlparse
-
-        parsed = urlparse(config.FACET_URI)
-        return parsed.hostname or "localhost"
+        return urlparse(_own_uri()).hostname or "localhost"
     except Exception:
         return "localhost"
+
+
+def expected_origin() -> str:
+    """The only origin an assertion or registration is accepted from: Origin's own address."""
+    from urllib.parse import urlparse
+
+    u = urlparse(_own_uri())
+    return f"{u.scheme}://{u.netloc}" if u.scheme and u.netloc else _own_uri().rstrip("/")
 
 
 def _get_rp_name() -> str:
@@ -73,7 +89,10 @@ def _b64url_decode(data: str) -> bytes:
 # ---------------------------------------------------------------------------
 # Registration
 # ---------------------------------------------------------------------------
-def get_registration_options(db: Session, user_id: str, email: str) -> dict:
+def get_registration_options(db: Session, user_id: str, email: str, *,
+                             operator: bool = False) -> dict:
+    """`operator`: the operator's account, whose passkeys open the operator console: user
+    verification is required and the authenticator is asked for its attestation."""
     existing = db_passkeys.list_for_person(db, user_id)
     exclude_credentials = [
         PublicKeyCredentialDescriptor(
@@ -90,8 +109,11 @@ def get_registration_options(db: Session, user_id: str, email: str) -> dict:
         user_display_name=email,
         authenticator_selection=AuthenticatorSelectionCriteria(
             resident_key=ResidentKeyRequirement.PREFERRED,
-            user_verification=UserVerificationRequirement.PREFERRED,
+            user_verification=(UserVerificationRequirement.REQUIRED if operator
+                               else UserVerificationRequirement.PREFERRED),
         ),
+        attestation=(AttestationConveyancePreference.DIRECT if operator
+                     else AttestationConveyancePreference.NONE),
         supported_pub_key_algs=[
             COSEAlgorithmIdentifier.ECDSA_SHA_256,
             COSEAlgorithmIdentifier.RSASSA_PKCS1_v1_5_SHA_256,
@@ -135,14 +157,22 @@ def get_registration_options(db: Session, user_id: str, email: str) -> dict:
     }
 
 
+def _fmt(verification) -> str:
+    fmt = getattr(verification, "fmt", None)
+    return str(getattr(fmt, "value", fmt) or "")
+
+
 def verify_registration(
     db: Session,
     user_id: str,
     credential: dict,
     challenge: str,
     device_name: Optional[str] = None,
+    *,
+    operator: bool = False,
 ) -> dict:
-    """Verify a registration attestation against a challenge WE issued.
+    """Verify a registration attestation against a challenge WE issued. For the operator's
+    account (`operator`) user verification is required and "none" attestation is refused.
 
     Same contract as :func:`verify_authentication`: `challenge` is a lookup key,
     not the expected value. Lower severity than login (this route is behind
@@ -155,13 +185,21 @@ def verify_registration(
     if claimed.person_id and str(claimed.person_id) != str(user_id):
         raise ValueError("registration challenge was issued to a different user")
 
-    registration = RegistrationCredential.model_validate(credential)
-    verification = verify_registration_response(
-        credential=registration,
-        expected_challenge=_b64url_decode(claimed.challenge),
-        expected_rp_id=_get_rp_id(),
-        expected_origin=config.FACET_URI,
-    )
+    # webauthn 2.x credentials are dataclasses, parsed from the JSON the browser sends.
+    # A malformed or unverifiable credential is a failed registration (400), not a server error.
+    try:
+        registration = parse_registration_credential_json(json.dumps(credential))
+        verification = verify_registration_response(
+            credential=registration,
+            expected_challenge=_b64url_decode(claimed.challenge),
+            expected_rp_id=_get_rp_id(),
+            expected_origin=expected_origin(),
+            require_user_verification=operator,
+        )
+    except Exception as exc:  # noqa: BLE001 — every webauthn refusal answers the same
+        raise ValueError(f"passkey registration could not be verified: {exc}") from exc
+    if operator and _fmt(verification) == "none":
+        raise ValueError("the operator's passkey must carry an attestation, not \"none\"")
     credential_id = _b64url_encode(verification.credential_id)
     db_passkeys.create(
         db,
@@ -343,15 +381,19 @@ def verify_authentication(
     db: Session,
     credential: dict,
     challenge: str,
+    *,
+    purpose: str = "login",
+    require_user_verification: bool = False,
 ) -> Optional[str]:
-    """Verify a login assertion against a challenge WE issued and have not yet spent.
+    """Verify an assertion against a challenge WE issued for `purpose` and have not yet spent.
 
     `challenge` is the b64url string the client echoes back. It is not trusted as
     "what the server expected" — it is a lookup key into the challenge table. The
     expected challenge and the expected user both come from the stored row, so a
-    replayed body fails at `consume` before any crypto runs.
+    replayed body fails at `consume` before any crypto runs. `purpose` keeps ceremonies apart: a
+    login challenge never satisfies an operator step-up, nor the reverse.
     """
-    claimed = db_challenges.consume(db, challenge, purpose="login")
+    claimed = db_challenges.consume(db, challenge, purpose=purpose)
     if claimed is None:
         logger.warning("Passkey login rejected: challenge unknown, spent, or expired")
         return None
@@ -362,7 +404,7 @@ def verify_authentication(
     expected_challenge = _b64url_decode(claimed.challenge)
     expected_user_id = str(claimed.person_id)
 
-    authentication = AuthenticationCredential.model_validate(credential)
+    authentication = parse_authentication_credential_json(json.dumps(credential))
     credential_id = _b64url_encode(authentication.raw_id)
     stored = db_passkeys.get_by_id_and_person(db, credential_id, expected_user_id)
     if stored is None:
@@ -373,9 +415,10 @@ def verify_authentication(
             credential=authentication,
             expected_challenge=expected_challenge,
             expected_rp_id=_get_rp_id(),
-            expected_origin=config.FACET_URI,
+            expected_origin=expected_origin(),
             credential_public_key=stored.public_key,
             credential_current_sign_count=stored.sign_count or 0,
+            require_user_verification=require_user_verification,
         )
     except Exception as exc:
         logger.warning("Passkey verification failed: %s", exc)

@@ -16,18 +16,24 @@ WEB = Path(__file__).resolve().parents[1] / "web"
 def test_the_route_clears_the_server_session_and_serves_the_sign_out_page(origin_app):
     import origin.main as m
 
-    request = SimpleNamespace(session={"sub": "person-1", "user_id": "person-1"})
-    response = m.logout_page(request)
+    from unittest.mock import MagicMock
+
+    request = SimpleNamespace(session={"sub": "person-1", "user_id": "person-1"},
+                              headers=SimpleNamespace(getlist=lambda _n: []))
+    db = MagicMock()
+    response = m.logout_page(request, db)
     assert request.session == {}
+    db.commit.assert_called_once()
     assert Path(response.path).name == "logout.html"
 
 
 def test_the_page_clears_the_token_and_returns_only_to_a_listed_address():
-    page = (WEB / "logout.html").read_text(encoding="utf-8")
+    # The page's script is its own file now (no inline script, review 11 M7).
+    page = (WEB / "logout.html").read_text(encoding="utf-8") +         (WEB / "logout-page.js").read_text(encoding="utf-8")
     assert "clearToken();" in page
     assert 'get("/auth/providers")' in page and "isListedReturn(back, listed)" in page
     assert 'let to = "/";' in page, "an unlisted return goes to Origin's own sign-in"
 
 
 def test_the_account_page_signs_out_through_logout():
-    assert 'location.href="/logout"' in (WEB / "account.html").read_text(encoding="utf-8")
+    assert 'location.href="/logout"' in (WEB / "account-page.js").read_text(encoding="utf-8")

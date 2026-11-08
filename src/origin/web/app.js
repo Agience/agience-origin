@@ -43,12 +43,10 @@ function qs(n) { return new URLSearchParams(location.search).get(n); }
 // `Referer`, and `localStorage` outlives the tab. It survives here only for the pages that already
 // use it — no new caller should reach for it.
 //
-// `SP_ALLOW` admits any `*.agience.ai` page, and is the bound for a hand-off the person has just
-// signed in for. A hand-off with no sign-in in between (silent SSO, or the verify page returning to
-// a stashed target) additionally needs `isListedReturn`: the target's origin and path must be one
-// of the exact return URIs the server publishes (`sso_return_uris` on `/auth/providers`). Without
-// that, an open redirect or a user-authored page on any subdomain would receive a token with no
-// click at all.
+// `SP_ALLOW` admits any `*.agience.ai` page, and is the outer bound. Every hand-off also needs
+// `isListedReturn`: the target's origin and path must be one of the exact return URIs the server
+// publishes (`sso_return_uris` on `/auth/providers`). Without that, an open redirect, a
+// user-authored page on any subdomain, or Mantle's own host would receive a token.
 const SP_ALLOW = /^https:\/\/([a-z0-9-]+\.)*agience\.ai(\/|$)/i;
 function isListedReturn(rd, listed) {
   if (typeof rd !== "string" || !SP_ALLOW.test(rd) || !Array.isArray(listed)) return false;
@@ -62,15 +60,47 @@ async function ssoReturnUris() {
   const list = r.ok && r.data && r.data.sso_return_uris;
   return Array.isArray(list) ? list.filter((u) => typeof u === "string") : [];
 }
-function finishLogin(token) {
+// The hand-off to a service provider waiting on `?redirect_uri=`. Only one of the exact return URIs
+// the server lists (`sso_return_uris`, which never names Origin's own origin, a loopback host or
+// Mantle's origin) is handed anything. The web app (`app_uri`) gets the person's token; any other
+// listed SP gets a delegation Origin narrows to its origin in the person's Origin session (review 8,
+// R3; `POST /auth/me/authority/narrow`), and nothing if Origin issues none. Anything else goes to the
+// account page.
+async function spToken(token, rd, appUri) {
+  let target, app = null;
+  try { target = new URL(rd); } catch (e) { return null; }
+  try { app = appUri ? new URL(appUri).origin : null; } catch (e) { app = null; }
+  if (app && target.origin === app) return token;
+  let r;
+  try {
+    r = await fetch("/auth/me/authority/narrow", {
+      method: "POST", credentials: "same-origin",
+      headers: { "Content-Type": "application/json", "X-Origin-Session": "1" },
+      body: JSON.stringify({ audience: target.origin }),
+    });
+  } catch (e) { return null; }
+  if (!r.ok) return null;
+  let data = {};
+  try { data = await r.json(); } catch (e) { return null; }
+  const narrowed = data && data.access_token;
+  return typeof narrowed === "string" && narrowed && narrowed !== token ? narrowed : null;
+}
+async function finishLogin(token) {
   saveToken(token);
   const rd = qs("redirect_uri");
   if (rd && SP_ALLOW.test(rd)) {
-    clearVerification();
-    const sep = rd.includes("#") ? "&" : "#";
-    const st = qs("state");
-    location.replace(rd + sep + "access_token=" + encodeURIComponent(token) + (st ? "&state=" + encodeURIComponent(st) : ""));
-    return;
+    const r = await get("/auth/providers");
+    const listed = r.ok && r.data && Array.isArray(r.data.sso_return_uris)
+      ? r.data.sso_return_uris.filter((u) => typeof u === "string") : [];
+    const handed = isListedReturn(rd, listed)
+      ? await spToken(token, rd, r.data && r.data.app_uri) : null;
+    if (handed) {
+      clearVerification();
+      const sep = rd.includes("#") ? "&" : "#";
+      const st = qs("state");
+      location.replace(rd + sep + "access_token=" + encodeURIComponent(handed) + (st ? "&state=" + encodeURIComponent(st) : ""));
+      return;
+    }
   }
   location.href = "/account";
 }

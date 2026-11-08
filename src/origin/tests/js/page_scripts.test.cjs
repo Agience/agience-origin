@@ -1,7 +1,8 @@
-// Behaviour of the inline scripts of `origin/web/index.html` and `origin/web/verify-email.html`,
-// run with `node --test`.
+// Behaviour of the page scripts of `origin/web/index.html` and `origin/web/verify-email.html`
+// (`index-page.js`, `verify-email-page.js`: no page carries an inline script, review 11 M7), run
+// with `node --test`.
 //
-// Each page is loaded the way a browser loads it: `app.js`, then the page's own inline script, as
+// Each page is loaded the way a browser loads it: `app.js`, then the page's own script, as
 // classic scripts sharing one global scope. The DOM is a minimal stand-in (elements are created on
 // first `querySelector` and record what the script does to them), and `fetch`, `localStorage`,
 // `sessionStorage`, `location` and `history` are stubs this file controls.
@@ -18,9 +19,10 @@ const WEB = path.join(__dirname, "..", "..", "web");
 const APP_JS = fs.readFileSync(path.join(WEB, "app.js"), "utf8").replace(/^﻿/, "");
 function inlineScript(file) {
   const html = fs.readFileSync(path.join(WEB, file), "utf8");
-  const blocks = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map((m) => m[1]);
-  assert.equal(blocks.length, 1, `${file} should carry one inline script`);
-  return blocks[0];
+  assert.equal([...html.matchAll(/<script>/g)].length, 0, `${file} carries no inline script`);
+  const own = file.replace(/\.html$/, "-page.js");
+  assert.ok(html.includes(`<script src="/web/${own}"></script>`), `${file} loads ${own}`);
+  return fs.readFileSync(path.join(WEB, own), "utf8").replace(/^﻿/, "");
 }
 const INDEX = inlineScript("index.html");
 const VERIFY = inlineScript("verify-email.html");
@@ -190,7 +192,7 @@ for (const [name, act] of [
 test("with no sign-in begun, the same in-flight list still hands off once it arrives", async () => {
   let release;
   const gate = new Promise((r) => { release = r; });
-  const routes = { "/auth/providers": () => gate.then(() => ({ status: 200, body: { providers: [], sso_return_uris: LISTED } })) };
+  const routes = { "/auth/providers": () => gate.then(() => ({ status: 200, body: { providers: [], sso_return_uris: LISTED, app_uri: SP } })) };
   const p = load("index.html", LOGIN, { local: storage({ access_token: SESSION }), routes });
   await settle();
   assert.equal(handedOff(p.navigations), false);

@@ -18,6 +18,30 @@ from origin.db import persons as db_persons
 from origin.models.person import Person
 from origin.services.auth_service import is_person_allowed
 
+
+class RegistrationPaused(PermissionError):
+    """New accounts are paused: no path makes one (review 12, L11)."""
+
+
+def registration_paused() -> bool:
+    """Are new accounts paused (`REGISTRATION_PAUSED`, or the platform setting
+    `auth.registration.paused`)? Read by every path that would make a person: the register routes,
+    OTP verification and a first federated sign-in."""
+    if getattr(config, "REGISTRATION_PAUSED", False):
+        return True
+    try:
+        from origin.services.platform_settings_service import settings as platform_settings
+        stored = str(platform_settings.get("auth.registration.paused") or "").strip().lower()
+    except Exception:  # noqa: BLE001 — no settings loaded: only the env decides
+        stored = ""
+    return stored in ("1", "true", "yes")
+
+
+def _refuse_new_account() -> None:
+    if registration_paused():
+        raise RegistrationPaused("New accounts are temporarily paused. Sign in with an existing "
+                                 "account.")
+
 logger = logging.getLogger(__name__)
 
 
@@ -102,29 +126,17 @@ def get_or_create_user_by_oidc_identity(
 
       1. `(provider, subject)` — the durable key. An IdP's subject never changes; an email does.
          A hit here wins outright and no email is consulted.
-      2. otherwise, if this email already belongs to someone, link — but only under the rule below.
+      2. otherwise, if this email already belongs to someone, refuse (`IdentityLinkRefused`):
+         joining an identity to an account is the account's own act, with a fresh step-up.
       3. otherwise, a new person.
 
-    The rule: both sides must have proved the address, and each half stops a different attack.
+    Why an address both sides proved is still not enough: it says the same mailbox, not that the
+    account's owner consents. A provider, or whoever controls one (a custom OIDC provider the
+    operator's settings name), asserting a verified address would otherwise sign in as the
+    account at that address. So the join is the account's own act: `POST /auth/me/link-provider`,
+    with a fresh step-up by a method the account already has (`services.person_step_up`).
 
-      · `email_verified` (the IdP vouched for it). Without this half, any provider that lets a user
-        type an arbitrary unverified address mints a token asserting `email: you@example.com`, and
-        the account at that address is handed over on the strength of an unverified claim — the
-        classic "Sign in with X" takeover.
-      · `claimed.email_verified` (this account proved it). Without this half the attack runs the
-        other way: an attacker registers a password account on the victim's address, never
-        verifies it, waits, and the victim's real Google sign-in links into the attacker's
-        account — password already known, and the victim sees their own data because it is, by
-        then, one account.
-
-    Neither half is redundant and neither implies the other. When either is missing,
-    `IdentityLinkRefused` is raised rather than guessing in either direction — the deliberate path
-    is `POST /auth/me/link-provider`, which requires an existing session and therefore supplies the
-    proof of ownership that is missing here.
-
-    `email_verified` defaults to False, which is the safe direction: a caller who has not thought
-    about it raises `IdentityLinkRefused` rather than linking. Every caller that can vouch says so
-    explicitly.
+    `email_verified` decides only whether a new person's address is recorded as confirmed.
     """
     email = (email or "").strip().lower()
     name = (name or "").strip() or "User"
@@ -152,48 +164,24 @@ def get_or_create_user_by_oidc_identity(
             db.flush()
         return existing
 
-    # ── 2. this address may already belong to an account reached by another method ──────────────
+    # ── 2. this address already belongs to an account reached by another method ─────────────────
+    # Not joined. An address both sides proved is still not the account's consent: a provider, or
+    # whoever controls one, asserting a verified address would otherwise sign in as its owner. The
+    # account joins another identity only by its own act, with a fresh step-up by a method it
+    # already has (`POST /auth/me/link-provider`, `services.person_step_up`).
     claimed = get_user_by_email(db, email) if email else None
     if claimed is not None:
-        if not email_verified:
-            logger.warning(
-                "Refusing to link %s identity %r to existing account %s: the provider did not "
-                "assert email_verified", oidc_provider, oidc_subject, claimed.id,
-            )
-            raise IdentityLinkRefused(
-                f"{oidc_provider} did not verify this email address, so it cannot be linked to the "
-                "existing account. Sign in with your existing method, then add this provider from "
-                "your account page."
-            )
-        if not bool(claimed.email_verified):
-            logger.warning(
-                "Refusing to link %s identity %r to existing account %s: the local address was "
-                "never verified", oidc_provider, oidc_subject, claimed.id,
-            )
-            raise IdentityLinkRefused(
-                "An account already exists for this email but the address was never confirmed. "
-                "Verify it from your existing sign-in method first, then this provider can be "
-                "linked to it."
-            )
-        # Both sides proved it: the same human, arriving by a second door. One person, one more
-        # identity row. `verified=True` because the provider completed its flow for this subject.
-        db_identities.add(
-            db, person_id=claimed.id, method="oidc",
-            provider=oidc_provider, subject=oidc_subject, verified=True,
+        logger.warning(
+            "Refusing to join %s identity %r to existing account %s by email: linking is the "
+            "account's own act", oidc_provider, oidc_subject, claimed.id,
         )
-        # Fill only what is empty. A second provider is not authority to overwrite a name or avatar
-        # the person already has — and the email is the thing that matched, so it is already equal.
-        if not claimed.name or claimed.name == "User":
-            claimed.name = name
-        if not claimed.picture and picture:
-            claimed.picture = picture
-        db.flush()
-        logger.info(
-            "Linked %s identity to existing account %s via verified email", oidc_provider, claimed.id
+        raise IdentityLinkRefused(
+            "An account already exists for this email. Sign in with your existing method, then "
+            "add this one from your account page."
         )
-        return claimed
 
     # ── 3. nobody holds this address: a new person ─────────────────────────────────────────────
+    _refuse_new_account()
     # Confirmed only if the provider says so. The column defaults to confirmed, and a provider that
     # lets anyone type an address would otherwise hand them a confirmed account at someone else's:
     # one that password reset and email invites (Mantle's claim by address) then treat as theirs.
@@ -218,11 +206,19 @@ def create_user_with_password(
     name: str,
     password_hash: str,
     email: str = "",
-    email_verified: bool = True,
+    email_verified: bool = False,
+    allow_paused: bool = False,
 ) -> Person:
+    """A new account with a password. Refused while new accounts are paused, except for the
+    operator's own bootstrap claim (`allow_paused`). Its address is unverified unless the caller
+    says otherwise: a password proves nothing about the mailbox."""
+    if not allow_paused:
+        _refuse_new_account()
     username = (username or "").strip()
     email = (email or "").strip().lower()
-    name = (name or username).strip() or "User"
+    # Only the name the person gave. A username is often their address, and a name made from it
+    # would show the address to everyone they are shared with.
+    name = (name or "").strip()
 
     if not username:
         raise ValueError("Username is required")
@@ -258,9 +254,12 @@ def get_or_create_user_by_email(db: Session, email: str) -> Person:
     if existing:
         return existing
 
+    _refuse_new_account()
     return db_persons.create(
         db,
-        {"email": email, "name": email.split("@")[0]},
+        # No name until the person gives one: a name made from the address would show the
+        # address's local part to everyone they are shared with.
+        {"email": email, "name": ""},
     )
 
 
@@ -391,6 +390,12 @@ def deactivate(db: Session, user_id: str, reason: str) -> Person:
         from datetime import datetime, timezone
         user.deactivated_at = datetime.now(timezone.utc)
     user.deactivated_reason = reason
+    # Every refresh token of theirs ends with the account, and stays ended if it is reactivated.
+    from origin.services import origin_session, refresh_tokens
+    refresh_tokens.revoke_person(db, str(user.id))
+    # And every Origin session: no session route serves them (the routes refuse a deactivated
+    # person too), and a reactivated account signs in again.
+    origin_session.revoke_person(db, str(user.id))
     db.flush()
     return user
 

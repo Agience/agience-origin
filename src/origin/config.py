@@ -17,6 +17,7 @@ Boot phases, in the order they run:
                             consumes from the platform-settings cache, environment first.
 """
 
+import logging
 import os
 import uuid as _uuid
 from pathlib import Path
@@ -144,17 +145,158 @@ FACET_URIS: list = [
     u.strip() for u in os.getenv("FACET_URIS", "").split(",") if u.strip()
 ]
 ORIGIN_URI: str = os.getenv("ORIGIN_URI", "http://localhost:8080")
+# Mantle's own address. Mantle serves pages under it, so it is never a first-party redirect base,
+# whatever `FACET_URI`/`FACET_URIS` list (`auth_service.is_client_redirect_allowed`).
+MANTLE_URI: str = os.getenv("MANTLE_URI", "")
+
+
+def without_mantle(values) -> list:
+    """`values` (a list, or one comma-separated string) with every address on Mantle's host
+    dropped: Mantle serves pages, so it is never an allowed origin, an SSO return or the app."""
+    from urllib.parse import urlparse
+
+    if isinstance(values, str):
+        values = [u.strip() for u in values.split(",") if u.strip()]
+    mantle = (urlparse(MANTLE_URI).hostname or "").lower() if MANTLE_URI else ""
+    out = []
+    for v in values or []:
+        try:
+            host = (urlparse(str(v)).hostname or "").lower()
+        except ValueError:
+            host = ""
+        if not mantle or host != mantle:
+            out.append(v)
+    return out
+
+
+#: The platform client's development redirect bases (http loopback, vscode.dev, oauth.pstmn.io):
+#: opt-in, off unless set (production leaves it unset).
+PLATFORM_DEV_REDIRECTS: bool = os.getenv("PLATFORM_DEV_REDIRECTS", "").strip().lower() in (
+    "1", "true", "yes")
+#: New accounts paused (review 11, M8): Origin itself refuses every registration route, whatever
+#: sits in front of it. Also the platform setting `auth.registration.paused`.
+REGISTRATION_PAUSED: bool = os.getenv("REGISTRATION_PAUSED", "").strip().lower() in (
+    "1", "true", "yes")
+
+
+def forwarded_trust_problem() -> "str | None":
+    """Why uvicorn's forwarded-header trust is unsafe, or None (review 11, M8). Origin takes the
+    client address uvicorn derives, and uvicorn takes `X-Forwarded-For` only from the peers in
+    `FORWARDED_ALLOW_IPS`. On loopback TCP every local service is 127.0.0.1, so trust there cannot
+    name Caddy alone; served on a unix socket that only Caddy's group may open (`ORIGIN_UDS`,
+    rendered as uvicorn's `--uds`), every connection is Caddy's, and `*` is exactly that. `*` on
+    TCP trusts every peer and is refused."""
+    raw = os.getenv("FORWARDED_ALLOW_IPS", "").strip()
+    if not raw:
+        return None                       # uvicorn's own default: 127.0.0.1
+    if any(p.strip() == "*" for p in raw.split(",")) and not os.getenv("ORIGIN_UDS", "").strip():
+        return ("FORWARDED_ALLOW_IPS='*' on TCP trusts every peer's X-Forwarded-For: serve Origin "
+                "on a unix socket only Caddy may open (ORIGIN_UDS), or name Caddy alone")
+    return None
+
+
+#: The persona servers that receive a caller only as a narrowed delegation (review 11, H3): each its
+#: own audience and scope `persona:<name>`.
+PERSONA_AUDIENCES = ("iris", "lumen", "sage", "crystal")
+#: Scopes no narrowed delegation ever carries: `platform:admin`, and Ember's share, which is gone
+#: (John, 2026-11-02: sharing happens only in the person's own session).
+NEVER_NARROWED = frozenset({"platform:admin", "ember:share"})
+#: Set when `NARROW_AUDIENCES` does not parse as `{audience: scopes}`: then no narrowed audience
+#: exists at all (`auth_service.narrow_audiences`).
+NARROW_AUDIENCES_MALFORMED = False
+
+
+def _default_narrow_audiences() -> dict:
+    # `relay`: the desktop relay a person connects in their session (review 23), never their
+    # platform token.
+    out = {"ember": ["ember:memory", "ember:read"], "relay": ["relay:host"]}
+    for p in PERSONA_AUDIENCES:
+        out[p] = [f"persona:{p}"]
+    return out
+
+
+def _narrow_audiences_from_env() -> dict:
+    """`NARROW_AUDIENCES` as `{audience: [scopes]}`. Unset: Ember and the persona servers. Set but
+    malformed (not JSON, not an object, a value that is not a string or list of strings): nothing,
+    and `NARROW_AUDIENCES_MALFORMED` says so, which closes every narrowed audience."""
+    import json as _json
+    global NARROW_AUDIENCES_MALFORMED
+    NARROW_AUDIENCES_MALFORMED = False
+    raw = os.getenv("NARROW_AUDIENCES", "").strip()
+    if not raw:
+        return _default_narrow_audiences()
+    try:
+        parsed = _json.loads(raw)
+    except ValueError:
+        parsed = None
+    out = {}
+    if isinstance(parsed, dict):
+        for aud, scopes in parsed.items():
+            if isinstance(scopes, str):
+                scopes = scopes.split()
+            if not isinstance(scopes, list) or not all(isinstance(x, str) for x in scopes):
+                out = None
+                break
+            out[str(aud)] = [x for x in scopes if x and x not in NEVER_NARROWED]
+    else:
+        out = None
+    if out is None:
+        NARROW_AUDIENCES_MALFORMED = True
+        logging.getLogger(__name__).error(
+            "NARROW_AUDIENCES is malformed (%r): no narrowed audience is issued", raw[:80])
+        return {}
+    return out
+
+
+#: The narrow audiences a person's access token may be exchanged for (RFC 8693, review 8 R3):
+#: audience -> the scopes it may carry. JSON in `NARROW_AUDIENCES`; by default Ember alone. Every
+#: `FACET_URIS` origin other than `APP_URI` and Origin's own is one too, with scope `persona`
+#: (`auth_service.narrow_audiences`).
+NARROW_AUDIENCES: dict = _narrow_audiences_from_env()
+def _narrow_hops_from_env() -> dict:
+    """`NARROW_HOPS` as `{from_audience: [to_audience, ...]}`: the pairs along which a persona may
+    exchange its narrowed delegation for one narrowed to the next (review 12, decision 2). Unset:
+    Crystal to each persona, and Lumen to Sage. Malformed: none at all, logged."""
+    import json as _json
+    raw = os.getenv("NARROW_HOPS", "").strip()
+    if not raw:
+        return {"crystal": ["iris", "lumen", "sage"], "lumen": ["sage"]}
+    try:
+        parsed = _json.loads(raw)
+    except ValueError:
+        parsed = None
+    if (not isinstance(parsed, dict) or not all(
+            isinstance(v, list) and all(isinstance(x, str) for x in v) for v in parsed.values())):
+        logging.getLogger(__name__).error("NARROW_HOPS is malformed (%r): no hop is made",
+                                          raw[:80])
+        return {}
+    return {str(k): [str(x) for x in v] for k, v in parsed.items()}
+
+
+#: The cross-persona hops Origin makes (`/internal/narrow-hop`), and only these.
+NARROW_HOPS: dict = _narrow_hops_from_env()
+
+
+def _narrow_facets_from_env() -> list:
+    """`NARROW_FACETS`: the facet origins a first-party sign-in is narrowed to (review 12). A
+    redirect URL never makes itself an audience: a facet is narrowed to only when listed here."""
+    return [o.strip().rstrip("/").lower() for o in os.getenv("NARROW_FACETS", "").split(",")
+            if o.strip()]
+
+
+#: Facet origins a sign-in delivered there is narrowed to (`auth_service.narrow_audiences`).
+NARROW_FACETS: list = _narrow_facets_from_env()
+#: After this ISO time, a refresh token with no `jti` (issued before rotation) is refused.
+REFRESH_LEGACY_CUTOFF: str = os.getenv("REFRESH_LEGACY_CUTOFF", "")
 # `APP_URI` is where a signed-in person continues to from Origin's own pages — the account page's
 # "Continue to Agience". Named on its own rather than picked out of `FACET_URI`/`FACET_URIS`: on a
 # node that serves its sign-in pages from Origin, `FACET_URI` is Origin itself, and `FACET_URIS`
 # lists every admitted facet in no order that says which one is the app. Unset means no link.
-APP_URI: str = os.getenv("APP_URI", "")
+APP_URI: str = (without_mantle(os.getenv("APP_URI", "")) or [""])[0]
 # `SSO_RETURN_URIS` lists the exact URLs (origin and path) the sign-in pages hand an existing
 # session to without a click, beyond the app's root from `APP_URI`. Anything not listed gets the
 # sign-in form. Comma-separated, https only.
-SSO_RETURN_URIS: list = [
-    u.strip() for u in os.getenv("SSO_RETURN_URIS", "").split(",") if u.strip()
-]
+SSO_RETURN_URIS: list = without_mantle(os.getenv("SSO_RETURN_URIS", ""))
 # `SHARED_CLIENT_NETWORKS` lists client networks (CIDR, comma-separated) whose requests are known to
 # be many people's — a front end that relays `/auth/*` to Origin server-side, for example. Two
 # per-client limits skip them:

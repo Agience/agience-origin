@@ -79,19 +79,74 @@ def custody_client(origin_app, monkeypatch):
         from origin.db.session import get_engine
 
         Base.metadata.create_all(get_engine())
+        c.acting_id, c.acting = _acting_person()
         yield c
 
 
+def reaches(principal: str, subject: str) -> None:
+    """Origin's replica says `subject` reads `principal`'s own collection: the reach a release needs
+    (`test_a_release_is_decided_by_origin_s_own_walk.py` holds that rule). Written straight to the
+    replica, as a co-signed bootstrap would leave it."""
+    from origin.db.session import SessionLocal
+    from origin.models.authority_ledger import AuthorityGrant, AuthorityRoot
+
+    with SessionLocal() as db:
+        if db.get(AuthorityRoot, principal) is None:
+            db.add(AuthorityRoot(principal_id=principal, root_id=principal, registered_by="",
+                                 seq=0))
+        db.merge(AuthorityGrant(grant_id=f"g-{principal}-{subject}", grantee_id=subject,
+                                grantee_type="user", resource_id=principal, actions="read",
+                                effect="allow", state="active", created_by="", seq=0))
+        db.commit()
+
+
+def own_credential(principal: str) -> str:
+    """The key principal's own credential: a background delegation Origin mints for it. A master
+    key is released to its own principal and no one else
+    (`test_a_release_is_decided_by_origin_s_own_walk.py` holds who else reaches what)."""
+    from origin.db.session import SessionLocal
+    from origin.models.authority_ledger import AuthorityRoot
+    from origin.tests import authority_fixtures as af
+
+    with SessionLocal() as db:
+        if not principal.startswith("ck:") and db.get(AuthorityRoot, principal) is None:
+            db.add(AuthorityRoot(principal_id=principal, root_id=principal, registered_by="",
+                                 seq=0))
+        db.commit()
+    return af.background(principal)
+
+
+def _acting_person() -> tuple:
+    """A live person and their access token: the acting credential a release needs
+    (`test_a_share_release_needs_the_callers_credential.py` holds that rule)."""
+    from origin import config
+    from origin.db import persons as db_persons
+    from origin.db.session import SessionLocal
+    from origin.services.auth_service import create_jwt_token
+
+    with SessionLocal() as db:
+        person = db_persons.create(db, {"email": f"{uuid.uuid4().hex}@x.test", "name": "P",
+                                        "username": uuid.uuid4().hex[:12]})
+        pid = str(person.id)
+        db.commit()
+    return pid, create_jwt_token({"sub": pid, "email": "p@x.test", "name": "P",
+                                  "client_id": "platform", "aud": config.AUTHORITY_ISSUER})
+
+
 def _put(c, principal, tok=None, **body):
+    reaches(principal, c.acting_id)
     body = {"x": 2, "y": SHARE_Y, "kcv": KCV_A, **body}
     tok = tok or _token("PUT", principal)
     return c.put(f"/internal/key-shares/{principal}", json=body,
-                 headers={"Authorization": f"Bearer {tok}"})
+                 headers={"Authorization": f"Bearer {tok}",
+                          "X-Acting-Credential": own_credential(principal)})
 
 
 def _get(c, principal, tok=None):
     tok = tok or _token("GET", principal)
-    return c.get(f"/internal/key-shares/{principal}", headers={"Authorization": f"Bearer {tok}"})
+    return c.get(f"/internal/key-shares/{principal}",
+                 headers={"Authorization": f"Bearer {tok}",
+                          "X-Acting-Credential": own_credential(principal)})
 
 
 # -- the positive control and the storage --------------------------------------------------------
@@ -288,3 +343,21 @@ def test_two_stores_of_different_keys_cannot_both_win(custody_client):
 @pytest.mark.parametrize("body", [{"x": 0}, {"x": "2"}, {"y": "not base64!"}, {"kcv": "XYZ"}])
 def test_a_malformed_share_is_refused(custody_client, body):
     assert _put(custody_client, "p-15", **body).status_code == 400
+
+
+def test_a_first_share_needs_the_principal_s_or_creator_s_credential(custody_client):
+    """A first share is stored only for a key Origin knows, on its principal's credential or its
+    creator's; a stranger's credential, or none, stores nothing."""
+    from origin.tests import authority_fixtures as af
+
+    pid, alice = af.person("alice")
+    af.ok(af.submit(custody_client, alice, af.root("WS")))
+    af.ok(af.submit(custody_client, alice, af.grant("g-ws", pid, "WS",
+                                                    ["read", "share", "admin"])))  # its creation grant
+    _sid, stranger = af.person("sam")
+    assert af.store_share(custody_client, "WS", stranger).status_code == 403
+    tok = _token("PUT", "WS")
+    r = custody_client.put("/internal/key-shares/WS", json={"x": 2, "y": SHARE_Y, "kcv": KCV_A},
+                           headers={"Authorization": f"Bearer {tok}"})
+    assert r.status_code in (401, 403)
+    assert af.store_share(custody_client, "WS", alice).status_code == 200      # admin on it

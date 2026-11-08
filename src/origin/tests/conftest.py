@@ -67,6 +67,17 @@ def _no_real_credentials_in_the_environment(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _custody_plane_is_production_here():
+    """The suite stands in for an isolated production box (`services.custody_plane`); a test of
+    the refusal sets `TEST_OVERRIDE` itself."""
+    from origin.services import custody_plane
+
+    custody_plane.TEST_OVERRIDE = True
+    yield
+    custody_plane.TEST_OVERRIDE = True
+
+
+@pytest.fixture(autouse=True)
 def _reset_password_guess_budget():
     """Give every test a full password guess budget.
 
@@ -159,6 +170,8 @@ def origin_app(monkeypatch, jwt_keypair):
         # dependency_overrides and the reloaded key_manager silently fail to apply to it.
         "origin.routers.oracle_router",
         "origin.routers.key_share_router",
+        # Imports `_require_mantle` and `bound_call` from key_share_router: reloaded after it.
+        "origin.routers.authority_router",
     ]:
         mod = sys.modules.get(mod_name)
         if mod is not None:

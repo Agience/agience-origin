@@ -105,7 +105,8 @@ def _exchange(client, *, code, client_id):
 def _refresh(client, *, refresh_token):
     return client.post(
         "/auth/token",
-        data={"grant_type": "refresh_token", "refresh_token": refresh_token},
+        data={"grant_type": "refresh_token", "refresh_token": refresh_token,
+              "client_id": _rc(refresh_token)},
     )
 
 
@@ -372,3 +373,8 @@ def test_refreshing_a_first_party_token_still_re_derives_roles(
     resp = _refresh(db_client, refresh_token=granted["refresh_token"])
     assert resp.status_code == 200
     assert _claims(resp.json()["access_token"])["roles"] == ["platform:admin"]
+
+
+def _rc(token):
+    from origin.tests.authority_fixtures import refresh_client
+    return refresh_client(token)

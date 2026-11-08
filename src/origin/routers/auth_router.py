@@ -24,12 +24,13 @@ from urllib.parse import urlencode, urlparse
 import bcrypt
 from authlib.common.security import generate_token
 from fastapi import (
-    APIRouter, BackgroundTasks, Depends, Form, Header, HTTPException, Request, status,
+    APIRouter, BackgroundTasks, Body, Depends, Form, Header, HTTPException, Request, status,
 )
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session
 
+from origin.services import refresh_tokens as _refresh_tokens
 from origin import config
 from origin.db import oauth_clients as db_oauth_clients
 from origin.db import person_identities as db_person_identities
@@ -76,31 +77,26 @@ _KDF_ADMISSION = [Depends(kdf_admission, scope="function")]
 # ---------------------------------------------------------------------------
 # Internal endpoints (platform-server auth — used by Mantle/Chorus for cross-DB lookups)
 # ---------------------------------------------------------------------------
-#: The services whose tokens may reach the `/internal` routes. Verbatim the tuple
-#: `auth_verifier.verify_token` dispatches on, and it has to stay that way: a name here that is
-#: absent there never reaches this check (the token fails signature verification against Origin's
-#: own key and 401s), and a name there that is absent here authenticates and is then refused. Both
-#: directions fail closed, so drift costs a confusing error rather than access — but only one of
-#: the two lists is the trust decision, and this is it.
+#: The services whose tokens may reach the person-record `/internal` routes: a subset of the
+#: issuers `auth_verifier.verify_token` verifies. A name here that is absent there never reaches
+#: this check (the token fails verification and 401s), and a name there that is absent here
+#: authenticates and is then refused. Both directions fail closed, but only one of the two lists
+#: is the trust decision, and this is it.
 #:
 #: Not derived from `manifest.trust_anchors`, though the manifest is the obvious source. An anchor
 #: answers "can I verify this signature", and the manifest also carries `origin` itself and is
 #: merged additively by the installer on upgrade. Deriving from it would silently promote every
 #: future anchor to a reader of every person's PII — authentication standing in for authorization,
 #: which is the substitution this whole function exists to refuse.
-#: ⭐ `crystal` AND `lumen` REMOVED [2026-09-16]. This is the trust decision, so a name here is a
-#: grant: `_require_platform_server` admits it to five endpoints that read person records. Neither
-#: name could ever authenticate — `iss` comes from `init_service_identity(<name>)` and nothing in
-#: the platform initialises either — so both were grants to principals that do not exist. That is
-#: not harmless: it is a standing authorisation waiting for someone to mint the matching key, and
-#: `gen_service_key.py` still offers to mint exactly those names.
-#:
-#: The note above about drift with the manifest still holds, and is now the SAFE direction: an
-#: anchor without a name here authenticates and is refused.
+#: This is the trust decision, so a name here is a grant: `_require_platform_server` admits it to
+#: the routes that read person records. Crystal authenticates (`auth_verifier.PLATFORM_ISSUERS`)
+#: and is deliberately absent: it reaches its own delegation exchange and the describe delegation
+#: only (review 21). An anchor without a name here authenticates and is refused, the safe direction.
 _PLATFORM_SERVICES = frozenset({"mantle", "chorus"})
 #: A chorus persona that signs as itself with its own enrolled key. It is admitted to the delegation
 #: exchange for ITSELF only: the delegation's actor is then proven, and recorded as `act.iss`.
-from prism.trust.service_identity import PERSONA_NAMES as _PERSONAS  # noqa: E402
+# The personas and Crystal: the services that hold a server delegation of their own (review 28).
+from prism.trust.service_identity import SERVER_DELEGATION_SIGNERS as _PERSONAS  # noqa: E402
 
 
 def _require_platform_server(auth: AuthContext) -> None:
@@ -149,7 +145,7 @@ def _require_platform_server(auth: AuthContext) -> None:
 #: `_verified_subject_id` refuses to read a person out of one — a service token presented as a
 #: subject token would otherwise let a caller re-assert its own unscoped identity as authority over
 #: whoever the path names, which is the exact substitution both routes exist to refuse.
-_NON_USER_PRINCIPALS = {"service", "server", "delegation"}
+_NON_USER_PRINCIPALS = {"service", "server", "delegation", "mcp_client"}
 
 #: Where a caller carries the subject's own token on `GET /internal/persons/{id}`.
 #:
@@ -180,6 +176,17 @@ def _verified_subject_id(subject_token: Optional[str]) -> Optional[str]:
         raise HTTPException(
             status_code=403,
             detail="subject_token must be a user token, not a service/delegation token",
+        )
+    # Only what `/internal/delegation-token` exchanges (review 22, F6): no refresh, reset or other
+    # single-purpose token, and one addressed to Origin itself.
+    # The person's token addressed to Mantle (review 23) proves the same: Mantle's lookups
+    # present the token the web app calls it on.
+    if (claims.get("token_type") or claims.get("api_key_id")
+            or claims.get("principal_type", "user") != "user"
+            or claims.get("aud") not in (config.AUTHORITY_ISSUER, "mantle")):
+        raise HTTPException(
+            status_code=403,
+            detail="subject_token must be a person's own access token for this authority",
         )
     subject_id = claims.get("sub")
     if not subject_id:
@@ -271,6 +278,71 @@ def internal_get_person(
     return _person_to_dict(person)
 
 
+# ---------------------------------------------------------------------------
+# Billing recipients: Ophan's billing mail (review 21, F4)
+# ---------------------------------------------------------------------------
+#: Ophan, the persona that sends billing mail: the chorus host's token naming Ophan's client id,
+#: or Ophan signing with its own enrolled key.
+_BILLING_MAILER = "agience-server-ophan"
+
+
+def _require_billing_mailer(auth: AuthContext) -> str:
+    """Ophan, or 403. Returns how it is recorded."""
+    if auth.principal_type == "service":
+        if auth.principal_id == "chorus" and auth.actor == _BILLING_MAILER:
+            return f"chorus/{_BILLING_MAILER}"
+        if auth.principal_id == "ophan" and auth.actor is None:
+            return "ophan"
+    raise HTTPException(status_code=403, detail="billing recipients are Ophan's billing mail only")
+
+
+class _BillingRecipientBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    active: bool
+    plan: str = Field(default="", max_length=64)
+
+
+@internal_router.put("/billing-recipients/{person_id}")
+def internal_put_billing_recipient(person_id: str, body: _BillingRecipientBody,
+                                   auth: AuthContext = Depends(get_auth),
+                                   db: Session = Depends(get_db)):
+    """Ophan records that a person's subscription is active, or ended, from the payment
+    provider's verified event. Only an active record lets Ophan read their address."""
+    from origin.models.billing_recipient import BillingRecipient
+
+    caller = _require_billing_mailer(auth)
+    if person_service.get_user_by_id(db, person_id) is None:
+        raise HTTPException(status_code=404, detail="Person not found")
+    row = db.get(BillingRecipient, person_id) or BillingRecipient(person_id=person_id)
+    row.active, row.plan, row.recorded_by = body.active, body.plan, caller
+    row.updated_at = datetime.now(timezone.utc)
+    db.merge(row)
+    db.commit()
+    logger.warning("billing recipient %s: person=%s plan=%s by=%s",
+                   "active" if body.active else "ended", person_id, body.plan, caller)
+    return {"person_id": person_id, "active": body.active}
+
+
+@internal_router.get("/billing-recipients/{person_id}")
+def internal_get_billing_recipient(person_id: str, auth: AuthContext = Depends(get_auth),
+                                   db: Session = Depends(get_db)):
+    """A billed person's address, and nothing else, for Ophan's billing mail. 404 unless Ophan
+    recorded an active billing record for them. Every read is recorded, found or not."""
+    from origin.models.billing_recipient import BillingRecipient, BillingRecipientLookup
+
+    caller = _require_billing_mailer(auth)
+    row = db.get(BillingRecipient, person_id)
+    person = person_service.get_user_by_id(db, person_id) if row is not None and row.active         else None
+    email = (getattr(person, "email", None) or "") if person is not None         and not getattr(person, "deactivated_at", None) else ""
+    db.add(BillingRecipientLookup(person_id=person_id, caller=caller, found=bool(email)))
+    db.commit()
+    logger.warning("billing recipient address read: person=%s by=%s found=%s", person_id, caller,
+                   bool(email))
+    if not email:
+        raise HTTPException(status_code=404, detail="no active billing record with an address")
+    return {"email": email}
+
+
 class _DelegationTokenRequest(BaseModel):
     """Body for POST /internal/delegation-token.
 
@@ -286,6 +358,12 @@ class _DelegationTokenRequest(BaseModel):
     ttl_seconds: int = 300
 
 
+from origin.services.auth_service import SERVER_DELEGATION_AUDIENCE as _SERVER_DELEGATION_AUDIENCE  # noqa: E402
+
+#: The longest a person's delegation lives: ten minutes, and never past the token it came from.
+MAX_DELEGATION_TTL = 600
+
+
 # `_NON_USER_PRINCIPALS` is defined above, beside `_verified_subject_id` — the two routes that
 # refuse a non-user subject share one list.
 
@@ -294,6 +372,7 @@ class _DelegationTokenRequest(BaseModel):
 def internal_issue_delegation_token(
     body: _DelegationTokenRequest,
     auth: AuthContext = Depends(get_auth),
+    db: Session = Depends(get_db),
 ):
     """Exchange a verified user token for a short-lived RFC 8693 delegation JWT.
 
@@ -308,29 +387,217 @@ def internal_issue_delegation_token(
     # and the delegation records that the signer was the persona (`act.iss`). The shared `chorus`
     # identity may still ask for any persona, as before, and its delegations say `act.iss=chorus` —
     # usable for everything except the release of a secret, which demands a proven actor.
-    if auth.principal_type == "service" and auth.principal_id in _PERSONAS:
+    persona_signer = auth.principal_type == "service" and (
+        auth.principal_id in _PERSONAS or auth.principal_id in config.PERSONA_AUDIENCES)
+    if persona_signer:
         if body.server_client_id != f"agience-server-{auth.principal_id}":
             raise HTTPException(status_code=403,
                                 detail="a persona may obtain a delegation for itself only")
         signer = auth.principal_id
     else:
+        # The shared chorus identity, for a persona that holds no key of its own yet. Mantle calls
+        # no exchange (review 21): it is refused here, though `_require_platform_server` admits it.
         _require_platform_server(auth)
+        if auth.principal_id != "chorus":
+            raise HTTPException(status_code=403, detail="the delegation exchange is a persona's, "
+                                "or the chorus host's for a persona")
         signer = auth.principal_id
     claims = verify_token(body.subject_token)
     if not claims:
         raise HTTPException(status_code=401, detail="Invalid or expired subject token")
+    from origin.services import not_before as _not_before
+    from origin.services.dependencies import _is_narrowed
+    if _not_before.ended(db, claims):
+        raise HTTPException(status_code=401, detail="this sign-in has ended; sign in again")
+    # A persona server holds the caller only as a delegation narrowed to itself (review 11, H3):
+    # it exchanges that, and only that, for its own server delegation, which it signs for itself.
+    narrowed_scope = None
+    # Only a delegation narrowed to the asking persona is exchanged (review 27): a person's own
+    # access token never becomes a server delegation, so no server delegation carries a person's
+    # unscoped reach, and the shared `chorus` identity, which nothing is narrowed to, exchanges
+    # nothing.
+    if not _is_narrowed(claims):
+        raise HTTPException(status_code=403, detail="the exchange takes only a delegation "
+                            "narrowed to the asking persona")
+    if _is_narrowed(claims):
+        if not persona_signer or claims.get("aud") != auth.principal_id:
+            raise HTTPException(status_code=403, detail="a narrowed delegation is exchanged only "
+                                "by the persona it was narrowed to, for itself")
+        # The server delegation keeps the narrowing it came from (review 12, H5): its scope and
+        # Origin's `narrowed` claim, so Mantle bounds it as it bounds the narrowed delegation.
+        narrowed_scope = str(claims.get("scope") or "")
+        claims = {**claims, "principal_type": "user", "aud": config.AUTHORITY_ISSUER,
+                  "act": None}
     if claims.get("principal_type") in _NON_USER_PRINCIPALS:
         raise HTTPException(
             status_code=403,
             detail="subject_token must be a user token, not a service/delegation token",
         )
+    # Only a person's own access token for this authority is exchanged: not a refresh, reset or
+    # other single-purpose token (`token_type`), not any principal type but a person, and not a
+    # token addressed to anyone but Origin itself (an mcp_client's, a third party's).
+    if (claims.get("token_type") or claims.get("api_key_id")
+            or claims.get("principal_type", "user") != "user"
+            or claims.get("aud") != config.AUTHORITY_ISSUER):
+        raise HTTPException(
+            status_code=403,
+            detail="subject_token must be a person's own access token for this authority",
+        )
     user_id = claims.get("sub")
     if not user_id:
         raise HTTPException(status_code=400, detail="subject_token has no subject")
+    # Bounded twice: ten minutes at most, and never past the token it is exchanged for, so a
+    # delegation cannot outlive the sign-in that proved the person. Recorded by `jti`
+    # (`delegation_tokens`) so it can be checked and revoked.
+    from origin.models.key_custody import DelegationRecord
+
+    remaining = int(float(claims.get("exp") or 0) - datetime.now(timezone.utc).timestamp())
+    ttl = min(int(body.ttl_seconds), MAX_DELEGATION_TTL, remaining)
+    if ttl < 1:
+        raise HTTPException(status_code=400, detail="ttl_seconds must be positive, and the "
+                            "subject token must not be about to expire")
+    jti = secrets.token_hex(16)
     token = origin_auth_service.issue_delegation_token(
-        body.server_client_id, str(user_id), body.ttl_seconds, signer=signer
+        body.server_client_id, str(user_id), ttl, signer=signer, jti=jti,
+        **({"narrowed_scope": narrowed_scope} if narrowed_scope is not None else {}),
     )
-    return {"token": token}
+    db.add(DelegationRecord(jti=jti, subject=str(user_id),
+                            audience=_SERVER_DELEGATION_AUDIENCE,
+                            signer=signer or "",
+                            expires_at=datetime.now(timezone.utc) + timedelta(seconds=ttl)))
+    db.commit()
+    return {"token": token, "expires_in": ttl}
+
+
+class _NarrowHopRequest(BaseModel):
+    """Body for POST /internal/narrow-hop."""
+    model_config = ConfigDict(extra="forbid")
+    subject_token: str
+    audience: str
+    scope: Optional[str] = None
+
+
+def _narrow_hop(db: Session, caller: str, subject_token: str, audience: str,
+                scope: Optional[str]) -> JSONResponse:
+    """One hop of cross-persona work (review 12, decision 2), for the persona `caller` whose own
+    signature the route has already proven.
+
+    The subject must be a delegation Origin narrowed to `caller` itself (not a hop's result, which
+    is not exchanged again). The result is narrowed to `audience`: the same person, scope
+    `persona:<audience>` only, five minutes and never past the subject, no refresh token, never
+    `platform:admin`, and only along the pairs Origin lists (`config.NARROW_HOPS`: Crystal to each
+    persona, Lumen to Sage). Each hop is recorded (`narrow_hops`)."""
+    from jose import jwt as _jose_jwt
+
+    from origin.models.narrow_hop import NarrowHop
+    from origin.services import not_before as _not_before
+    from origin.services.dependencies import _is_narrowed
+
+    claims = verify_token(subject_token)
+    if not claims:
+        raise HTTPException(status_code=401, detail="Invalid or expired subject token")
+    if (not _is_narrowed(claims) or claims.get("aud") != caller
+            or (claims.get("act") or {}).get("sub") != caller or claims.get("hop")):
+        raise HTTPException(status_code=403, detail="a hop starts from a delegation narrowed to "
+                            "the asking persona itself")
+    if audience not in (config.NARROW_HOPS.get(caller) or []):
+        raise HTTPException(status_code=403, detail=f"no hop from {caller} to {audience}")
+    scopes = origin_auth_service.narrow_audiences().get(audience)
+    if not scopes:
+        raise HTTPException(status_code=403, detail=f"{audience} is not a narrow audience")
+    wanted = (scope or "").split() or list(scopes)
+    if not set(wanted) <= set(scopes):
+        raise HTTPException(status_code=400, detail=f"scope outside {audience}'s")
+    if _not_before.ended(db, claims):
+        raise HTTPException(status_code=401, detail="this sign-in has ended; sign in again")
+    person = db_persons.get_by_id(db, str(claims.get("sub") or ""))
+    if person is None:
+        raise HTTPException(status_code=401, detail="Invalid subject")
+    refuse_if_deactivated(person)
+    ends = datetime.fromtimestamp(float(claims.get("exp") or 0), timezone.utc)
+    token = origin_auth_service.issue_narrow_delegation(
+        str(person.id), audience, wanted, expires_at=ends,
+        hop={"from": caller, "jti": str(claims.get("jti") or "")})
+    issued = _jose_jwt.get_unverified_claims(token)
+    db.add(NarrowHop(jti=str(issued["jti"]), sub=str(person.id),
+                     subject_jti=str(claims.get("jti") or ""), from_aud=caller, to_aud=audience))
+    db.commit()
+    logger.info("narrow hop %s -> %s for %s", caller, audience, person.id)
+    return JSONResponse(content={
+        "access_token": token, "issued_token_type": _ACCESS_TOKEN_TYPE, "token_type": "bearer",
+        "expires_in": max(0, int(issued["exp"] - datetime.now(timezone.utc).timestamp())),
+        "scope": " ".join(wanted)})
+
+
+@internal_router.post("/narrow-hop")
+def internal_narrow_hop(body: _NarrowHopRequest, auth: AuthContext = Depends(get_auth),
+                        db: Session = Depends(get_db)):
+    """A hop (`_narrow_hop`) asked on the persona's own signed service token."""
+    caller = str(auth.principal_id or "")
+    if auth.principal_type != "service" or (caller not in config.NARROW_HOPS
+                                            and caller not in config.PERSONA_AUDIENCES):
+        raise HTTPException(status_code=403, detail="a hop is a persona's own exchange")
+    return _narrow_hop(db, caller, body.subject_token, body.audience, body.scope)
+
+
+_JWT_BEARER = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"
+from origin.services.auth_service import SYSTEM_DELEGATION_MAX_TTL as _SYSTEM_DELEGATION_MAX_TTL  # noqa: E402
+#: The longest a hop's client assertion may live.
+HOP_ASSERTION_MAX_TTL = 300
+
+
+#: The clock skew allowed on a hop assertion's `iat`.
+HOP_ASSERTION_SKEW = 30
+
+
+def _hop_caller(db: Session, subject_token: str, assertion_type: Optional[str],
+                assertion: Optional[str]) -> str:
+    """The persona proven by an RFC 7523 client assertion for a hop at the token endpoint: a JWT
+    signed with the key the authority manifest anchors for the persona the subject was narrowed to
+    (`iss` = `sub` = that persona), addressed to this token endpoint, issued now (no `iat` ahead of
+    the clock beyond the skew) and expiring within `HOP_ASSERTION_MAX_TTL` of now, bound to this
+    subject token (`subject_digest` = the SHA-256 of it), and used once (its `jti` is spent here,
+    so a captured assertion cannot be replayed with the same subject)."""
+    import hashlib
+
+    from jose import jwt as _jose_jwt
+
+    from origin.services import key_shares as _key_shares
+
+    from origin.authority_trust import verify_jwt as _verify_via_authority
+
+    try:
+        caller = str(_jose_jwt.get_unverified_claims(subject_token).get("aud") or "")
+    except Exception:  # noqa: BLE001
+        caller = ""
+    if assertion_type != _JWT_BEARER or not assertion or not caller:
+        raise HTTPException(status_code=401, detail="a hop needs the persona's own client "
+                            "assertion")
+    endpoints = {f"{(config.ORIGIN_URI or '').rstrip('/')}/auth/token",
+                 f"{(config.AUTHORITY_ISSUER or '').rstrip('/')}/auth/token"}
+    try:
+        claims = _verify_via_authority(assertion, expected_issuer_service=caller,
+                                       expected_issuer_claim=caller)
+    except Exception:  # noqa: BLE001
+        raise HTTPException(status_code=401, detail="the client assertion does not verify")
+    now = datetime.now(timezone.utc).timestamp()
+    iat, exp = claims.get("iat"), claims.get("exp")
+    if (claims.get("sub") != caller or claims.get("aud") not in endpoints
+            or not isinstance(iat, (int, float)) or not isinstance(exp, (int, float))
+            or exp <= now or exp - iat > HOP_ASSERTION_MAX_TTL
+            or iat > now + HOP_ASSERTION_SKEW or exp > now + HOP_ASSERTION_MAX_TTL):
+        raise HTTPException(status_code=401, detail="the client assertion is not the persona's "
+                            "own, for this endpoint, short-lived")
+    if claims.get("subject_digest") != hashlib.sha256(subject_token.encode()).hexdigest():
+        raise HTTPException(status_code=401, detail="the client assertion is not bound to this "
+                            "subject token")
+    jti = claims.get("jti")
+    if (not isinstance(jti, str) or not jti
+            or not _key_shares.spend_token(db, f"hop:{caller}:{jti}",
+                                           datetime.fromtimestamp(exp, timezone.utc))):
+        raise HTTPException(status_code=401, detail="the client assertion has no jti or was "
+                            "already used")
+    return caller
 
 
 class _DescribeDelegationRequest(BaseModel):
@@ -362,12 +629,22 @@ def internal_issue_describe_delegation(
     like any system-principal call — it only reaches artifacts the system
     principal has been granted, and safely 404s (describer no-ops) otherwise.
 
-    The caller is Crystal, whose event-driven describer this serves; Crystal is not among the
-    services `_require_platform_server` admits for the person reads, and is admitted here only.
-    2026-10-18: Crystal was refused here, so no event-driven describe could run.
+    The caller is Crystal, signing as itself, whose event-driven describer this serves, and no
+    other service (review 21): Crystal is not among the services `_require_platform_server`
+    admits for the person reads, and a platform service it does admit (Mantle, Chorus) is refused
+    here. A describe delegation names no person and carries no proven actor (`act.iss`), so it
+    never decides the use of a secret (`services.use_verdict`).
     """
-    if not (auth.principal_type == "service" and auth.principal_id == "crystal"):
-        _require_platform_server(auth)
+    if not (auth.principal_type == "service" and auth.principal_id == "crystal"
+            and auth.actor is None):
+        raise HTTPException(status_code=403, detail="a describe delegation is Crystal's to ask")
+
+    # The persona that runs the describe is one Origin knows (review 15): its actor and audience
+    # are that persona's own client id, `agience-server-<persona>`, and nothing else.
+    persona = body.persona_client_id
+    if not (persona.startswith("agience-server-")
+            and persona[len("agience-server-"):] in config.PERSONA_AUDIENCES):
+        raise HTTPException(status_code=403, detail="a describe delegation names a known persona")
 
     if not platform_settings.get("platform.operator_id"):
         raise HTTPException(status_code=409, detail="Platform operator not configured")
@@ -383,10 +660,11 @@ def internal_issue_describe_delegation(
 
     token = origin_auth_service.issue_system_delegation_token(
         subject_id,
-        actor=body.persona_client_id,
+        actor=persona,
         scope="platform.describe",
-        audience=body.persona_client_id,
-        ttl_seconds=body.ttl_seconds,
+        audience=persona,
+        ttl_seconds=min(body.ttl_seconds, _SYSTEM_DELEGATION_MAX_TTL),
+        jti=secrets.token_hex(16),
     )
     logger.info(
         "describe-delegation issued: persona=%s resource=%s sub=%s",
@@ -395,18 +673,72 @@ def internal_issue_describe_delegation(
     return {"token": token, "subject_id": subject_id}
 
 
+class _DescribeForMantleRequest(BaseModel):
+    """Body for POST /internal/describe-delegation/for-mantle."""
+    model_config = ConfigDict(extra="forbid")
+    subject_token: str
+
+
+@internal_router.post("/describe-delegation/for-mantle")
+def internal_describe_for_mantle(body: _DescribeForMantleRequest,
+                                 auth: AuthContext = Depends(get_auth),
+                                 db: Session = Depends(get_db)):
+    """The persona's own copy, addressed to Mantle, of the describe delegation Crystal had sent it
+    (review 23, L1). The persona signs as itself and presents the delegation addressed to it; the
+    copy keeps its subject and scope, names the persona as the proven actor (`act.iss`), never
+    outlives it, and is recorded by `jti`. No persona takes a delegation it asked for itself, so
+    Mantle, which holds the copy, cannot hand it back."""
+    from origin.models.key_custody import DelegationRecord
+
+    caller = str(auth.principal_id or "")
+    if (auth.principal_type != "service" or auth.actor is not None
+            or (caller not in _PERSONAS and caller not in config.PERSONA_AUDIENCES)):
+        raise HTTPException(status_code=403, detail="a describe delegation is exchanged by the "
+                            "persona it was sent to, signing as itself")
+    me = f"agience-server-{caller}"
+    claims = verify_token(body.subject_token)
+    act = (claims or {}).get("act") if isinstance((claims or {}).get("act"), dict) else {}
+    if (not claims or claims.get("principal_type") != "delegation"
+            or claims.get("scope") != "platform.describe" or claims.get("aud") != me
+            or act.get("sub") != me or act.get("iss")):
+        raise HTTPException(status_code=403, detail="only a describe delegation sent to this "
+                            "persona is exchanged")
+    remaining = int(float(claims.get("exp") or 0) - datetime.now(timezone.utc).timestamp())
+    if remaining < 1:
+        raise HTTPException(status_code=401, detail="the describe delegation has expired")
+    jti = secrets.token_hex(16)
+    token = origin_auth_service.issue_system_delegation_token(
+        str(claims.get("sub") or ""), actor=me, signer=caller, scope="platform.describe",
+        audience="mantle", ttl_seconds=remaining, jti=jti)
+    db.add(DelegationRecord(jti=jti, subject=str(claims.get("sub") or ""), audience="mantle",
+                            signer=caller,
+                            expires_at=datetime.now(timezone.utc) + timedelta(seconds=remaining)))
+    db.commit()
+    return {"token": token, "expires_in": remaining}
+
+
 # Named system-delegation purposes. The requester picks a purpose, not an arbitrary subject, and
 # Origin maps it to a bounded scope — so a platform caller can obtain a delegation for the
 # operator-rooted `platform-system` principal scoped to exactly one capability, never a delegation
 # for an arbitrary user.
-_SYSTEM_DELEGATION_PURPOSES: dict[str, dict[str, str]] = {
+#
+# `actors` lists the only actors a purpose is minted for (review 15): the persona that carries it
+# out, and the personas that ask it of that one.
+_SYSTEM_DELEGATION_PURPOSES: dict[str, dict] = {
     # Webhook/background email sends (receipts, usage warnings, etc.).
-    "platform-mail": {"scope": "platform.email.send", "audience": "mantle", "persona": "iris"},
+    "platform-mail": {"scope": "platform.email.send", "audience": "mantle", "persona": "iris",
+                      "actors": ("agience-server-iris", "agience-server-ophan")},
     # Resolves the Stripe credential (sandbox or live) for the payment tekton, on behalf of the
     # platform. Scoped to one capability, like every entry here, so it cannot be widened into a
     # general secret-reader.
-    "platform-stripe": {"scope": "platform.stripe.resolve", "audience": "mantle"},
+    "platform-stripe": {"scope": "platform.stripe.resolve", "audience": "mantle",
+                        "actors": ("agience-server-ophan",)},
 }
+
+
+#: The personas a platform service may carry a system delegation for, besides itself (review 16):
+#: Chorus hosts Ophan, and asks for Ophan's purposes as Ophan.
+_SYSTEM_DELEGATION_CALLERS: dict[str, tuple] = {"chorus": ("agience-server-ophan",)}
 
 
 class _SystemDelegationRequest(BaseModel):
@@ -420,6 +752,7 @@ class _SystemDelegationRequest(BaseModel):
 def internal_issue_system_delegation(
     body: _SystemDelegationRequest,
     auth: AuthContext = Depends(get_auth),
+    db: Session = Depends(get_db),
 ):
     """Mint a delegation for the operator-rooted `platform-system` principal.
 
@@ -438,11 +771,20 @@ def internal_issue_system_delegation(
         actor, signer = f"agience-server-{persona}", persona
     else:
         _require_platform_server(auth)
-        actor, signer = auth.actor or auth.principal_id, auth.principal_id  # the requesting persona, else the service
+        signer = auth.principal_id
+        # The actor is bound to the caller who signed (review 16, I1): a service acts as itself,
+        # or as a persona it is listed as carrying out, never as one it merely names.
+        claimed = auth.actor or ""
+        if claimed and claimed != f"agience-server-{signer}" and                 claimed not in _SYSTEM_DELEGATION_CALLERS.get(signer, ()):
+            raise HTTPException(status_code=403, detail=f"{signer} does not act as {claimed}")
+        actor = claimed or signer
 
     cfg = _SYSTEM_DELEGATION_PURPOSES.get(body.purpose)
     if cfg is None:
         raise HTTPException(status_code=403, detail=f"Unknown system delegation purpose: {body.purpose}")
+    if actor not in cfg["actors"]:
+        raise HTTPException(status_code=403, detail=f"the purpose {body.purpose} is minted only "
+                            f"for {', '.join(cfg['actors'])}")
 
     # The system principal's authority roots to the operator: with none designated there is
     # nothing to root to, so no delegation can be minted yet.
@@ -455,10 +797,20 @@ def internal_issue_system_delegation(
     if not subject_id:
         raise HTTPException(status_code=409, detail="Instance namespace unavailable; cannot derive system principal")
 
+    # Recorded by `jti` with the signer that asked (review 21): a secret is used on a platform
+    # purpose's delegation only when Origin holds this record of it (`services.use_verdict`).
+    from origin.models.key_custody import DelegationRecord
+
+    ttl = max(1, min(int(body.ttl_seconds or 0), _SYSTEM_DELEGATION_MAX_TTL))
+    jti = secrets.token_hex(16)
     token = origin_auth_service.issue_system_delegation_token(
-        subject_id, actor=actor, scope=cfg["scope"], audience=cfg["audience"], ttl_seconds=body.ttl_seconds,
-        signer=signer,
+        subject_id, actor=actor, scope=cfg["scope"], audience=cfg["audience"],
+        ttl_seconds=ttl, signer=signer, jti=jti,
     )
+    db.add(DelegationRecord(jti=jti, subject=str(subject_id), audience=cfg["audience"],
+                            signer=signer or "",
+                            expires_at=datetime.now(timezone.utc) + timedelta(seconds=ttl)))
+    db.commit()
     logger.info(
         "system-delegation issued: purpose=%s actor=%s sub=%s scope=%s",
         body.purpose, actor, subject_id, cfg["scope"],
@@ -541,6 +893,8 @@ class LinkProviderRequest(BaseModel):
     code: str
     code_verifier: str
     redirect_uri: str
+    #: The link attempt's random state (`POST /auth/me/link-attempts`), begun in the Origin session.
+    state: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -691,7 +1045,7 @@ _LOCAL_LOGIN_PAGE = """<!doctype html><html lang="en"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Sign in · Agience</title><link rel="icon" href="/web/favicon.png">
 <link rel="stylesheet" href="/web/app.css">
-</head><body>
+</head><body data-state="__STATE__">
 <div class="bg"></div>
 <div class="card">
   <img class="logo" src="/web/logo_v.png" alt="Agience">
@@ -708,98 +1062,7 @@ __REGISTER__
   <div class="foot"><a href="https://agience.ai/terms">Terms</a> · <a href="https://agience.ai/privacy">Privacy</a></div>
 </div>
 <script src="/web/bg.js"></script>
-<script>
-const S = "__STATE__";
-const msg = document.getElementById("msg");
-const say = (t, cls) => { msg.className = "msg " + (cls || "muted"); msg.textContent = t || ""; };
-async function post(url, body){
-  const r = await fetch(url, {method:"POST", headers:{"content-type":"application/json"},
-                             body: JSON.stringify(body)});
-  const d = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(d.detail || ("request failed (" + r.status + ")"));
-  return d;
-}
-const $ = (s) => document.querySelector(s);
-/* Every method ends the same way: the server hands back the redirect it already computed from the
-   pending request. The page never assembles a redirect itself and never sees a token. */
-const finish = (d) => location.assign(d.redirect);
-
-const pwForm = $("#pwForm");
-if (pwForm) pwForm.onsubmit = async (e) => {
-  e.preventDefault();
-  const btn = $("#pwBtn"); btn.disabled = true; say("");
-  try {
-    finish(await post("/auth/authorize/password", {oauth_state: S,
-      identifier: $("#identifier").value.trim(), password: $("#password").value}));
-  } catch (err) { say(err.message, "err"); btn.disabled = false; }
-};
-
-const otpToggle = $("#otpToggle");
-if (otpToggle) otpToggle.onclick = () => {
-  $("#local").classList.add("hidden");
-  $("#otp").classList.remove("hidden");
-  $("#email").focus(); say("");
-};
-const otpBack = $("#otpBack");
-if (otpBack) otpBack.onclick = () => {
-  $("#otp").classList.add("hidden");
-  $("#local").classList.remove("hidden"); say("");
-};
-const sendForm = $("#sendForm");
-if (sendForm) sendForm.onsubmit = async (e) => {
-  e.preventDefault();
-  const btn = $("#send"); btn.disabled = true;
-  try {
-    await post("/auth/authorize/otp/request", {oauth_state: S, email: $("#email").value.trim()});
-    $("#step1").classList.add("hidden");
-    $("#step2").classList.remove("hidden");
-    $("#code").focus();
-    /* Said the same way whether or not the account exists — the server does not disclose it and
-       neither may this text, keeping the page as free of account-enumeration as the API. */
-    say("If that address has an account, a code is on its way.");
-  } catch (err) { say(err.message, "err"); btn.disabled = false; }
-};
-/* Registration shares the chooser's one rule: the page posts, the server computes the redirect.
-   A `verification_required` answer is not a failure — the account exists, the flow simply cannot
-   continue until the mailbox is proved, and saying so is the whole message. */
-const regToggle = $("#regToggle");
-if (regToggle) regToggle.onclick = () => {
-  $("#local").classList.add("hidden");
-  const o = $("#otp"); if (o) o.classList.add("hidden");
-  $("#reg").classList.remove("hidden");
-  $("#remail").focus(); say("");
-};
-const regBack = $("#regBack");
-if (regBack) regBack.onclick = () => {
-  $("#reg").classList.add("hidden");
-  $("#local").classList.remove("hidden"); say("");
-};
-const regForm = $("#regForm");
-if (regForm) regForm.onsubmit = async (e) => {
-  e.preventDefault();
-  const btn = $("#regBtn"); btn.disabled = true; say("Creating your account…");
-  try {
-    const d = await post("/auth/authorize/register", {oauth_state: S,
-      email: $("#remail").value.trim(), password: $("#rpassword").value});
-    if (d.verification_required) {
-      $("#reg").classList.add("hidden");
-      say("Account created. Check " + d.email + " for a link to confirm it, then sign in.", "ok");
-      return;
-    }
-    finish(d);
-  } catch (err) { say(err.message, "err"); btn.disabled = false; }
-};
-
-const codeForm = $("#codeForm");
-if (codeForm) codeForm.onsubmit = async (e) => {
-  e.preventDefault();
-  const btn = $("#verify"); btn.disabled = true; say("");
-  try {
-    finish(await post("/auth/authorize/otp/verify", {oauth_state: S,
-      email: $("#email").value.trim(), code: $("#code").value.trim()}));
-  } catch (err) { say(err.message, "err"); btn.disabled = false; }
-};
-</script></body></html>"""
+<script src="/web/authorize.js"></script></body></html>"""
 
 _PASSWORD_BLOCK = """  <div id="local">
     <form id="pwForm">
@@ -893,8 +1156,8 @@ def _render_local_login(
     """
     buttons = "".join(
         '  <button class="provider" type="button" '
-        f'onclick="location.assign(\'/auth/authorize/federate?oauth_state={oauth_state}'
-        f'&amp;provider={_html.escape(name, quote=True)}\')">'
+        f'data-href="/auth/authorize/federate?oauth_state={oauth_state}'
+        f'&amp;provider={_html.escape(name, quote=True)}">'
         f"{_GOOGLE_MARK if name == 'google' else ''}"
         f"Continue with {_html.escape(label)}</button>\n"
         for name, label in providers
@@ -1112,6 +1375,8 @@ def _complete_local_signin(
         "code_challenge": auth_request.get("code_challenge"),
         "code_challenge_method": auth_request.get("code_challenge_method"),
         "timestamp": datetime.now(timezone.utc),
+        # Origin's own method: the person signed in just now, on this form.
+        "auth_time": int(datetime.now(timezone.utc).timestamp()),
     }
     if auth_request.get("setup_operator_token"):
         authorization_codes[auth_code]["setup_operator_token"] = auth_request["setup_operator_token"]
@@ -1119,7 +1384,11 @@ def _complete_local_signin(
     params = {"code": auth_code}
     if auth_request.get("state"):
         params["state"] = auth_request["state"]
-    return {"redirect": f"{auth_request['redirect_uri']}?{urlencode(params)}"}
+    from origin.services import origin_session
+    response = JSONResponse({"redirect": f"{auth_request['redirect_uri']}?{urlencode(params)}"})
+    if _starts_origin_session(auth_request, db):
+        origin_session.start(db, response, str(person.id))
+    return response
 
 
 # ---------------------------------------------------------------------------
@@ -1355,6 +1624,7 @@ async def authorize_local_register(
     disagreed about what identifies an account would produce accounts that only one of them could
     later find.
     """
+    _refuse_if_registration_paused()
     auth_request = _pop_local_auth_request(body.oauth_state)
 
     # The same 404 `/auth/password/register` gives. A disabled method reachable through a second
@@ -1378,10 +1648,12 @@ async def authorize_local_register(
         person = person_service.create_user_with_password(
             db,
             username=email,
-            name=email.split("@")[0],
+            name="",            # the person names themselves; never their address's local part
             password_hash=password_hash,
             email=email,
-            email_verified=not verify_required,
+            # Recorded verified only once proven (the link, or an OTP sign-in), whatever the plane
+            # asks: a targeted invite, and every peer, read this flag as proof of the address.
+            email_verified=False,
         )
         db.commit()
     except PermissionError as exc:
@@ -1414,6 +1686,17 @@ async def authorize_local_register(
         "password_register",
     )
     return _complete_local_signin(db, body.oauth_state, auth_request, person)
+
+
+def federation_kwargs(auth_request: dict) -> dict:
+    """What a pending sign-in asks of the upstream provider: a fresh sign-in (`prompt=login`,
+    `max_age=0`) when it is a re-authentication."""
+    out: dict = {}
+    if auth_request.get("prompt") == "login":
+        out["prompt"] = "login"
+    if auth_request.get("max_age") is not None:
+        out["max_age"] = int(auth_request["max_age"])
+    return out
 
 
 @auth_router.get("/authorize/federate", dependencies=None)
@@ -1454,6 +1737,7 @@ async def authorize_federate(request: Request, oauth_state: str, provider: str):
     except Exception:
         pass
 
+    extra_kwargs.update(federation_kwargs(auth_request))
     return await oauth_client.authorize_redirect(
         request,
         redirect_uri=REGISTERED_PROVIDERS[provider]["redirect_uri"],
@@ -1545,9 +1829,14 @@ async def authorize(
     code_challenge: Optional[str] = None,
     code_challenge_method: Optional[str] = "S256",
     setup_operator_token: Optional[str] = None,
+    prompt: Optional[str] = None,
+    max_age: Optional[int] = None,
     db: Session = Depends(get_db),
 ):
     """OAuth2 authorization endpoint. Redirects to the upstream OIDC provider.
+
+    `prompt=login` and `max_age=0` ask for a fresh sign-in (a re-authentication): they are passed
+    to a federated provider, and Origin's own methods never read a session anyway.
 
     Three populations of client reach this endpoint and exactly two are admitted:
 
@@ -1614,7 +1903,7 @@ async def authorize(
             )
             return _authorize_refusal("invalid_client", detail)
 
-    if not is_client_redirect_allowed(redirect_uri):
+    if not is_client_redirect_allowed(redirect_uri, platform_client=registration is None):
         # Named settings, because the two ways to be here are an operator's and an attacker's and
         # only the operator reads this: either the redirect base belongs to a facet this authority
         # has not been told about, or the caller is a first-party client nobody enrolled.
@@ -1689,6 +1978,8 @@ async def authorize(
         # `iss` check has no counterparty. The callback only reads this for federated requests.
         "expected_iss": None if is_local else REGISTERED_PROVIDERS[provider].get("issuer"),
         "timestamp": datetime.now(timezone.utc),
+        "prompt": "login" if prompt == "login" else None,
+        "max_age": max_age if isinstance(max_age, int) and max_age >= 0 else None,
     }
     if setup_operator_token:
         auth_request["setup_operator_token"] = setup_operator_token
@@ -1725,6 +2016,7 @@ async def authorize(
     except Exception:
         pass
 
+    extra_kwargs.update(federation_kwargs(auth_request))
     return await oauth_client.authorize_redirect(
         request,
         redirect_uri=REGISTERED_PROVIDERS[provider]["redirect_uri"],
@@ -1804,6 +2096,10 @@ async def auth_callback(request: Request):
             "code_challenge": auth_request.get("code_challenge"),
             "code_challenge_method": auth_request.get("code_challenge_method"),
             "timestamp": datetime.now(timezone.utc),
+            # When the provider says the person signed in (OIDC `auth_time`), for a
+            # re-authentication's freshness check; absent when it does not say.
+            "auth_time": (user_info.get("auth_time") if isinstance(user_info.get("auth_time"),
+                                                                   (int, float)) else None),
         }
         if auth_request.get("setup_operator_token"):
             authorization_codes[auth_code]["setup_operator_token"] = auth_request["setup_operator_token"]
@@ -1812,10 +2108,19 @@ async def auth_callback(request: Request):
         params = {"code": auth_code}
         if auth_request["state"]:
             params["state"] = auth_request["state"]
-        return RedirectResponse(
+        response = RedirectResponse(
             url=f"{auth_request['redirect_uri']}?{urlencode(params)}",
             status_code=status.HTTP_302_FOUND,
         )
+        # Origin's own session, for a person Origin already knows by this identity.
+        from origin.db.session import SessionLocal
+        from origin.services import origin_session
+        with SessionLocal() as sdb:
+            known = person_service.get_user_by_oidc_identity(sdb, provider, str(user_info["sub"]))
+            if _starts_origin_session(auth_request, sdb):
+                origin_session.start(sdb, response,
+                                     str(known.id) if known is not None else None)
+        return response
 
     except HTTPException:
         raise
@@ -1851,8 +2156,33 @@ async def token_endpoint(
     client_secret: Optional[str] = Form(None),
     code_verifier: Optional[str] = Form(None),
     refresh_token: Optional[str] = Form(None),
+    subject_token: Optional[str] = Form(None),
+    subject_token_type: Optional[str] = Form(None),
+    audience: Optional[str] = Form(None),
+    scope: Optional[str] = Form(None),
+    client_assertion_type: Optional[str] = Form(None),
+    client_assertion: Optional[str] = Form(None),
+    actor_token: Optional[str] = Form(None),
     db: Session = Depends(get_db),
 ):
+    if grant_type == _TOKEN_EXCHANGE:
+        # A delegation narrowed to a persona, exchanged for one narrowed to the next persona, is a
+        # hop (review 12, decision 2): proven by that persona's own client assertion (RFC 7523).
+        from jose import jwt as _jose_jwt
+
+        from origin.services.dependencies import _is_narrowed
+        try:
+            unverified = _jose_jwt.get_unverified_claims(subject_token or "")
+            narrowed_subject = _is_narrowed(unverified)
+        except Exception:  # noqa: BLE001
+            unverified, narrowed_subject = {}, False
+        if (narrowed_subject and subject_token_type == _ACCESS_TOKEN_TYPE
+                and audience == _EMBER_TO and unverified.get("aud") == _EMBER):
+            return _ember_for_mantle(db, subject_token or "", actor_token)
+        if narrowed_subject and subject_token_type == _ACCESS_TOKEN_TYPE:
+            caller = _hop_caller(db, subject_token or "", client_assertion_type, client_assertion)
+            return _narrow_hop(db, caller, subject_token or "", audience or "", scope)
+        return _grant_token_exchange(db, subject_token, subject_token_type, audience, scope)
     if grant_type == "authorization_code":
         if not all([code, redirect_uri, client_id, code_verifier]):
             raise HTTPException(
@@ -1871,6 +2201,7 @@ async def token_endpoint(
         if not refresh_token:
             raise HTTPException(status_code=400, detail="Missing required parameter: refresh_token")
         return await _grant_refresh_token(background_tasks=background_tasks, refresh_token=refresh_token,
+                                          client_id=client_id, client_secret=client_secret,
                                           db=db)
     if grant_type == "client_credentials":
         if not client_id or not client_secret:
@@ -1897,8 +2228,102 @@ async def token_endpoint(
 
     raise HTTPException(
         status_code=400,
-        detail="Unsupported grant_type. Only 'authorization_code', 'refresh_token', and 'client_credentials' are supported.",
+        detail="Unsupported grant_type. Only 'authorization_code', 'refresh_token', "
+               "'client_credentials' and token exchange are supported.",
     )
+
+
+_TOKEN_EXCHANGE = "urn:ietf:params:oauth:grant-type:token-exchange"
+_ACCESS_TOKEN_TYPE = "urn:ietf:params:oauth:token-type:access_token"
+
+
+def _narrow_response(person_id: str, audience: str, scopes: list) -> JSONResponse:
+    token = origin_auth_service.issue_narrow_delegation(person_id, audience, scopes)
+    return JSONResponse(content={
+        "access_token": token, "issued_token_type": _ACCESS_TOKEN_TYPE, "token_type": "bearer",
+        "expires_in": origin_auth_service.NARROW_TTL_SECONDS, "scope": " ".join(scopes)})
+
+
+_EMBER, _EMBER_TO = "ember", "mantle"
+
+
+def _ember_for_mantle(db: Session, subject_token: str, actor_token: Optional[str]) -> JSONResponse:
+    """Ember's delegation for a person, exchanged by Ember for the same person's delegation
+    addressed to Mantle (review 21, F6), so Ember never hands Mantle a token Ember itself takes.
+
+    The subject is a delegation Origin narrowed to Ember (`aud` = `act.sub` = `ember`), not a hop's
+    result. The actor (`actor_token`) is Ember's own account's access token: Origin's delegation
+    narrowed to Ember for a service account whose audience is Ember. The result: `aud` `mantle`,
+    actor `ember`, the subject's scopes, never past the subject, no refresh token, recorded as a
+    hop (`narrow_hops`), and never exchanged again."""
+    from jose import jwt as _jose_jwt
+
+    from origin.models.narrow_hop import NarrowHop
+    from origin.services import not_before as _not_before
+    from origin.services import service_accounts
+    from origin.services.dependencies import _is_narrowed
+
+    def _ember_own(claims) -> bool:
+        return bool(claims) and _is_narrowed(claims) and claims.get("aud") == _EMBER             and (claims.get("act") or {}).get("sub") == _EMBER and not claims.get("hop")
+
+    claims = verify_token(subject_token)
+    if not _ember_own(claims):
+        raise HTTPException(status_code=403, detail="only Ember's own delegation for a person is "
+                            "exchanged for Mantle")
+    actor = verify_token(actor_token or "") if actor_token else None
+    if (not _ember_own(actor)
+            or service_accounts.audience_of(str(actor.get("sub") or "")) != _EMBER):
+        raise HTTPException(status_code=401, detail="the exchange is Ember's own, on its own "
+                            "account's token (actor_token)")
+    if _not_before.ended(db, claims) or _not_before.ended(db, actor):
+        raise HTTPException(status_code=401, detail="this sign-in has ended; sign in again")
+    person = db_persons.get_by_id(db, str(claims.get("sub") or ""))
+    if person is None:
+        raise HTTPException(status_code=401, detail="Invalid subject")
+    refuse_if_deactivated(person)
+    scopes = str(claims.get("scope") or "").split()
+    ends = datetime.fromtimestamp(float(claims.get("exp") or 0), timezone.utc)
+    token = origin_auth_service.issue_narrow_delegation(
+        str(person.id), _EMBER_TO, scopes, expires_at=ends, actor=_EMBER,
+        hop={"from": _EMBER, "jti": str(claims.get("jti") or "")})
+    issued = _jose_jwt.get_unverified_claims(token)
+    db.add(NarrowHop(jti=str(issued["jti"]), sub=str(person.id),
+                     subject_jti=str(claims.get("jti") or ""), from_aud=_EMBER, to_aud=_EMBER_TO))
+    db.commit()
+    return JSONResponse(content={
+        "access_token": token, "issued_token_type": _ACCESS_TOKEN_TYPE, "token_type": "bearer",
+        "expires_in": max(0, int(issued["exp"] - datetime.now(timezone.utc).timestamp())),
+        "scope": " ".join(scopes)})
+
+
+def _grant_token_exchange(db: Session, subject_token: Optional[str],
+                          subject_token_type: Optional[str], audience: Optional[str],
+                          scope: Optional[str]) -> JSONResponse:
+    """RFC 8693 for a person's own access token: refused (review 23, H1). A bearer alone never
+    narrows: Mantle holds the person's token on every call and would mint a delegation narrowed to
+    any persona. A person's narrowed delegation is made in their Origin session
+    (`POST /auth/me/authority/narrow`, `narrow_for_person`)."""
+    raise HTTPException(status_code=400, detail="a person's delegation is narrowed only in their "
+                        "Origin session: POST /auth/me/authority/narrow")
+
+
+def narrow_for_person(db: Session, person_id: str, audience: Optional[str],
+                      scope: Optional[str]) -> JSONResponse:
+    """A delegation for the person narrowed to one audience (Ember, a persona's facet, the relay)
+    and to that audience's scopes, five minutes long, never `platform:admin`, with no refresh token
+    (review 8, R3), for a person signed in to their Origin session (the caller checks that)."""
+    allowed = origin_auth_service.narrow_audiences()
+    if not audience or audience not in allowed:
+        raise HTTPException(status_code=400, detail="audience is not a narrow audience")
+    person = db_persons.get_by_id(db, str(person_id or ""))
+    if person is None:
+        raise HTTPException(status_code=401, detail="Invalid subject")
+    refuse_if_deactivated(person)
+    asked = (scope or "").split() or [s for s in allowed[audience]
+                                      if s not in origin_auth_service.OPT_IN_SCOPES]
+    if not set(asked) <= set(allowed[audience]):
+        raise HTTPException(status_code=400, detail=f"scope outside {audience}'s")
+    return _narrow_response(str(person.id), audience, asked)
 
 
 async def _grant_authorization_code(
@@ -2025,8 +2450,23 @@ async def _grant_authorization_code(
             _FIRST_PARTY_HINT,
         )
 
+    # A sign-in delivered to a persona's facet (a `FACET_URIS` origin other than the web app)
+    # gets a delegation narrowed to that facet, never the platform token or a refresh token.
+    # Only a facet Origin lists is narrowed to; one it admits as a redirect but does not list gets
+    # no token at all (review 12): a redirect URL never picks the audience.
+    if _is_first_party_client(issuing_client_id):
+        persona = origin_auth_service.facet_narrowing(auth_data.get("redirect_uri") or "")
+        if persona is False:
+            raise HTTPException(status_code=400, detail="this facet is not one Origin narrows a "
+                                "sign-in to (NARROW_FACETS)")
+        if persona:
+            background_tasks.add_task(person_service.record_person_event, user_data,
+                                      "auth_grant")
+            return _narrow_response(str(user.id), persona,
+                                    origin_auth_service.narrow_audiences()[persona])
+
     access_token = create_jwt_token(user_data)
-    refresh_token = create_jwt_token({**user_data, "token_type": "refresh"}, expires_hours=24 * 30)
+    refresh_token = _refresh_tokens.issue(db, user_data)
 
     background_tasks.add_task(person_service.record_person_event, user_data, "auth_grant")
     return JSONResponse(
@@ -2041,20 +2481,15 @@ async def _grant_authorization_code(
 
 
 async def _grant_refresh_token(*, background_tasks: BackgroundTasks, refresh_token: str,
-                               db: Optional[Session] = None):
-    """Exchange a refresh token for a fresh access token. Not rotated, and not revocable.
+                               db: Optional[Session] = None, client_id: Optional[str] = None,
+                               client_secret: Optional[str] = None):
+    """Exchange a refresh token for a fresh access token and the next refresh token.
 
-    Refresh tokens are stateless JWTs: nothing is written at mint time, so there is nothing to
-    consult here and nothing a password reset could mark. `password_reset_confirm` invalidates the
-    reset *link*, via `_pw_fingerprint`, and evicts nobody. A stolen refresh token is therefore live
-    for its full 30 days.
+    Refresh tokens rotate on use and are revocable (`services.refresh_tokens`): each is recorded by
+    `jti` in its sign-in's family, taken here once, and replaced by the next in the family. A used
+    one presented again is theft and revokes the whole family. A deactivated person's are revoked.
 
-    Making one revocable means giving it state — a `jti` stored at mint and consumed here, so that a
-    second presentation of the same `jti` is proof of theft and revokes the chain. Revoking every
-    token for one person at once instead wants a `password_changed_at` column on `persons`, stamped
-    into the token and compared here.
-
-    Neither reaches a peer. Peers verify Origin's tokens offline against the inline JWKS in their
+    None of this reaches a peer. Peers verify Origin's tokens offline against the inline JWKS in their
     authority manifest and never call back, so anything decided here binds at Origin only. The
     platform-wide revocation lag is the access token lifetime, which
     `auth_service.access_token_ttl_hours` brackets.
@@ -2064,8 +2499,21 @@ async def _grant_refresh_token(*, background_tasks: BackgroundTasks, refresh_tok
         raise HTTPException(status_code=400, detail="Invalid refresh token")
     if not payload.get("aud"):
         raise HTTPException(status_code=400, detail="Refresh token has no audience — please log in again")
+    # The client authenticates itself (review 11, M1): it names itself, and it must be the client
+    # the family was issued to. A confidential client must prove its secret, which Origin holds
+    # for no refresh-token client, so a registration that is not public refreshes nothing.
+    if not client_id:
+        raise HTTPException(status_code=400, detail="client_id is required")
+    if db is not None:
+        from origin.models.oauth_client import OAuthClient
+        reg = db.get(OAuthClient, client_id)
+        if reg is not None and (reg.token_endpoint_auth_method or "none") != "none":
+            raise HTTPException(status_code=401, detail="a confidential client authenticates "
+                                "with a secret Origin does not hold for refresh tokens")
 
-    user_data = {k: v for k, v in payload.items() if k not in ("exp", "token_type", "iat")}
+    # The access token is its own: never the refresh token's `jti` or family.
+    user_data = {k: v for k, v in payload.items()
+                 if k not in ("exp", "token_type", "iat", "jti", "fam")}
 
     # A deactivated person's refresh tokens stop here, whichever client they were minted for.
     if db is not None and payload.get("sub"):
@@ -2073,6 +2521,9 @@ async def _grant_refresh_token(*, background_tasks: BackgroundTasks, refresh_tok
             holder = person_service.get_user_by_id(db, str(payload["sub"]))
         except (ValueError, TypeError):
             holder = None
+        if holder is not None and getattr(holder, "deactivated_at", None) is not None:
+            _refresh_tokens.revoke_person(db, str(payload["sub"]))
+            db.commit()
         if holder is not None:
             refuse_if_deactivated(holder)
 
@@ -2089,11 +2540,20 @@ async def _grant_refresh_token(*, background_tasks: BackgroundTasks, refresh_tok
         # the PII-free token growing authority it was minted without.
         user_data.pop("roles", None)
 
-    access_token = create_jwt_token(user_data)
+    if db is None:
+        raise HTTPException(status_code=500, detail="the refresh grant needs the database")
+    try:
+        next_refresh = _refresh_tokens.rotate(db, refresh_token, payload, user_data,
+                                              client_id=client_id)
+    except _refresh_tokens.RefreshRefused as exc:
+        logger.warning("refresh grant refused: %s", exc)
+        raise HTTPException(status_code=400, detail="Invalid refresh token")
+    access_token = create_jwt_token({**user_data, "jti": secrets.token_hex(16)})
     background_tasks.add_task(person_service.record_person_event, user_data, "refresh_grant")
     return JSONResponse(
         content={
             "access_token": access_token,
+            "refresh_token": next_refresh,
             "token_type": "bearer",
             "expires_in": access_token_expires_in_seconds(),
             "scope": " ".join(user_data.get("scopes", [])) or "read write",
@@ -2541,6 +3001,14 @@ def _own_origins() -> set:
     return own
 
 
+def _is_mantle(parts) -> bool:
+    """Is this origin Mantle's? Mantle serves pages, so it is never the app nor an SSO return,
+    whatever a setting says (`config.without_mantle` drops it from the environment's values; this
+    holds for a value from the settings store too)."""
+    mantle = _origin_parts(getattr(config, "MANTLE_URI", "") or "")
+    return mantle is not None and parts == mantle
+
+
 def _app_uri() -> Optional[str]:
     """The front end a signed-in person continues to from the account page, or None.
 
@@ -2561,7 +3029,7 @@ def _app_uri() -> Optional[str]:
     if parts is None or beyond_origin:
         logger.warning("APP_URI %r is not a bare http(s) origin; no app link is published", raw)
         return None
-    if _is_loopback_host(parts[1]) or parts in _own_origins():
+    if _is_loopback_host(parts[1]) or parts in _own_origins() or _is_mantle(parts):
         return None
     return _render_origin(parts)
 
@@ -2589,6 +3057,7 @@ def _sso_return_uris() -> list[str]:
             and not (p.username or p.password or p.query or p.fragment or p.params)
             and not _is_loopback_host(parts[1])
             and parts not in _own_origins()
+            and not _is_mantle(parts)
         )
         if not qualifies:
             logger.warning("SSO return URI %r is not an https URL of another origin with no "
@@ -2663,16 +3132,16 @@ async def password_login(
         roles=_compute_roles(str(user.id)),
     )
     access_token = create_jwt_token(user_data)
-    refresh_token = create_jwt_token({**user_data, "token_type": "refresh"}, expires_hours=24 * 30)
+    refresh_token = _refresh_tokens.issue(db, user_data)
     background_tasks.add_task(person_service.record_person_event, user_data, "password_login")
 
-    return {
+    return _signed_in_on_page(request, db, str(user_id), {
         "access_token": access_token,
         "token_type": "bearer",
         "expires_in": access_token_expires_in_seconds(),
         "refresh_token": refresh_token,
         "scope": "read write",
-    }
+    })
 
 
 @auth_router.post("/password/register", dependencies=_KDF_ADMISSION)
@@ -2682,6 +3151,7 @@ async def password_register(
     payload: PasswordRegisterRequest,
     db: Session = Depends(get_db),
 ):
+    _refuse_if_registration_paused()
     if not platform_settings.get_bool("auth.password.enabled", True):
         raise HTTPException(status_code=404, detail="Password auth is disabled")
 
@@ -2711,7 +3181,9 @@ async def password_register(
             name=name,
             password_hash=password_hash,
             email=email,
-            email_verified=not verify_required,
+            # Recorded verified only once proven (the link, or an OTP sign-in), whatever the plane
+            # asks: a targeted invite, and every peer, read this flag as proof of the address.
+            email_verified=False,
         )
         db.commit()
     except PermissionError as exc:
@@ -2736,16 +3208,16 @@ async def password_register(
         roles=_compute_roles(str(user.id)),
     )
     access_token = create_jwt_token(user_data)
-    refresh_token = create_jwt_token({**user_data, "token_type": "refresh"}, expires_hours=24 * 30)
+    refresh_token = _refresh_tokens.issue(db, user_data)
     background_tasks.add_task(person_service.record_person_event, user_data, "password_register")
 
-    return {
+    return _signed_in_on_page(request, db, str(user.id), {
         "access_token": access_token,
         "token_type": "bearer",
         "expires_in": access_token_expires_in_seconds(),
         "refresh_token": refresh_token,
         "scope": "read write",
-    }
+    })
 
 
 # ---------------------------------------------------------------------------
@@ -2935,7 +3407,7 @@ async def email_verify_confirm(
         return {"verified": True}
 
     access_token = create_jwt_token(user_data)
-    refresh_token = create_jwt_token({**user_data, "token_type": "refresh"}, expires_hours=24 * 30)
+    refresh_token = _refresh_tokens.issue(db, user_data)
 
     # `email` lets a tab of this browser waiting on the same registration tell that it was this
     # address that was verified. Only the browser that started the verification is told.
@@ -3298,6 +3770,8 @@ async def bootstrap_claim(body: BootstrapClaimRequest, db: Session = Depends(get
         name=person_name,
         password_hash=password_hash or "",
         email=op_email,
+        email_verified=True,              # the operator's own address, on the bootstrap token
+        allow_paused=True,                # the operator's own bootstrap claim
     ) if password_hash else _create_passwordless_operator(
         db, email=op_email, name=person_name
     )
@@ -3330,9 +3804,7 @@ async def bootstrap_claim(body: BootstrapClaimRequest, db: Session = Depends(get
         roles=["platform:admin"],
     )
     access_token = create_jwt_token(user_data)
-    refresh_token = create_jwt_token(
-        {**user_data, "token_type": "refresh"}, expires_hours=24 * 30
-    )
+    refresh_token = _refresh_tokens.issue(db, user_data)
 
     logger.info(
         "Bootstrap claim consumed: operator=%s (%s)", person_name, operator_id
@@ -3358,6 +3830,7 @@ def _create_passwordless_operator(db: Session, *, email: str, name: str) -> Pers
             "name": name,
             "username": name,
             "password_hash": None,
+            "email_verified": True,          # the operator's own address, on the bootstrap token
         },
     )
 
@@ -3403,20 +3876,316 @@ async def update_preferences(
 
 
 # ---------------------------------------------------------------------------
+# A person's step-up for a change to how they sign in (`services.person_step_up`)
+# ---------------------------------------------------------------------------
+def _refuse_if_registration_paused() -> None:
+    """403 while new accounts are paused (`REGISTRATION_PAUSED`, or the platform setting
+    `auth.registration.paused`): enforced here, by Origin, not only by the proxy in front of it."""
+    if person_service.registration_paused():
+        raise HTTPException(status_code=403, detail="New accounts are temporarily paused. Sign "
+                            "in with an existing account.")
+
+
+def on_origin_s_own_page(request: Request) -> bool:
+    """Was this request sent by one of Origin's own pages? Its `Origin` (or, without one, its
+    `Referer`) is Origin's own origin: scheme, host and port. A browser sets both, and no page
+    elsewhere can claim Origin's."""
+    source = request.headers.get("origin") or request.headers.get("referer") or ""
+    parts = _origin_parts(source)
+    return parts is not None and parts in _own_origins()
+
+
+def _signed_in_on_page(request: Request, db: Session, person_id: str, body: dict) -> JSONResponse:
+    """A sign-in's answer, which on Origin's own page also starts the person's Origin session, as
+    `/auth/authorize`'s local form does (`_complete_local_signin`). A sign-in posted from any other
+    page, the web app's included, starts none: credentials are typed only on Origin's page, and the
+    session is what every authority change and the web app's token for Mantle are made in."""
+    from origin.services import origin_session
+
+    response = JSONResponse(body)
+    if on_origin_s_own_page(request):
+        origin_session.start(db, response, person_id)
+    return response
+
+
+def _starts_origin_session(auth_request: dict, db: Optional[Session] = None) -> bool:
+    """Does a sign-in for this request start Origin's own session in the browser? Not one on its
+    way to a re-authentication (`/auth/reauth/complete`), nor one through the method to be
+    linked (back to `/passkey` carrying a link attempt's state): the person proving themselves
+    again, or signing in through the method to add, must never replace the session the change
+    was begun in, nor give another browser one (review 11). An ordinary sign-in at `/passkey`
+    does start one."""
+    from origin.services import link_attempts, person_step_up
+    req = auth_request or {}
+    target = str(req.get("redirect_uri") or "")
+    if target == person_step_up.complete_uri():
+        return False
+    if target == person_step_up.link_uri() and db is not None and link_attempts.is_attempt(
+            db, req.get("state")):
+        return False
+    return True
+
+
+def _interactive(auth: AuthContext) -> str:
+    """A person's own session, not a machine acting as them (a delegation or an mcp_client)."""
+    if auth.principal_type != "user" or auth.actor is not None or not auth.user_id:
+        raise HTTPException(status_code=403, detail="a sign-in method changes only in the "
+                            "person's own session")
+    return str(auth.user_id)
+
+
+@auth_router.post("/me/link-attempts")
+async def begin_link_attempt(request: Request, body: dict = Body(...),
+                             auth: AuthContext = Depends(get_auth),
+                             db: Session = Depends(get_db)):
+    """Begin linking another sign-in method, in the person's Origin session: a random state for
+    this attempt, bound to the PKCE challenge (`code_challenge`, S256) the sign-in will carry."""
+    from origin.services import link_attempts, origin_session
+
+    who = _interactive(auth)
+    origin_session.require(request, db, who)
+    return {"state": link_attempts.begin(db, who, str(body.get("code_challenge") or ""))}
+
+
+@auth_router.post("/me/step-up-options")
+async def person_step_up_options(
+    request: Request,
+    body: dict = Body(...),
+    auth: AuthContext = Depends(get_auth),
+    db: Session = Depends(get_db),
+):
+    """The step-up for one request that changes how this person signs in
+    (`{method, path, body | body_sha256}`): a passkey challenge, or a link to re-authenticate at
+    Origin. A re-authentication is started only in the person's own Origin session (the cookie
+    Origin's own sign-in sets), never on a token alone; for a link, `body` (the link's own request)
+    is sent so the start page can show which identity it joins."""
+    from origin.services import origin_session, person_step_up
+
+    who = _interactive(auth)
+    raw = body.get("body")
+    return person_step_up.options(db, who, str(body.get("method") or ""),
+                                  str(body.get("path") or ""), str(body.get("body_sha256") or ""),
+                                  body=raw if isinstance(raw, str) else None,
+                                  session_person=origin_session.person_of(request, db),
+                                  session_sha256=origin_session.digest_of(request))
+
+
+@auth_router.get("/not-before", dependencies=None)
+async def published_not_before(after: int = 0, db: Session = Depends(get_db)):
+    """The not-before times peers enforce (review 11, M2), served by sequence (review 12, M8): a JWT
+    signed by Origin's current key,
+    `{"iss", "iat", "token_type": "not_before", "after", "seq", "entries": [{"sub", "not_before",
+    "seq"}], "all_before"}`.
+
+    Every change to a person's bound takes the next number in one sequence; `entries` lists the
+    people whose bound changed after `after` (a peer's cursor), each with its number, and `seq` is
+    the highest number there is, the peer's next cursor. Numbers, not times, so a change committed
+    late with an earlier time is never skipped. An entry's `not_before` (unix seconds) is the time
+    before which that person's access tokens no longer count; `all_before` is the time before which
+    every token Origin issued ends (a signing-key rollover), or 0, sent every time. Peers (Mantle,
+    prism, Ember, Chorus) refuse a token whose `iat` is earlier.
+
+    Public, as the JWKS is: it names person ids and times, never anyone's email or name."""
+    from sqlalchemy import func
+
+    from origin.models.sign_in_bounds import PersonNotBefore
+    from origin.services import not_before as _nb
+
+    def _ts(t):
+        t = _nb._aware(t)
+        return t.timestamp() if t is not None else 0.0
+
+    after = max(0, int(after))
+    top = int(db.query(func.max(PersonNotBefore.seq)).scalar() or 0)
+    entries, all_before = [], 0.0
+    for row in db.query(PersonNotBefore).order_by(PersonNotBefore.seq):
+        when = max(_ts(row.access_before), _ts(row.refresh_before))
+        if row.person_id == _nb.EVERYONE:
+            all_before = when
+        elif int(row.seq or 0) > after:
+            entries.append({"sub": row.person_id, "not_before": int(when) + 1,
+                            "seq": int(row.seq or 0)})
+    now = datetime.now(timezone.utc).timestamp()
+    token = create_jwt_token({"iss": config.AUTHORITY_ISSUER, "token_type": "not_before",
+                              "after": after, "seq": top, "entries": entries,
+                              "all_before": int(all_before) + 1 if all_before else 0,
+                              "iat": now}, expires_hours=1 / 12)
+    return {"token": token}
+
+
+@auth_router.post("/sign-out", dependencies=None)
+async def sign_out(request: Request, refresh_token: str = Form(...),
+                   db: Session = Depends(get_db)):
+    """End one sign-in: the presented refresh token's whole family is revoked, the person's
+    access tokens issued before now end at Origin (their other sign-ins refresh into new ones), and
+    the Origin session this browser carries ends with its cookie."""
+    from origin.services import not_before, origin_session
+
+    payload = verify_token(refresh_token)
+    if not payload or payload.get("token_type") != "refresh":
+        raise HTTPException(status_code=400, detail="Invalid refresh token")
+    n = _refresh_tokens.revoke_token_family(db, payload)
+    if payload.get("sub"):
+        not_before.end_access(db, str(payload["sub"]))
+    response = JSONResponse({"signed_out": True, "revoked": n})
+    origin_session.end(request, db, response)
+    db.commit()
+    return response
+
+
+@auth_router.post("/sign-out-everywhere")
+async def sign_out_everywhere(auth: AuthContext = Depends(get_auth), db: Session = Depends(get_db)):
+    """End every sign-in of the caller's: all their refresh-token families and Origin sessions."""
+    from origin.services import origin_session
+
+    from origin.services import authority_ledger as _ledger
+
+    from origin.services import not_before
+
+    who = _interactive(auth)
+    n = _refresh_tokens.revoke_person(db, who)
+    origin_session.revoke_person(db, who)
+    not_before.end_all(db, who)              # every token issued before now, legacy ones too
+    db.commit()
+    jobs = _ledger.revoke_person_job_grants(db, who)
+    return {"signed_out": True, "revoked": n, "job_grants_revoked": jobs}
+
+
+# -- the person's own job grants, at Origin's own page (review 9, H2) -----------------------------
+
+@auth_router.get("/me/job-grants")
+async def my_job_grants(request: Request, auth: AuthContext = Depends(get_auth),
+                        db: Session = Depends(get_db)):
+    """The job grants the person made, or that name their own key: in their Origin session."""
+    from origin.services import authority_ledger as _ledger, origin_session
+
+    who = _interactive(auth)
+    origin_session.require(request, db, who)
+    return {"job_grants": _ledger.person_job_grants(db, who)}
+
+
+@auth_router.post("/me/job-grants")
+async def make_my_job_grant(request: Request, body: dict = Body(...),
+                            auth: AuthContext = Depends(get_auth), db: Session = Depends(get_db)):
+    """Grant a named background job narrow authority over the person's own key, or over
+    collections they administer (`{job, expires_at, principal?, collections?}`): only in their
+    Origin session with a fresh step-up bound to this very request. A bearer token or a
+    delegation alone makes no job grant. Every one made raises an operator alert."""
+    from origin.services import authority_ledger as _ledger, person_step_up
+
+    who = _interactive(auth)
+    await person_step_up.require(request, db, who)
+    job, until = body.get("job"), body.get("expires_at")
+    cols = body.get("collections") or []
+    if not isinstance(job, str) or not job or not isinstance(until, str) or             not isinstance(cols, list) or not all(isinstance(c, str) for c in cols):
+        raise HTTPException(status_code=400, detail="job and expires_at are required; "
+                            "collections is a list of ids")
+    try:
+        receipt = _ledger.page_job_grant(db, who, job=job, expires_at=until,
+                                         principal=body.get("principal"), collections=cols)
+    except _ledger.EntryRefused as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc))
+    row = db.query(__import__("origin.models.authority_ledger", fromlist=["x"])
+                   .AuthorityJobGrant).filter_by(seq=receipt.get("seq")).first()
+    return {"grant_id": row.grant_id if row else None, "receipt": receipt}
+
+
+@auth_router.post("/me/job-grants/{grant_id}/revoke")
+async def revoke_my_job_grant(grant_id: str, request: Request,
+                              auth: AuthContext = Depends(get_auth),
+                              db: Session = Depends(get_db)):
+    """Revoke one of the person's own job grants, in their Origin session with a fresh step-up
+    bound to this request: a click stolen in a framed page does nothing (review 11, M7)."""
+    from origin.services import authority_ledger as _ledger, person_step_up
+
+    who = _interactive(auth)
+    await person_step_up.require(request, db, who)
+    try:
+        out = _ledger.page_revoke_job_grant(db, who, grant_id)
+    except _ledger.EntryRefused as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc))
+    if out is None:
+        raise HTTPException(status_code=404, detail="no such job grant of yours")
+    return {"grant_id": grant_id, "revoked": True}
+
+
+@auth_router.get("/reauth/start", dependencies=None)
+async def person_reauth_start(ticket: str, db: Session = Depends(get_db)):
+    """Origin's own page for a re-authentication: the exact action, and a confirm. Nothing goes
+    to a sign-in until the person confirms."""
+    from origin.services import person_step_up
+
+    return HTMLResponse(person_step_up.start_page(db, ticket),
+                        headers={"Content-Security-Policy": "default-src 'none'; "
+                                 "form-action 'self'; frame-ancestors 'none'",
+                                 "Cache-Control": "no-store"})
+
+
+@auth_router.post("/reauth/start", dependencies=None)
+async def person_reauth_confirm(ticket: str = Form(...), csrf: str = Form(...),
+                                db: Session = Depends(get_db)):
+    """The person confirmed the action: on to Origin's own sign-in, a fresh one."""
+    from origin.services import person_step_up
+
+    return RedirectResponse(url=person_step_up.confirm(db, ticket, csrf),
+                            status_code=status.HTTP_303_SEE_OTHER)
+
+
+@auth_router.get("/reauth/complete", dependencies=None)
+async def person_reauth_complete(request: Request, code: str, state: str,
+                                 db: Session = Depends(get_db)):
+    """The sign-in's code, consumed here: the ticket is proven if the identity that signed in is
+    already this person's, and only in the browser whose Origin session started the ticket. No
+    token is minted, and no session is started or replaced: the one it began in stays."""
+    from origin.services import origin_session, person_step_up
+
+    row = person_step_up.complete(db, state, code, authorization_codes, _AUTH_CACHE_TTL,
+                                  session_sha256=origin_session.digest_of(request))
+    return HTMLResponse(
+        "<!doctype html><meta charset=utf-8><title>Confirmed</title>"
+        f"<p>Confirmed: you may now {_html.escape(row.describe)}. "
+        "Return to Origin's page to finish it.</p>")
+
+
+# ---------------------------------------------------------------------------
 # /me/link-provider
 # ---------------------------------------------------------------------------
 @auth_router.post("/me/link-provider")
 async def link_provider(
+    request: Request,
     body: LinkProviderRequest,
     auth: AuthContext = Depends(get_auth),
     person: PersonModel = Depends(get_person),
     db: Session = Depends(get_db),
 ):
+    """Join another sign-in identity to this account: the code of a sign-in through it, and a
+    fresh step-up by a method the person already has (`services.person_step_up`). An access
+    token alone joins nothing."""
+    from origin.services import link_attempts, person_step_up
+
+    _interactive(auth)
+    # The attempt first (review 10, R10): its state was begun in this person's Origin session, and
+    # the sign-in's code carries the PKCE challenge it recorded, so a code obtained anywhere else
+    # links nothing, whatever step-up comes with it.
+    attempt = link_attempts.live(db, body.state, str(person.id))
+    pending = authorization_codes.get(body.code) or {}
+    if not pending.get("code_challenge") or pending.get("code_challenge_method") != "S256":
+        raise HTTPException(status_code=403, detail="the sign-in to be linked carries no PKCE "
+                            "challenge (S256)")
+    if not secrets.compare_digest(str(pending["code_challenge"]), attempt.code_challenge):
+        raise HTTPException(status_code=403, detail="the sign-in to be linked was not made for "
+                            "this link attempt")
+    await person_step_up.require(request, db, str(person.id))
     if body.code not in authorization_codes:
         raise HTTPException(status_code=400, detail="Invalid or expired authorization code")
     auth_data = authorization_codes[body.code]
     if body.redirect_uri != auth_data["redirect_uri"]:
         raise HTTPException(status_code=400, detail="Invalid redirect_uri")
+    # Made by Origin's own page for this: its own platform client, back to `/passkey` (review 11).
+    if (not _is_first_party_client(str(auth_data.get("client_id") or ""))
+            or auth_data.get("redirect_uri") != person_step_up.link_uri()):
+        raise HTTPException(status_code=403, detail="the sign-in to be linked was not made by "
+                            "Origin's own page for this link")
     if datetime.now(timezone.utc) - auth_data["timestamp"] > _AUTH_CACHE_TTL:
         authorization_codes.pop(body.code, None)
         raise HTTPException(status_code=400, detail="Authorization code expired")
@@ -3433,6 +4202,7 @@ async def link_provider(
             raise HTTPException(status_code=400, detail="Invalid code_verifier")
 
     authorization_codes.pop(body.code, None)
+    link_attempts.spend(db, attempt)
     info = auth_data["user_info"]
     try:
         updated = person_service.link_oidc_identity(
@@ -3452,18 +4222,24 @@ async def link_provider(
 
 @auth_router.delete("/me/link-provider/{provider}")
 async def unlink_provider(
+    request: Request,
     provider: str,
     subject: str | None = None,
     auth: AuthContext = Depends(get_auth),
     person: PersonModel = Depends(get_person),
     db: Session = Depends(get_db),
 ):
-    """Unlink one external identity.
+    """Unlink one external identity, with a fresh step-up by a method the person already has
+    (`services.person_step_up`).
 
     `subject` is optional only while a provider has a single identity on the account — with one
     slot the route cannot be ambiguous. When the account holds more than one identity from
     `provider`, the endpoint returns 409 rather than guessing which one to drop.
     """
+    from origin.services import person_step_up
+
+    _interactive(auth)
+    await person_step_up.require(request, db, str(person.id))
     matches = [i for i in person_service.list_identities(db, str(person.id))
                if i.method == "oidc" and i.provider == provider
                and (subject is None or i.subject == subject)]

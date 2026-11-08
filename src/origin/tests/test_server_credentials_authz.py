@@ -1,4 +1,4 @@
-﻿"""`/auth/clients` mints platform server credentials — only the operator may touch it.
+"""`/auth/clients` mints platform server credentials — only the operator may touch it.
 
 Authentication alone is not authorization: a handler that only checks "is anyone logged in" lets
 any registered user mint a `client_secret` with caller-chosen `scopes`, exchange it via
@@ -15,6 +15,7 @@ cannot verify. See `test_oracle_router_auth` for the same note.
 
 OPERATOR = "operator-uuid-1234"
 INTRUDER = "some-random-registered-user"
+from origin.tests.test_a_key_share_is_released_only_to_mantle import custody_client  # noqa: E402,F401
 
 
 def _mint(sub, **extra):
@@ -67,20 +68,32 @@ def test_an_unauthenticated_caller_is_refused(client, monkeypatch):
     assert client.get("/auth/clients").status_code in (401, 403)
 
 
-def test_the_operator_still_gets_through(client, monkeypatch):
-    """Positive control — without it the 403 assertions above would pass even if the router were
-    broken for everyone.
-
-    `list_all` is stubbed so this tests the authorization gate rather than storage: the test DB has
-    no `server_credentials` table, and that error propagates out of TestClient as an exception
-    rather than a status code, so the assertion would never even run.
-    """
+def test_the_operator_s_ordinary_access_token_is_refused(client, monkeypatch):
+    """A credential this router mints outlives every token, and the operator's ordinary access
+    token reaches Mantle: it opens nothing here. Only the console, with a step-up, does."""
     from origin.db import server_credentials as db_server_creds
 
     _operator_is_set(monkeypatch)
     monkeypatch.setattr(db_server_creds, "list_all", lambda db: [])
-    r = client.get("/auth/clients", headers=_h(OPERATOR))
-    assert r.status_code == 200, f"the platform operator was refused by /auth/clients ({r.status_code})"
+    assert client.get("/auth/clients", headers=_h(OPERATOR)).status_code == 403
+    assert client.post("/auth/clients", headers=_h(OPERATOR), json={
+        "client_id": "c", "name": "c", "server_id": "s", "host_id": "h"}).status_code == 403
+
+
+def test_the_operator_gets_through_on_the_console_with_a_step_up(custody_client, monkeypatch):  # noqa: F811
+    """Positive control, on the console: the gate is not closed for everyone."""
+    from origin.db import server_credentials as db_server_creds
+    from origin.tests import authority_fixtures as af
+    from origin.tests import operator_console_fixtures as oc
+
+    af.operator(monkeypatch)
+    monkeypatch.setattr(db_server_creds, "list_all", lambda db: [])
+    r = oc.call(custody_client, "GET", "/auth/clients")
+    assert r.status_code == 200, r.text
+    _auth, token = oc.console(custody_client)
+    bare = custody_client.get("/auth/clients", headers={"Authorization": f"Bearer {token}"})
+    assert bare.status_code in (401, 403), "the console token alone, with no step-up"
+
 
 
 def test_a_delegation_acting_for_the_operator_cannot_reach_the_router(client, monkeypatch):

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agience-origin"
-version = "0.2.11"
+version = "0.2.12"
 description = "Agience Origin — the identity authority (IdP): principals, identities, grants, service identity and the trust anchors peers verify against."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -56,6 +56,8 @@ where = ["src"]
 # reason; adding it changes nothing about the current wheel (verified 2026-09-16: 118 entries,
 # 7 alembic migrations, 10 web assets, before and after).
 include = ["origin*"]
+# The tests never ship (review 19): a wheel carries no test code and no test-only seam.
+exclude = ["origin.tests*"]
 
 # `src/origin/web/` is not a package — it has no `__init__.py`, so `packages.find` never sees it and
 # nothing below it reaches a distribution unless it is declared here as data.

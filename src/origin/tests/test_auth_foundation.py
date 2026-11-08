@@ -143,17 +143,13 @@ def test_password_rejects_malformed_hash(auth_modules):
     assert not auth_service.verify_password("any", "not-a-valid-hash")
 
 
-def test_nonce_roundtrip(auth_modules):
-    issuance = auth_modules["auth_service"]
+def test_origin_verifies_no_nonce(auth_modules):
+    """Origin mints the inbound nonce (`issue_nonce`) and never verifies one: the verifying half
+    is the resource server's, and Origin's copy was dead (review 21, F7)."""
     verify = auth_modules["auth_verifier"]
-
-    token, _exp = issuance.issue_nonce(key_id="k1", artifact_id="a1", secret="s")
-    assert verify.verify_nonce(token, "k1", "a1", "s")
-    # Mismatched binding
-    assert not verify.verify_nonce(token, "k1", "a2", "s")
-    assert not verify.verify_nonce(token, "k2", "a1", "s")
-    # Wrong secret
-    assert not verify.verify_nonce(token, "k1", "a1", "different-secret")
+    assert not hasattr(verify, "verify_nonce")
+    token, _exp = auth_modules["auth_service"].issue_nonce(key_id="k1", artifact_id="a1", secret="s")
+    assert token
 
 
 def test_api_key_format(auth_modules):

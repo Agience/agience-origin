@@ -132,11 +132,12 @@ class TestPersonLookupNamesTheService:
         from origin.routers.auth_router import _PERSONAS, _PLATFORM_SERVICES
         from origin.services.auth_verifier import PLATFORM_ISSUERS
 
-        # The personas are the one deliberate difference (2026-10-19): verified against their own
-        # anchors, and admitted by the delegation exchange alone, each for itself only.
-        assert set(PLATFORM_ISSUERS) == set(_PLATFORM_SERVICES) | set(_PERSONAS), (
+        # Two deliberate differences: the personas (2026-10-19), verified against their own
+        # anchors and admitted by the delegation exchange alone, each for itself only; and Crystal
+        # (review 21), admitted to its own exchange and the describe delegation only.
+        assert set(PLATFORM_ISSUERS) == set(_PLATFORM_SERVICES) | set(_PERSONAS) | {"crystal"}, (
             f"verify_token accepts {sorted(PLATFORM_ISSUERS)} but the /internal guard allows "
-            f"{sorted(_PLATFORM_SERVICES)} plus the personas {sorted(_PERSONAS)}"
+            f"{sorted(_PLATFORM_SERVICES)} plus the personas {sorted(_PERSONAS)} and crystal"
         )
         assert not set(_PERSONAS) & set(_PLATFORM_SERVICES),             "a persona in the platform-service allowlist could read person records"
 
@@ -152,37 +153,17 @@ class TestPersonLookupNamesTheService:
         assert PLATFORM_ISSUERS, "no platform issuers — the equality check above is vacuous"
         assert _PLATFORM_SERVICES, "no platform services — the equality check above is vacuous"
 
-    def test_the_retired_service_names_have_not_returned(self):
-        """`crystal` and `lumen` are not service identities and must not reappear in either list.
-
-        Named explicitly rather than left to the equality rule, because adding them to BOTH lists
-        satisfies every other assertion here while restoring exactly the defect that was removed —
-        and matching one list to the other is precisely how someone would reintroduce them.
-
-        Removed 2026-09-16. Neither can be produced: `iss` is `identity.name` from
-        `prism.trust.service_identity`, set by `init_service_identity(<name>)` at lifespan startup,
-        and the only names ever passed to it anywhere in the platform are `"origin"` and
-        `"chorus"`. Crystal's process loads a `CrystalIdentity` and reaches mantle with
-        `MANTLE_API_KEY`; the `sign_service_jwt` calls that live in the crystal REPOSITORY are
-        chorus-host code (`crystal/push.py` calls `init_service_identity("chorus")` itself). A
-        repository path is not a runtime identity, and reading one for the other is how two grants
-        to non-existent principals survived.
-
-        If either becomes a real signing service, the change that makes it one adds an
-        `init_service_identity` call — and that is the change that may delete its line here.
-        """
+    def test_crystal_and_lumen_read_no_person_record(self):
+        """Crystal signs as itself (`CrystalIdentity`) and is verified (review 21), and Lumen signs
+        its exchange with its own key; neither may read person records. Named explicitly, because
+        adding a name to both lists satisfies the equality rule above."""
         from origin.routers.auth_router import _PLATFORM_SERVICES
         from origin.services.auth_verifier import PLATFORM_ISSUERS
 
-        # `lumen` left this list on 2026-10-19: it signs its delegation exchange with its own key
-        # (`ServerAuth.sign_exchange_jwt`), and stays out of `_PLATFORM_SERVICES` (checked above).
-        for name in ("crystal",):
-            assert name not in PLATFORM_ISSUERS, (
-                f"{name!r} is back in PLATFORM_ISSUERS — nothing calls "
-                f"init_service_identity({name!r}), so it cannot sign a verifiable token.")
+        assert "crystal" in PLATFORM_ISSUERS
+        for name in ("crystal", "lumen"):
             assert name not in _PLATFORM_SERVICES, (
-                f"{name!r} is back in _PLATFORM_SERVICES — a person-record grant to a principal "
-                f"that cannot exist.")
+                f"{name!r} is in _PLATFORM_SERVICES: it would read every person's record")
 
     def test_the_allowlist_is_not_derived_from_the_trust_anchors(self):
         """Authentication must not stand in for authorization.
@@ -265,11 +246,16 @@ class TestPersonLookupNamesTheSubject:
 
     @staticmethod
     def _subject_claims(claims):
-        """Stub the subject-token verification with the claims a real token would carry."""
+        """Stub the subject-token verification with the claims a real token would carry: a
+        person's access token is addressed to Origin's issuer (review 22), unless a case says
+        otherwise."""
         from unittest.mock import patch
 
+        from origin import config
         from origin.routers import auth_router
 
+        if isinstance(claims, dict) and "aud" not in claims:
+            claims = {**claims, "aud": config.AUTHORITY_ISSUER}
         return patch.object(auth_router, "verify_token", return_value=claims)
 
     # -- the default: today's behaviour, plus a record of it ------------------
@@ -410,7 +396,7 @@ class TestPersonLookupNamesTheSubject:
         self, db_client, person_id, as_platform, monkeypatch
     ):
         self._set_flag(monkeypatch, False)
-        with self._subject_claims({"aud": "origin"}):
+        with self._subject_claims({"principal_type": "user"}):
             resp = db_client.get(
                 f"/internal/persons/{person_id}", headers={"X-Subject-Token": "nosub.jwt"}
             )
@@ -428,7 +414,7 @@ class TestPersonLookupNamesTheSubject:
         assert src.count("_NON_USER_PRINCIPALS = {") == 1, (
             "the non-user principal list has been forked; the two routes can now disagree"
         )
-        assert auth_router._NON_USER_PRINCIPALS == {"service", "server", "delegation"}
+        assert auth_router._NON_USER_PRINCIPALS == {"service", "server", "delegation", "mcp_client"}
 
     # -- the flag on ---------------------------------------------------------
     def test_on_and_absent_is_refused(self, db_client, person_id, as_platform, monkeypatch):
@@ -822,13 +808,14 @@ class TestPasskeyLoginOptionsIsNotAnOracle:
         monkeypatch.setattr(passkey_service, "_decoy_secret", lambda: b"")
         assert passkey_service.get_decoy_authentication_options(self._UNKNOWN) is None
 
-    def test_the_decoy_key_is_one_the_node_actually_loads(self):
+    def test_the_decoy_key_is_one_the_node_actually_loads(self, client):
         """The branch above must stay unreachable on a serving node.
 
         `_decoy_secret` derives from `key_manager.get_nonce_secret()`, which `main.lifespan` loads
         from disk and which raises on a missing file — so it is present wherever Origin serves at
         all. Deriving from anything Origin populates lazily would send every passkey login, real
-        and decoy, to the 503.
+        and decoy, to the 503. `client` boots the node (its lifespan loads the secret), so this
+        holds whatever ran before it.
         """
         from origin.services import passkey_service
 

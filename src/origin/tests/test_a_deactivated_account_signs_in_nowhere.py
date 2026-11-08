@@ -73,10 +73,17 @@ def test_a_deactivated_account_cannot_refresh(db_client):
     _make_person("d2@example.com")
     refresh = _login(db_client, "d2@example.com").json()["refresh_token"]
     _admin("person", "deactivate", "d2@example.com", "--reason", "r")
-    r = db_client.post("/auth/token", data={"grant_type": "refresh_token", "refresh_token": refresh})
+    r = db_client.post("/auth/token", data={"grant_type": "refresh_token", "refresh_token": refresh,
+                                            "client_id": _rc(refresh)})
     assert r.status_code == 403
     _admin("person", "reactivate", "d2@example.com")
-    r = db_client.post("/auth/token", data={"grant_type": "refresh_token", "refresh_token": refresh})
+    # Deactivation revoked every refresh token of theirs: reactivated, they sign in again.
+    r = db_client.post("/auth/token", data={"grant_type": "refresh_token", "refresh_token": refresh,
+                                            "client_id": _rc(refresh)})
+    assert r.status_code == 400
+    fresh = _login(db_client, "d2@example.com").json()["refresh_token"]
+    r = db_client.post("/auth/token", data={"grant_type": "refresh_token", "refresh_token": fresh,
+                                            "client_id": _rc(fresh)})
     assert r.status_code == 200
 
 
@@ -130,3 +137,8 @@ def test_the_scheme_names_the_algorithm_and_cost_and_nothing_else():
     assert scheme(None) == "none"
     assert scheme("pbkdf2_sha256$600000$c2FsdA$aGFzaA") == "pbkdf2_sha256/600000"
     assert scheme("$2b$12$abcdefghijklmnopqrstuv") == "unreadable"
+
+
+def _rc(token):
+    from origin.tests.authority_fixtures import refresh_client
+    return refresh_client(token)

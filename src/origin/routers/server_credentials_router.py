@@ -15,7 +15,7 @@ import secrets as _secrets
 from typing import List
 
 import bcrypt
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.orm import Session
 
 from origin import config
@@ -29,31 +29,21 @@ from origin.api.server_credential import (
 from origin.db import server_credentials as db_server_creds
 from origin.db.session import get_db
 from origin.models.server_credential import ServerCredential
-from origin.services.dependencies import AuthContext, get_auth
+from origin.services import operator_console
+from origin.services.dependencies import AuthContext
 
-def _require_operator(auth: AuthContext = Depends(get_auth)) -> AuthContext:
-    """Only the platform operator may manage server credentials.
+async def _require_operator(request: Request, db: Session = Depends(get_db),
+                            who: str = Depends(operator_console.get_console_auth)) -> AuthContext:
+    """Only the platform operator, on the operator console with a fresh passkey step-up for this
+    very request (`oracle_router._require_operator`), may manage server credentials.
 
-    Applied as a router-level dependency rather than per-handler: gating once here, rather than on
-    each of the six handlers individually, makes the safe path the default for any route added
-    later. Mirrors `system_router._platform_admin_user_id`, this codebase's canonical operator
-    gate.
+    A credential minted here outlives every token, and the operator's ordinary access token
+    reaches Mantle, so that token opens nothing here. Applied as a router-level dependency, so a
+    route added later is gated by default. Resolved at call time, so the console's own guard is
+    the one that runs."""
+    from origin.routers import oracle_router
 
-    The check requires both `principal_type == "user"` and `actor is None`. `resolve_auth`
-    normalizes a delegation to `principal_type="user"` with `actor=act.sub`, so a delegation
-    carrying `sub=<operator_id>` is otherwise indistinguishable from the operator's own session. A
-    delegated machine token must not stand in for the operator here: the credentials this router
-    mints and rotates outlive the delegation that obtained them, so revoking the delegation would
-    not revoke the credential.
-    """
-    from origin.services.platform_settings_service import settings as platform_settings
-
-    if auth.principal_type != "user" or auth.actor is not None or not auth.user_id:
-        raise HTTPException(status_code=403, detail="Platform admin access required")
-    operator_id = platform_settings.get("platform.operator_id")
-    if operator_id and str(auth.user_id) == str(operator_id):
-        return auth
-    raise HTTPException(status_code=403, detail="Platform admin access required")
+    return await oracle_router._require_operator(request, db, who)
 
 
 router = APIRouter(prefix="/auth/clients", tags=["OAuth Clients"],
@@ -92,7 +82,7 @@ def _entity_to_response(entity: ServerCredential) -> ServerCredentialResponse:
 def register_server_credential(
     payload: ServerCredentialCreate,
     db: Session = Depends(get_db),
-    auth: AuthContext = Depends(get_auth),
+    auth: AuthContext = Depends(_require_operator),
 ):
     if not auth.user_id:
         raise HTTPException(status_code=401, detail="Authentication required")
@@ -135,7 +125,7 @@ def register_server_credential(
 @router.get("", response_model=List[ServerCredentialResponse])
 def list_server_credentials(
     db: Session = Depends(get_db),
-    auth: AuthContext = Depends(get_auth),
+    auth: AuthContext = Depends(_require_operator),
 ):
     if not auth.user_id:
         raise HTTPException(status_code=401, detail="Authentication required")
@@ -146,7 +136,7 @@ def list_server_credentials(
 def get_server_credential(
     client_id: str,
     db: Session = Depends(get_db),
-    auth: AuthContext = Depends(get_auth),
+    auth: AuthContext = Depends(_require_operator),
 ):
     if not auth.user_id:
         raise HTTPException(status_code=401, detail="Authentication required")
@@ -161,7 +151,7 @@ def update_server_credential(
     client_id: str,
     payload: ServerCredentialUpdate,
     db: Session = Depends(get_db),
-    auth: AuthContext = Depends(get_auth),
+    auth: AuthContext = Depends(_require_operator),
 ):
     if not auth.user_id:
         raise HTTPException(status_code=401, detail="Authentication required")
@@ -178,7 +168,7 @@ def update_server_credential(
 def delete_server_credential_endpoint(
     client_id: str,
     db: Session = Depends(get_db),
-    auth: AuthContext = Depends(get_auth),
+    auth: AuthContext = Depends(_require_operator),
 ):
     if not auth.user_id:
         raise HTTPException(status_code=401, detail="Authentication required")
@@ -193,7 +183,7 @@ def delete_server_credential_endpoint(
 def rotate_server_credential(
     client_id: str,
     db: Session = Depends(get_db),
-    auth: AuthContext = Depends(get_auth),
+    auth: AuthContext = Depends(_require_operator),
 ):
     if not auth.user_id:
         raise HTTPException(status_code=401, detail="Authentication required")

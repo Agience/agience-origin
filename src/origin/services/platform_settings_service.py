@@ -83,6 +83,27 @@ def is_reserved_key(key: str) -> bool:
     return key.lower().startswith(RESERVED_PREFIX)
 
 
+#: The settings the settings routes may change on the operator's ordinary token: the title a page
+#: shows, nothing else. A mail's logo and sender name are the console's too: whoever sets them can
+#: make a sign-in or reset mail look like another sender's. Every other key, a key added later
+#: included, is the console's.
+HARMLESS_SETTINGS = frozenset({"branding.title"})
+
+#: Named for the reader; every key not in `HARMLESS_SETTINGS` is the console's anyway.
+CONSOLE_KEYS = frozenset({"platform.operator_id", "platform.authority_collection_id"})
+CONSOLE_PREFIXES = ("oracle.", "auth.", "branding.", "email.", "platform.")
+
+
+def is_console_key(key: str) -> bool:
+    """Changed only through the operator console with a passkey step-up
+    (`PUT /oracle/settings/{key}`), never by the settings routes: every setting but the harmless
+    few. The operator's ordinary token reaches Mantle, so it changes nothing that decides
+    sign-in, identity linking, return URIs, allow-lists, the issuer's facets, the OIDC providers
+    or the mail that carries sign-in codes. A custody key is no setting at all."""
+    k = key.lower()
+    return not is_reserved_key(k) and k not in HARMLESS_SETTINGS
+
+
 def is_secret_key(key: str) -> bool:
     """Whether this setting must be stored encrypted. Server-side, not caller-supplied."""
     if is_reserved_key(key):

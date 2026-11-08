@@ -8,10 +8,11 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import Request, APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
+from origin.services import refresh_tokens as _refresh_tokens
 from origin import config
 from origin.db import persons as db_persons
 from origin.db.session import get_db
@@ -96,26 +97,63 @@ def _require_interactive_user(auth: AuthContext) -> str:
 # ---------------------------------------------------------------------------
 # Registration (requires auth)
 # ---------------------------------------------------------------------------
+async def _operator_guard(request: Request, db: Session, user_id: str, *, enrolling: bool,
+                          final: bool) -> bool:
+    """The operator's account: its passkeys open the operator console, so changing them needs
+    the console (`operator_console.require_operator_account_change`)."""
+    from origin.services import operator_console
+    from origin.services.platform_settings_service import settings as platform_settings
+
+    op = platform_settings.get("platform.operator_id")
+    if op and str(op) == str(user_id):
+        operator_console.require_operator_account_change(
+            request, db, str(op), await request.body(), enrolling=enrolling, final=final)
+        return True
+    return False
+
+
+async def _person_guard(request: Request, db: Session, user_id: str) -> None:
+    """Anyone else's passkeys: a fresh step-up by a method the person already has, bound to this
+    request (`services.person_step_up`). An access token alone enrols or removes nothing."""
+    from origin.services import person_step_up
+
+    await person_step_up.require(request, db, str(user_id))
+
+
 @passkey_router.post("/register-options", response_model=RegisterOptionsResponse)
 async def get_register_options(
+    request: Request,
     auth: AuthContext = Depends(get_auth),
     db: Session = Depends(get_db),
 ):
     _require_interactive_user(auth)
+    operator = await _operator_guard(request, db, auth.user_id, enrolling=True, final=False)
+    if not operator:
+        # The registration challenge is issued only after the step-up, and `register-complete`
+        # accepts only that challenge, so the step-up here covers the whole enrolment.
+        await _person_guard(request, db, auth.user_id)
     person = db_persons.get_by_id(db, auth.user_id)
     if person is None:
         raise HTTPException(status_code=404, detail="User not found")
-    options = passkey_service.get_registration_options(db, str(person.id), person.email or "")
+    options = passkey_service.get_registration_options(db, str(person.id), person.email or "",
+                                                       operator=operator)
+    db.commit()               # the challenge is kept, or register-complete has nothing to check
     return RegisterOptionsResponse(options=options)
 
 
 @passkey_router.post("/register-complete", response_model=RegisterCompleteResponse)
 async def complete_registration(
+    request: Request,
     body: RegisterCompleteRequest,
     auth: AuthContext = Depends(get_auth),
     db: Session = Depends(get_db),
 ):
     _require_interactive_user(auth)
+    operator = await _operator_guard(request, db, auth.user_id, enrolling=True, final=True)
+    if not operator:
+        # The credential is bound to Origin's own session: registered only where its options were.
+        from origin.services import origin_session
+        origin_session.require(request, db, str(auth.user_id))
     try:
         result = passkey_service.verify_registration(
             db=db,
@@ -123,6 +161,7 @@ async def complete_registration(
             credential=body.credential,
             challenge=body.challenge,
             device_name=body.device_name,
+            operator=operator,
         )
     except ValueError as exc:
         db.commit()  # keep the challenge consumed
@@ -195,9 +234,14 @@ async def complete_login(
         person, client_id=getattr(config, "PLATFORM_CLIENT_ID", "platform"),
     )
     access_token = create_jwt_token(user_data)
-    refresh_token = create_jwt_token({**user_data, "token_type": "refresh"}, expires_hours=24 * 30)
+    refresh_token = _refresh_tokens.issue(db, user_data)
     db.commit()
-    return LoginCompleteResponse(access_token=access_token, refresh_token=refresh_token)
+    from fastapi.responses import JSONResponse
+    from origin.services import origin_session
+    response = JSONResponse(LoginCompleteResponse(access_token=access_token,
+                                                  refresh_token=refresh_token).model_dump())
+    origin_session.start(db, response, str(person.id))
+    return response
 
 
 # ---------------------------------------------------------------------------
@@ -215,11 +259,14 @@ async def list_passkeys(
 
 @passkey_router.delete("/credentials/{credential_id}")
 async def delete_passkey(
+    request: Request,
     credential_id: str,
     auth: AuthContext = Depends(get_auth),
     db: Session = Depends(get_db),
 ):
     _require_interactive_user(auth)
+    if not await _operator_guard(request, db, auth.user_id, enrolling=False, final=True):
+        await _person_guard(request, db, auth.user_id)
     deleted = passkey_service.delete_credential(db, auth.user_id, credential_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="Credential not found")

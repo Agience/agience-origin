@@ -17,7 +17,7 @@ from urllib.parse import urlparse as _urlparse
 
 from alembic import command
 from alembic.config import Config as AlembicConfig
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response
 from starlette.middleware.sessions import SessionMiddleware
@@ -26,14 +26,13 @@ from starlette.staticfiles import StaticFiles
 from origin import config
 from origin.authority_trust import get_authority_manifest
 from origin.key_manager import (
-    get_jwk_public,
     get_key_id,
     init_encryption_key,
     init_jwt_keys,
     init_nonce_secret,
     init_setup_token,
 )
-from origin.db.session import SessionLocal, build_database_url, init_engine
+from origin.db.session import SessionLocal, build_database_url, get_db, init_engine
 from origin.routers.auth_router import auth_router as auth_router_module
 from origin.routers.auth_router import internal_router as auth_internal_router
 from origin.routers.auth_router import root_router as auth_root_router
@@ -43,7 +42,8 @@ from origin.routers.system_router import system_router
 from origin.routers.server_credentials_router import router as server_credentials_router
 from origin.routers.setup_router import setup_router
 from origin.routers.oracle_router import oracle_router
-from origin.routers.key_share_router import key_share_router
+from origin.routers.key_share_router import delegation_router, key_share_router
+from origin.routers.authority_router import authority_router
 from origin.services import account_notify
 from origin.services import manifest as manifest_loader
 from origin.services.dependencies import KdfAdmissionRefused, kdf_admission_refused_handler
@@ -365,10 +365,33 @@ def _refuse_multiple_workers() -> None:
                 "models/passkey_challenge.py is the pattern that already did it." % (name, n))
 
 
+def _refuse_app_at_origin_s_own_origin() -> None:
+    """On https, the web app (`APP_URI`) is never at Origin's own origin (`ORIGIN_URI`,
+    `AUTHORITY_ISSUER`). Origin's session routes trust both as pages that may make an authority
+    change, its sign-in page alone starts a session, and its pages hand tokens back by origin; one
+    origin serving both would let the app's scripts act as Origin's own page."""
+    from urllib.parse import urlparse
+
+    def parts(u):
+        p = urlparse(u or "")
+        if p.scheme not in ("http", "https") or not p.hostname:
+            return None
+        return p.scheme, p.hostname.lower().rstrip("."), p.port or (443 if p.scheme == "https"
+                                                                     else 80)
+
+    app = parts(getattr(config, "APP_URI", ""))
+    own = {parts(getattr(config, "ORIGIN_URI", "")), parts(getattr(config, "AUTHORITY_ISSUER", ""))}
+    if app is None or app[0] != "https" or app not in own:
+        return
+    raise RuntimeError("Origin refuses to start: APP_URI %r is Origin's own origin. The web app "
+                       "and Origin are served from different origins." % config.APP_URI)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Before anything else: this service is only correct single-process. See the function.
     _refuse_multiple_workers()
+    _refuse_app_at_origin_s_own_origin()
     # Load this service's own `.env` at startup (defaults only; the environment already set wins).
     # At startup, not module import: config is a shared module, and importing it (e.g. in a test)
     # does not pull a `.env` beside it into the process.
@@ -376,7 +399,8 @@ async def lifespan(app: FastAPI):
     # Key material from disk (must exist; the installer or a key-init step writes it)
     # kid="origin-1" matches the kid published in the authority manifest
     # (key init writes origin's JWKS with that kid) and the service_identity kid.
-    init_jwt_keys(key_id="origin-1")
+    from origin.services import signing_keys as _signing_keys
+    init_jwt_keys(key_id=_signing_keys.current_kid())   # `origin-1` until a rollover names another
     init_encryption_key()
     init_nonce_secret()
     init_setup_token()
@@ -465,11 +489,14 @@ def _allowed_origins() -> list[str]:
     """
     raw = os.getenv("ORIGIN_ALLOWED_ORIGINS", "").strip()
     if raw:
-        configured = [_as_origin(o) for o in raw.split(",")]
+        # Never Mantle's own address, even when listed by hand.
+        configured = [_as_origin(o) for o in config.without_mantle(raw)]
         return sorted({o for o in configured if o})
 
     derived = [config.AUTHORITY_ISSUER, config.ORIGIN_URI, config.FACET_URI, *config.FACET_URIS]
-    return sorted({o for o in (_as_origin(u) for u in derived) if o})
+    # Never Mantle's own address: it serves pages, and is no first-party surface of Origin's.
+    mantle = _as_origin(getattr(config, "MANTLE_URI", "") or "")
+    return sorted({o for o in (_as_origin(u) for u in derived) if o and o != mantle})
 
 
 _ALLOWED_ORIGINS = _allowed_origins()
@@ -481,6 +508,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+# The session route for authority changes answers the web app with credentials (review 12).
+from origin.routers.authority_session_router import SessionCORS  # noqa: E402
+app.add_middleware(SessionCORS)
 
 
 def _read_session_secret() -> str:
@@ -532,7 +562,42 @@ app.add_middleware(
     secret_key=_read_session_secret(),
     max_age=12 * 60 * 60,
     https_only=_session_cookie_is_https_only(),
+    # `__Host-` on https (review 13, M1): Secure, `Path=/`, no `Domain`, so no sibling host can
+    # set one this would read.
+    session_cookie="__Host-session" if _session_cookie_is_https_only() else "session",
 )
+
+# Cookie tossing (review 13, M1): a request carrying two values for any cookie Origin sets is
+# refused before anything reads one. Added after the session middleware, so it runs first.
+from origin.services.origin_session import RefuseTossedCookies  # noqa: E402
+app.add_middleware(RefuseTossedCookies)
+
+
+#: Every page Origin serves (review 11, M7): its own scripts only, nothing inline, never framed.
+#: Styles may be inline (the pages' `style=` attributes); a style cannot run script.
+PAGE_CSP = ("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+            "img-src 'self' data:; font-src 'self' data:; connect-src 'self'; "
+            "frame-ancestors 'none'; base-uri 'none'; form-action 'self'; object-src 'none'")
+
+
+_forwarded = config.forwarded_trust_problem()
+if _forwarded:
+    raise RuntimeError(_forwarded)
+
+
+@app.middleware("http")
+async def _pages_are_never_framed(request: Request, call_next):
+    """Every HTML response carries a CSP that forbids framing and inline script, and is not
+    framable by older browsers either (`X-Frame-Options: DENY`): `/login`, `/account`, `/passkey`,
+    `/auth/authorize`, the re-authentication pages and every file under `/web/`. A page that set a
+    stricter policy of its own keeps it."""
+    response = await call_next(request)
+    ctype = response.headers.get("content-type", "")
+    if ctype.startswith("text/html"):
+        if "content-security-policy" not in response.headers:
+            response.headers["Content-Security-Policy"] = PAGE_CSP
+        response.headers.setdefault("X-Frame-Options", "DENY")
+    return response
 
 
 # ---------------------------------------------------------------------------
@@ -569,6 +634,10 @@ app.include_router(system_router)
 app.include_router(oracle_router)
 # Origin's share of each Mantle master key, for Mantle's service identity alone.
 app.include_router(key_share_router)
+app.include_router(delegation_router)
+app.include_router(authority_router)
+from origin.routers.authority_session_router import authority_session_router  # noqa: E402 (review 12)
+app.include_router(authority_session_router)
 
 
 # ---------------------------------------------------------------------------
@@ -653,13 +722,19 @@ def account_page() -> Response:
 
 
 @app.get("/logout", include_in_schema=False)
-def logout_page(request: Request) -> Response:
-    """Ends Origin's session for this browser: the server session here, and the stored token in the
-    page (`logout.html`), which then returns only to an address Origin lists (`app_uri`,
-    `sso_return_uris`). Without both, a service provider's own sign-out is undone at once: Origin
-    still holds a session and hands it a new token on the next visit."""
+def logout_page(request: Request, db=Depends(get_db)) -> Response:
+    """Ends Origin's session for this browser: the sign-in flow's server session, Origin's own
+    session (the cookie every authority change and the web app's token for Mantle are made in,
+    revoked and deleted), and the stored token in the page (`logout.html`), which then returns only
+    to an address Origin lists (`app_uri`, `sso_return_uris`). Without all of them, a service
+    provider's own sign-out is undone at once, and an open app tab goes on acting in the session."""
+    from origin.services import origin_session
+
     request.session.clear()
-    return _page("logout.html")
+    response = _page("logout.html")
+    origin_session.end(request, db, response)
+    db.commit()
+    return response
 
 
 @app.get("/reset-password", include_in_schema=False)
@@ -674,6 +749,25 @@ def verify_email_page() -> Response:
     (`/verify-email?sent=1`). This is the step that marks an email verified, which the
     identity-linking rule in `person_service` requires before it links an identity."""
     return _page("verify-email.html")
+
+
+#: The passkey page's policy: everything from Origin itself, nothing inline, never framed.
+PASSKEY_PAGE_CSP = ("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+                    "img-src 'self' data:; "
+                    "connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; "
+                    "form-action 'self'")
+
+
+@app.get("/passkey", include_in_schema=False)
+def passkey_page() -> Response:
+    """Every passkey ceremony: sign-in, adding and removing a passkey behind a fresh step-up, and
+    the operator console's sign-in. Origin is the relying party and accepts an assertion only from
+    its own address, so these run here and on no other site (review 7, F1)."""
+    out = _page("passkey.html")
+    out.headers["Content-Security-Policy"] = PASSKEY_PAGE_CSP
+    out.headers["Cache-Control"] = "no-store"
+    out.headers["Referrer-Policy"] = "no-referrer"
+    return out
 
 
 # The assets those pages reference, mounted under a prefix rather than at `/` — so a future
@@ -704,7 +798,8 @@ def version() -> dict:
 # with no key source at all.
 @app.get("/.well-known/jwks.json", include_in_schema=False)
 def jwks_root() -> dict:
-    return {"keys": [get_jwk_public()]}
+    from origin.services import signing_keys
+    return {"keys": signing_keys.published_jwks()}
 
 
 # Origin is the identity authority and owns the /.well-known namespace

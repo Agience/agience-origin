@@ -81,8 +81,11 @@ def test_password_login_states_the_stored_fact(db_client, monkeypatch, verified)
     _assert_carries(r.json(), verified)
 
 
-def test_password_registration_without_required_verification_is_verified(db_client, monkeypatch):
-    """Where no confirmation is required the account is created verified, and the token says so."""
+def test_password_registration_without_required_verification_is_not_verified(db_client,
+                                                                             monkeypatch):
+    """Where no confirmation is required the account signs in at once, but a password proves
+    nothing about the mailbox: the address is stored unverified, and the token says so (review 14).
+    Only the link, an OTP sign-in or a provider's assertion verifies it."""
     import origin.routers.auth_router as ar
 
     monkeypatch.setattr(ar, "email_verification_required", lambda _email: False)
@@ -90,7 +93,7 @@ def test_password_registration_without_required_verification_is_verified(db_clie
                        json={"username": "reg@example.com", "email": "reg@example.com",
                              "password": _PW})
     assert r.status_code == 200, r.text
-    _assert_carries(r.json(), True)
+    _assert_carries(r.json(), False)
 
 
 def test_a_confirmed_link_signs_in_with_a_verified_token(db_client):
@@ -177,7 +180,8 @@ def test_the_code_grant_states_the_stored_fact_and_a_refresh_carries_it(db_clien
     _assert_carries(body, verified)
 
     r = db_client.post("/auth/token",
-                       data={"grant_type": "refresh_token", "refresh_token": body["refresh_token"]})
+                       data={"grant_type": "refresh_token", "refresh_token": body["refresh_token"],
+                             "client_id": _rc(body["refresh_token"])})
     assert r.status_code == 200, r.text
     assert _claims(r.json()["access_token"])["email_verified"] is verified
 
@@ -205,3 +209,8 @@ def test_the_setup_wizard_operator_token_states_the_stored_fact(db_client, monke
     })
     assert r.status_code == 200, r.text
     _assert_carries(r.json(), _stored_verified("op@example.com"))
+
+
+def _rc(token):
+    from origin.tests.authority_fixtures import refresh_client
+    return refresh_client(token)

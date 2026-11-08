@@ -25,6 +25,7 @@ from origin import config
 from origin.db.session import get_db
 from origin.services.dependencies import AuthContext, get_auth
 from origin.services.platform_settings_service import (
+    is_console_key,
     is_reserved_key,
     is_secret_key as platform_settings_is_secret_key,
     settings as platform_settings,
@@ -171,6 +172,9 @@ async def update_settings(
     for item in body.settings:
         if is_reserved_key(item.key):
             raise HTTPException(status_code=400, detail="custody.* keys are not settings")
+        if is_console_key(item.key):
+            raise HTTPException(status_code=403, detail=f"{item.key} is changed only through "
+                                "the operator console")
         # Secrets are masked as None on read, so an unchanged secret comes back
         # empty on a round-trip. Skip those rather than blanking the stored value.
         # Classification is the server's, from the key — not the request.

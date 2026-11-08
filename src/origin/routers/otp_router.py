@@ -11,6 +11,8 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
+
+from origin.services import refresh_tokens as _refresh_tokens
 from origin import config
 from origin.db import persons as db_persons
 from origin.db.session import get_db
@@ -70,9 +72,12 @@ async def request_otp(
 @otp_router.post("/verify", response_model=OTPVerifyResponse,
                  dependencies=[Depends(kdf_admission, scope="function")])
 async def verify_otp(
+    request: Request,
     body: OTPVerifyBody,
     db: Session = Depends(get_db),
 ):
+    """A code mailed to the address signs its person in; on Origin's own page the sign-in also
+    starts their Origin session (`auth_router._signed_in_on_page`)."""
     email = otp_service.normalize_email(body.email)
     person_id = await otp_service.verify_otp(db, email, body.code)
     if not person_id:
@@ -91,6 +96,8 @@ async def verify_otp(
         person, client_id=getattr(config, "PLATFORM_CLIENT_ID", "platform"),
     )
     access_token = create_jwt_token(user_data)
-    refresh_token = create_jwt_token({**user_data, "token_type": "refresh"}, expires_hours=24 * 30)
+    refresh_token = _refresh_tokens.issue(db, user_data)
     db.commit()
-    return OTPVerifyResponse(access_token=access_token, refresh_token=refresh_token)
+    from origin.routers.auth_router import _signed_in_on_page
+    return _signed_in_on_page(request, db, str(person.id), OTPVerifyResponse(
+        access_token=access_token, refresh_token=refresh_token).model_dump())

@@ -25,9 +25,10 @@ function storage(initial) {
 }
 
 // A page at `href`, sharing `local` (one browser) and holding its own `session` (one tab).
-function page(href, { local, session, fetchBody, now } = {}) {
+function page(href, { local, session, fetchBody, now, routes } = {}) {
   const url = new URL(href);
   const navigations = [];
+  const fetched = [];
   const ctx = {
     localStorage: local || storage(),
     sessionStorage: session || storage(),
@@ -44,7 +45,15 @@ function page(href, { local, session, fetchBody, now } = {}) {
     URL, URLSearchParams, JSON, Array, Uint8Array, Map,
     crypto: globalThis.crypto,
     atob: (s) => Buffer.from(s, "base64").toString("binary"),
-    fetch: async () => ({ ok: true, status: 200, json: async () => (fetchBody || {}) }),
+    fetch: async (p, init) => {
+      fetched.push([p, init && init.body ? JSON.parse(init.body) : null]);
+      if (routes && routes[p]) {
+        const r = routes[p];
+        return { ok: r.status < 400, status: r.status, json: async () => r.body };
+      }
+      return { ok: true, status: 200, json: async () => (fetchBody || {}) };
+    },
+    fetched,
     Date: now === undefined ? Date : class extends Date {
       constructor(...a) { super(...(a.length ? a : [now()])); }
       static now() { return now(); }
@@ -194,13 +203,15 @@ test("register stashes the nonce it sent; the link tab reads it, restores the re
   assert.match(nonce, /^[0-9a-f]{64}$/);
   run(reg, `stashVerification(${JSON.stringify(nonce)}, "me@example.com")`);
 
-  const link = page("https://origin.agience.ai/verify-email?token=T", { local });
+  const link = page("https://origin.agience.ai/verify-email?token=T", { local,
+    fetchBody: { sso_return_uris: LISTED, app_uri: SP } });
   assert.equal(run(link, "readNonce()"), nonce, "the tab the mail opens sees the same nonce");
   assert.equal(run(link, `restoreReturn(${JSON.stringify(LISTED)})`), true);
   assert.equal(link.location.href, "https://origin.agience.ai/verify-email?redirect_uri=https%3A%2F%2Fmy.agience.ai%2F&state=S1");
   assert.equal(local.getItem("agience.verify"), null, "restoring consumes the stash, nonce included");
-  run(link, 'finishLogin("ACCESS")');
-  assert.deepEqual(link.navigations, [["replace", "https://my.agience.ai/#access_token=ACCESS&state=S1"]]);
+  return Promise.resolve(run(link, 'finishLogin("ACCESS")')).then(() => {
+    assert.deepEqual(link.navigations, [["replace", "https://my.agience.ai/#access_token=ACCESS&state=S1"]]);
+  });
 });
 
 test("two nonces are never the same", () => {
@@ -260,4 +271,44 @@ test("continue goes to a live listed return, else to app_uri, else nowhere", asy
   assert.equal(await run(page("https://origin.agience.ai/account", { fetchBody: { app_uri: SP } }), "continueHref()"), SP);
   assert.equal(await run(page("https://origin.agience.ai/account", { fetchBody: { app_uri: "javascript:alert(1)" } }), "continueHref()"), null);
   assert.equal(await run(page("https://origin.agience.ai/account", { fetchBody: { app_uri: null } }), "continueHref()"), null);
+});
+
+// ── what a sign-in on Origin's page hands a service provider (review of the local-check fixes) ──
+// Only a listed return URI is handed anything. The web app (`app_uri`) gets the person's token; any
+// other listed SP gets a delegation Origin narrows to it in the person's Origin session (review 8,
+// R3), or nothing. Mantle's origin is never listed, so it is never handed a token.
+const handoff = (href, routes) => page(href, { routes: Object.assign({
+  "/auth/providers": { status: 200, body: { sso_return_uris: LISTED, app_uri: SP } } }, routes || {}) });
+const at = (rd) => "https://origin.agience.ai/login?redirect_uri=" + encodeURIComponent(rd) + "&state=S1";
+
+test("the web app, listed, gets the person's token", async () => {
+  const ctx = handoff(at(SP));
+  await run(ctx, 'finishLogin("FULL")');
+  assert.deepEqual(ctx.navigations, [["replace", SP + "#access_token=FULL&state=S1"]]);
+});
+
+for (const rd of ["https://mantle.agience.ai/", "https://user-content.agience.ai/x"]) {
+  test(`an unlisted *.agience.ai return ${rd} is handed nothing`, async () => {
+    const ctx = handoff(at(rd));
+    await run(ctx, 'finishLogin("FULL")');
+    assert.ok(!ctx.navigations.some(([, u]) => u.includes("access_token=")), JSON.stringify(ctx.navigations));
+    assert.deepEqual(ctx.navigations, [["href", "/account"]]);
+  });
+}
+
+test("another listed SP gets a delegation narrowed to it in the session, never the full token", async () => {
+  const lumen = "https://lumen.agience.ai/auth/cb";
+  const ctx = handoff(at(lumen), { "/auth/me/authority/narrow":
+    { status: 200, body: { access_token: "NARROWED" } } });
+  await run(ctx, 'finishLogin("FULL")');
+  assert.deepEqual(ctx.navigations, [["replace", lumen + "#access_token=NARROWED&state=S1"]]);
+  const asked = ctx.fetched.find(([p]) => p === "/auth/me/authority/narrow");
+  assert.deepEqual(asked[1], { audience: "https://lumen.agience.ai" });
+});
+
+test("another listed SP Origin issues no delegation for is handed nothing", async () => {
+  const ctx = handoff(at("https://lumen.agience.ai/auth/cb"), { "/auth/me/authority/narrow":
+    { status: 400, body: { detail: "audience is not a narrow audience" } } });
+  await run(ctx, 'finishLogin("FULL")');
+  assert.deepEqual(ctx.navigations, [["href", "/account"]]);
 });

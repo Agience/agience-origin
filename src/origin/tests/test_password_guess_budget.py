@@ -482,7 +482,9 @@ def test_a_successful_login_clears_what_the_failures_charged(anon_client):
     ), patch(
         "origin.routers.auth_router.person_service.record_person_event"
     ), patch(
-        "origin.routers.auth_router.create_jwt_token", side_effect=["a.jwt", "r.jwt"]
+        "origin.routers.auth_router.create_jwt_token", return_value="a.jwt",
+    ), patch(
+        "origin.routers.auth_router._refresh_tokens.issue", return_value="r.jwt",
     ), patch(
         "origin.routers.auth_router.verify_password", side_effect=[False] * (cap - 1) + [True]
     ):

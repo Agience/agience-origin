@@ -24,10 +24,9 @@ class Person(Base):
     name = Column(String(256), nullable=False, server_default="")
     picture = Column(Text, nullable=True)
     password_hash = Column(Text, nullable=True)
-    # Defaults to verified (true) so identity-proven paths (OIDC, OTP, passkey,
-    # bootstrap) and existing rows are verified; password registration sets it
-    # false explicitly when email verification is required.
-    email_verified = Column(Boolean, nullable=False, server_default=text("1"))
+    # Unverified unless a path proved the address and says so (review 15, migration 0022): the
+    # verification link, an OTP sign-in, a provider's assertion, or the operator's bootstrap.
+    email_verified = Column(Boolean, nullable=False, default=False, server_default=text("0"))
     preferences = Column(JSON, nullable=False, default=dict)
     # Set: the account signs in nowhere and is mailed nothing (`auth_service.refuse_if_deactivated`).
     # Nothing else about the account changes, so clearing it restores the account exactly.

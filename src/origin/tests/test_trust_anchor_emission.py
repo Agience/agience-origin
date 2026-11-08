@@ -54,16 +54,18 @@ def test_the_kid_matches_what_main_actually_signs_with() -> None:
     constant is what drifts.
     """
     from origin import main
+    from origin.services import signing_keys
 
     source = Path(main.__file__).resolve().read_text(encoding="utf-8")
-    found = re.search(r'init_jwt_keys\(key_id=["\']([^"\']+)["\']\)', source)
+    found = re.search(r"init_jwt_keys\(key_id=_signing_keys\.current_kid\(\)\)", source)
     assert found, (
-        "no `init_jwt_keys(key_id=...)` call found in main.py — this test can no longer tell what "
-        "Origin signs with, so it cannot certify the emitted anchor")
-    assert found.group(1) == emit.DEFAULT_KID, (
-        f"main.py signs with kid={found.group(1)!r} but origin-emit-anchor defaults to "
-        f"{emit.DEFAULT_KID!r}. Every token Origin issues would be rejected by a peer that "
-        "installed this anchor, with no error naming the cause.")
+        "main.py no longer signs with `signing_keys.current_kid()`: this test can no longer tell "
+        "what Origin signs with, so it cannot certify the emitted anchor")
+    # Until a rollover names another kid (`origin.kid`), Origin signs with the default.
+    assert signing_keys.DEFAULT_KID == emit.DEFAULT_KID, (
+        f"Origin signs with kid={signing_keys.DEFAULT_KID!r} by default but origin-emit-anchor "
+        f"defaults to {emit.DEFAULT_KID!r}. Every token Origin issues would be rejected by a peer "
+        "that installed this anchor, with no error naming the cause.")
 
 
 def test_the_fragment_is_shaped_the_way_a_peer_reads_it(jwt_keypair, capsys) -> None:

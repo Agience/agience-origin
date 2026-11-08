@@ -20,6 +20,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel, EmailStr
 from sqlalchemy.orm import Session
 
+from origin.services import refresh_tokens as _refresh_tokens
 from origin import config
 from origin.key_manager import delete_setup_token, get_setup_token
 from origin.db import persons as db_persons
@@ -250,6 +251,7 @@ async def complete_setup(
                 "name": person_name,
                 "username": person_name,
                 "password_hash": password_hash,
+                "email_verified": True,      # the operator's own address, on the setup token
             },
         )
         operator_id = str(person.id)
@@ -343,9 +345,7 @@ async def complete_setup(
             roles=["platform:admin"],
         )
         access_token = create_jwt_token(user_data)
-        refresh_token_str = create_jwt_token(
-            {**user_data, "token_type": "refresh"}, expires_hours=24 * 30
-        )
+        refresh_token_str = _refresh_tokens.issue(db, user_data)
         logger.info("Setup completed. Operator: %s (%s)", person_name, operator_id)
     else:
         logger.info("Setup completed. Operator captured on first OAuth sign-in.")

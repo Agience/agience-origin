@@ -24,6 +24,13 @@ from fastapi.routing import APIRoute
 
 from origin.main import app
 from origin.services.dependencies import get_auth
+from origin.services.operator_console import get_console_auth
+
+#: The authenticators. `get_auth` everywhere; `get_console_auth` (the operator console's own token,
+#: an audience no other service receives) on `/oracle/*` alone, which by decision (John,
+#: 2026-11-01) must not accept an ordinary access token. `_require_operator` is still not one: it
+#: is the authorization and step-up on top of the console's authentication.
+AUTHENTICATORS = {get_auth, get_console_auth}
 
 
 # =============================================================================
@@ -43,6 +50,38 @@ _SETUP = (
 _PROBE = "liveness/build identity; touches no store and discloses no identity"
 
 PUBLIC = {
+    # A person's re-authentication at Origin's own pages (`services.person_step_up`): the ticket
+    # names the request, `start` only sends the browser on to the ordinary sign-in, and `complete`
+    # proves the ticket only with a sign-in code Origin minted for it and consumes there.
+    ("GET", "/auth/reauth/start"): "a re-authentication's own page; grants nothing",
+    ("GET", "/auth/reauth/complete"): "proven by the sign-in's code, consumed here; mints nothing",
+    ("POST", "/auth/reauth/start"): "the start page's confirm, bound by its form token; leads to a sign-in",
+    ("POST", "/auth/sign-out"): "ends the presented refresh token's own family; the token is the proof",
+    ("POST", "/auth/me/authority/narrow"): "a delegation narrowed in the person's Origin session "
+    "(cookie, custom header, the web app's Origin), never on a bearer (review 23)",
+    ("POST", "/auth/me/authority/mantle-token"): "the token for Mantle, issued in the person's Origin "
+    "session (cookie, custom header, the web app's Origin), never on a bearer (review 23)",
+    ("POST", "/auth/me/authority/entries"): "authenticated by the person's Origin session cookie, "
+                                            "with a custom header and the web app's origin (review 12)",
+    ("POST", "/auth/me/authority/preview"): "what Origin holds about a resource, read in the person's Origin "
+                                            "session cookie, with the custom header and the web app's origin (review 15)",
+    ("POST", "/auth/me/authority/claim"): "an invite claimed by its token in the claimant's Origin session "
+                                          "cookie, with the custom header and the web app's origin",
+    # Review 13: grants and invites from Origin's own record, in the same session as above.
+    ("GET", "/auth/me/authority/grants"): "Origin's record of a resource's grants, shown in the person's "
+                                          "Origin session to a holder of Share or Admin",
+    ("POST", "/auth/me/authority/grants"): "a grant made in the person's Origin session (cookie, custom "
+                                           "header, the web app's origin); Origin mints its id",
+    ("POST", "/auth/me/authority/grants/{grant_id}/change"): "a change to a grant Origin holds, built from "
+                                                             "its own row, in the Origin session",
+    ("POST", "/auth/me/authority/grants/{grant_id}/revoke"): "a revocation of a grant Origin holds, built "
+                                                             "from its own row, in the Origin session",
+    ("POST", "/auth/me/authority/invites"): "an invite Origin makes and mails to the address given, in the "
+                                            "owner's Origin session; the token is in the mail alone",
+    ("POST", "/auth/me/authority/invite-context"): "what an invite is, shown in the opener's Origin "
+                                                   "session; carries nothing that claims it",
+    ("GET", "/auth/not-before"): "the signed not-before list peers enforce: person ids and times only, "
+                                 "public like the JWKS (review 11, M2)",
     ("GET", "/"): _SHELL,
     ("GET", "/account"): _SHELL,
     ("GET", "/login"): _SHELL,
@@ -50,6 +89,7 @@ PUBLIC = {
     # Clears this browser's Origin session and serves the sign-out page; it grants nothing.
     ("GET", "/logout"): _SHELL,
     ("GET", "/verify-email"): _SHELL,
+    ("GET", "/passkey"): _SHELL,
 
     ("GET", "/.well-known/agience"): _DISCOVERY,
     ("GET", "/.well-known/jwks.json"): _DISCOVERY + " — public keys, published on purpose",
@@ -87,6 +127,9 @@ PUBLIC = {
     ("POST", "/auth/email/verify-request"): _PREAUTH,
     ("POST", "/auth/email/verify-confirm"): _PREAUTH,
     ("POST", "/auth/bootstrap/claim"): _PREAUTH + " — claims the first operator, before one exists",
+    # The operator console's passkey sign-in: the console token is what it issues.
+    ("POST", "/oracle/console/sign-in-options"): _PREAUTH,
+    ("POST", "/oracle/console/sign-in"): _PREAUTH,
 
     ("POST", "/setup/complete"): _SETUP,
     ("GET", "/setup/status"): _SETUP,
@@ -148,12 +191,23 @@ def test_every_route_requires_auth_unless_declared_public(method, path):
     if (method, path) in PUBLIC:
         pytest.skip("declared public: %s" % PUBLIC[(method, path)])
     route = _get_route(path, method)
-    assert get_auth in _flat_dependencies(route.dependant), (
+    deps = _flat_dependencies(route.dependant)
+    if get_console_auth in deps:
+        assert path.startswith(("/oracle/", "/auth/clients")), (
+            f"{method} {path}: the console token is for /oracle/* and server credentials")
+    assert deps & AUTHENTICATORS, (
         "%s %s does not reach get_auth, directly or through a sub-dependency. If it is meant to "
         "answer without authentication, add it to PUBLIC in this file WITH A REASON — do not "
         "delete this assertion, and do not accept `_require_operator` as a substitute: that is "
         "authorization, and it presumes an authenticated caller." % (method, path)
     )
+
+
+@pytest.mark.parametrize("method,path", [op for op in _all_operations()
+                                         if op[1].startswith("/oracle/") and op not in PUBLIC])
+def test_an_operator_route_takes_the_console_token_and_no_access_token(method, path):
+    deps = _flat_dependencies(_get_route(path, method).dependant)
+    assert get_console_auth in deps and get_auth not in deps, f"{method} {path}"
 
 
 @pytest.mark.parametrize("method,path", sorted(PUBLIC))
@@ -166,7 +220,7 @@ def test_the_public_allowlist_is_not_stale(method, path):
     complains. Asserting both means the list can only shrink by someone noticing.
     """
     route = _get_route(path, method)          # raises if the route is gone
-    assert get_auth not in _flat_dependencies(route.dependant), (
+    assert not _flat_dependencies(route.dependant) & AUTHENTICATORS, (
         "%s %s is listed in PUBLIC but now reaches get_auth. Remove it from PUBLIC — the route is "
         "protected, and leaving the entry preserves a stale exemption." % (method, path)
     )
