@@ -5,6 +5,11 @@ All notable changes to `agience-origin` are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.2.12] - 2026-11-09
+
+### Fixed
+- Origin's pages name their scripts and stylesheets by content (`/web/app.js?v=<sha256 prefix>`), and the pages and `/web/*` are served with `Cache-Control: no-cache`, revalidated by ETag. After a release a browser kept the previous release's unversioned `/web/app.js`, cached by heuristic, against the new pages, and its sign-in looped back to `/login`.
+
 ## [0.2.12] - 2026-11-08
 
 ### Security

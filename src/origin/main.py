@@ -7,9 +7,11 @@ surface — see the routers section.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
+import re
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -19,7 +21,7 @@ from alembic import command
 from alembic.config import Config as AlembicConfig
 from fastapi import Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, Response
 from starlette.middleware.sessions import SessionMiddleware
 from starlette.staticfiles import StaticFiles
 
@@ -691,7 +693,42 @@ def _page(filename: str) -> Response:
             content={"error": "account_surface_missing", "detail": f"{filename} is not deployed"},
             headers={"Cache-Control": "no-store"},
         )
-    return FileResponse(path)
+    response = HTMLResponse(_versioned_page(path), headers={"Cache-Control": "no-cache"})
+    response.path = str(path)    # which page was served, as `FileResponse.path` said before
+    return response
+
+
+#: `/web/<file>.js` or `.css` as a page references it, so the reference can carry its version.
+_ASSET_REF = re.compile(r'((?:src|href)="/web/)([\w.-]+\.(?:js|css))(")')
+
+
+def _asset_version(name: str) -> str:
+    """The first 12 hex of the asset's SHA-256: a name a browser has never cached for any other
+    content of the file."""
+    try:
+        return hashlib.sha256((_WEB_DIR / name).read_bytes()).hexdigest()[:12]
+    except OSError:
+        return "missing"
+
+
+def _versioned_page(path: Path) -> str:
+    """The page with each script and stylesheet reference carrying `?v=<its content hash>`.
+    2026-11-09: after the release a browser kept the previous release's `/web/app.js` (served with
+    no `Cache-Control`, so cached heuristically) against the new pages, and its sign-in looped. A
+    reference that names the content is never answered from a copy of other content."""
+    text = path.read_text(encoding="utf-8")
+    return _ASSET_REF.sub(lambda m: f"{m.group(1)}{m.group(2)}?v={_asset_version(m.group(2))}"
+                                    f"{m.group(3)}", text)
+
+
+class _RevalidatedStaticFiles(StaticFiles):
+    """`/web/*` answered with `Cache-Control: no-cache`: a browser may keep a copy, and asks (by its
+    ETag) before using it, so an asset is never run from a copy of an older release."""
+
+    def file_response(self, *args, **kwargs):
+        response = super().file_response(*args, **kwargs)
+        response.headers["Cache-Control"] = "no-cache"
+        return response
 
 
 @app.get("/login", include_in_schema=False)
@@ -774,7 +811,7 @@ def passkey_page() -> Response:
 # route can never be shadowed by a filename, and nothing outside `web/` is reachable. Every HTML
 # file under `web/` references its assets at this `/web/...` prefix accordingly.
 if _WEB_DIR.is_dir():
-    app.mount("/web", StaticFiles(directory=str(_WEB_DIR)), name="web")
+    app.mount("/web", _RevalidatedStaticFiles(directory=str(_WEB_DIR)), name="web")
 else:                       # a checkout without the surface logs the gap, rather than 404ing blankly
     logger.warning("origin web surface missing at %s — /login and / will fail", _WEB_DIR)
 
