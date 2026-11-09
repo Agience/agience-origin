@@ -14,6 +14,11 @@ import hashlib
 import json
 from pathlib import Path
 
+import pytest
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
+from fastapi.testclient import TestClient
+
 #: The test node's own redirect URIs (`CLIENT_REDIRECT_URIS`), on the in-code default host
 #: (`FACET_URI` = `ORIGIN_URI` = http://localhost:8080): a callback, the web app's callback and
 #: Origin's own pages, for both first-party ids. A test about another address configures it.
@@ -29,11 +34,6 @@ PKCE_VERIFIER = "test-verifier-" + "v" * 50
 PKCE_CHALLENGE = base64.urlsafe_b64encode(
     hashlib.sha256(PKCE_VERIFIER.encode()).digest()).decode().rstrip("=")
 PKCE = {"code_challenge": PKCE_CHALLENGE, "code_challenge_method": "S256"}
-
-import pytest
-from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric import rsa
-from fastapi.testclient import TestClient
 
 
 #: Environment variables that carry a REAL platform credential on an operator's machine.

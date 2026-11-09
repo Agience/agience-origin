@@ -118,7 +118,7 @@ def test_origin_mails_the_invite_and_answers_no_token(custody_client, people, ma
     assert set(body) == {"invite_id", "resource_id", "resource_name", "actions", "expires_at",
                          "email"}
     assert body["resource_id"] == "W" and body["actions"] == ["read", "update"]
-    assert len(mail) == 1 and mail[0][0] == "Bob@Team.test" and "/invite/" in mail[0][1]
+    assert len(mail) == 1 and mail[0][0] == "bob@team.test" and "/invite/" in mail[0][1]
     assert _token_of(mail[0][1]) not in r.text
     with SessionLocal() as db:
         inv = db.get(AuthorityGrant, body["invite_id"])
