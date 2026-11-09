@@ -8,6 +8,11 @@ All notable changes to `agience-origin` are recorded here. The format follows
 ## [0.2.12] - 2026-11-09
 
 ### Fixed
+- `python -m origin.scripts.authority_bootstrap` builds what Origin's startup builds before it reads or signs: the service's `.env`, the signing keys, the encryption key, the nonce and setup secrets, Origin's service identity and the database engine (`origin.process.init_process`, which the startup now calls too). Run as its own process, the credential could not be minted (`JWT keys not initialized`), so the authority-ledger seed of release 2026.11.3 did not run.
+
+## [0.2.12] - 2026-11-09
+
+### Fixed
 - `python -m origin.scripts.authority_bootstrap` builds Origin's database engine itself (`init_engine()`), from the settings Origin's startup reads. Run as a process of its own, as the release tool runs it, every mode failed with `Session factory not initialized`, so the authority-ledger seed of release 2026.11.2 did not run.
 
 ## [0.2.12] - 2026-11-09

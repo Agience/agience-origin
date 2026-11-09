@@ -51,16 +51,18 @@ def test_the_kid_matches_what_main_actually_signs_with() -> None:
     A peer selects a verification key by `kid`. If the manifest says `origin-1` and Origin stamps
     something else, the JWKS is present, parses, and matches nothing — a 401 that looks exactly
     like an absent anchor. Read out of `main.py` rather than duplicated as a constant, because a
-    constant is what drifts.
+    constant is what drifts. Origin's startup builds its keys through `origin.process`.
     """
-    from origin import main
+    from origin import main, process
     from origin.services import signing_keys
 
-    source = Path(main.__file__).resolve().read_text(encoding="utf-8")
-    found = re.search(r"init_jwt_keys\(key_id=_signing_keys\.current_kid\(\)\)", source)
+    assert re.search(r"^\s+init_process\(\)$", Path(main.__file__).resolve().read_text(encoding="utf-8"),
+                     re.MULTILINE), "main.py's startup no longer builds its keys through `init_process()`"
+    source = Path(process.__file__).resolve().read_text(encoding="utf-8")
+    found = re.search(r"init_jwt_keys\(key_id=signing_keys\.current_kid\(\)\)", source)
     assert found, (
-        "main.py no longer signs with `signing_keys.current_kid()`: this test can no longer tell "
-        "what Origin signs with, so it cannot certify the emitted anchor")
+        "origin.process no longer signs with `signing_keys.current_kid()`: this test can no longer "
+        "tell what Origin signs with, so it cannot certify the emitted anchor")
     # Until a rollover names another kid (`origin.kid`), Origin signs with the default.
     assert signing_keys.DEFAULT_KID == emit.DEFAULT_KID, (
         f"Origin signs with kid={signing_keys.DEFAULT_KID!r} by default but origin-emit-anchor "

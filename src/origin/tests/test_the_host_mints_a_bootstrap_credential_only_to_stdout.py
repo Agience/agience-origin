@@ -113,24 +113,46 @@ def test_count_reports_the_replica_s_counts(custody_client, monkeypatch, capfd):
     assert out != "grants=0 roots=0 edges=0\n"
 
 
-def test_a_process_of_its_own_builds_the_engine(tmp_path):
-    """The release tool runs the script as a fresh process, where Origin's startup has not built
-    the engine; the script builds it from the same settings and reads the database."""
+def _own_process(tmp_path, keys_dir, *argv):
+    """The script as the release tool runs it: a fresh process where Origin's startup has not run,
+    against a database file that holds Origin's tables and an operator, made at the first call."""
     import os
     import subprocess
     import sys
 
     from sqlalchemy import create_engine
+    from sqlalchemy.orm import Session
 
     import origin.models  # noqa: F401 — registers every table on the metadata
     from origin.db.base import Base
+    from origin.models.platform_setting import PlatformSetting
 
-    url = f"sqlite:///{(tmp_path / 'origin.db').as_posix()}"
-    engine = create_engine(url)
-    Base.metadata.create_all(engine)
-    engine.dispose()
-    env = {**os.environ, "DATABASE_URL": url}
-    run = subprocess.run([sys.executable, "-m", "origin.scripts.authority_bootstrap", "--count"],
-                         capture_output=True, text=True, env=env, timeout=120)
+    path = tmp_path / "origin.db"
+    url = f"sqlite:///{path.as_posix()}"
+    if not path.exists():
+        engine = create_engine(url)
+        Base.metadata.create_all(engine)
+        with Session(engine) as db:
+            db.add(PlatformSetting(key="platform.operator_id", value=af.OPERATOR, is_secret=False))
+            db.commit()
+        engine.dispose()
+    env = {k: v for k, v in os.environ.items() if not k.startswith("ORIGIN_SKIP")}
+    env.update({"DATABASE_URL": url, "KEYS_DIR": str(keys_dir), "AGIENCE_NO_DOTENV": "1"})
+    return subprocess.run([sys.executable, "-m", "origin.scripts.authority_bootstrap", *argv],
+                          capture_output=True, text=True, env=env, timeout=120)
+
+
+def test_a_process_of_its_own_counts_mints_and_closes(tmp_path, jwt_keypair):
+    """Run as its own process, the script builds what Origin's startup builds (keys, identity,
+    engine): it reads the replica, mints a credential that is one line on stdout, and closes."""
+    run = _own_process(tmp_path, jwt_keypair, "--count")
     assert run.returncode == 0, run.stderr
     assert run.stdout == "grants=0 roots=0 edges=0\n"
+    run = _own_process(tmp_path, jwt_keypair)
+    assert run.returncode == 0, run.stderr
+    lines = run.stdout.splitlines()
+    assert len(lines) == 1 and lines[0].count(".") == 2, "one line: the credential, a JWT"
+    assert lines[0] not in run.stderr
+    run = _own_process(tmp_path, jwt_keypair, "--close")
+    assert run.returncode == 0, run.stderr
+    assert run.stdout == "bootstrap closed: 1 window(s)\n"

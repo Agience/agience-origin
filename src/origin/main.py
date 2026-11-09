@@ -27,14 +27,8 @@ from starlette.staticfiles import StaticFiles
 
 from origin import config
 from origin.authority_trust import get_authority_manifest
-from origin.key_manager import (
-    get_key_id,
-    init_encryption_key,
-    init_jwt_keys,
-    init_nonce_secret,
-    init_setup_token,
-)
-from origin.db.session import SessionLocal, build_database_url, get_db, init_engine
+from origin.key_manager import get_key_id
+from origin.db.session import SessionLocal, build_database_url, get_db
 from origin.routers.auth_router import auth_router as auth_router_module
 from origin.routers.auth_router import internal_router as auth_internal_router
 from origin.routers.auth_router import root_router as auth_root_router
@@ -394,25 +388,12 @@ async def lifespan(app: FastAPI):
     # Before anything else: this service is only correct single-process. See the function.
     _refuse_multiple_workers()
     _refuse_app_at_origin_s_own_origin()
-    # Load this service's own `.env` at startup (defaults only; the environment already set wins).
-    # At startup, not module import: config is a shared module, and importing it (e.g. in a test)
-    # does not pull a `.env` beside it into the process.
-    config.load_env(Path(__file__).resolve().parent.parent)
-    # Key material from disk (must exist; the installer or a key-init step writes it)
-    # kid="origin-1" matches the kid published in the authority manifest
-    # (key init writes origin's JWKS with that kid) and the service_identity kid.
-    from origin.services import signing_keys as _signing_keys
-    init_jwt_keys(key_id=_signing_keys.current_kid())   # `origin-1` until a rollover names another
-    init_encryption_key()
-    init_nonce_secret()
-    init_setup_token()
-    # Origin's service identity (origin.private.pem) — same key used for both
-    # service-to-service mutual JWTs AND user tokens (the OIDC issuer signing key).
-    from origin import service_identity
-    service_identity.init_service_identity("origin")
+    # The service's `.env`, keys, identity and engine, as every Origin process builds them; the
+    # `.env` is loaded here, not at import, so importing config (e.g. in a test) pulls in no file.
+    from origin.process import init_process
+    init_process()
 
-    # DB engine, then migrations
-    init_engine()
+    # Migrations
     if os.getenv("ORIGIN_SKIP_MIGRATIONS") != "1":
         _run_migrations()
 
