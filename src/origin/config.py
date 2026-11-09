@@ -134,19 +134,14 @@ PASSWORD_PBKDF2_ITERS: int = int(os.getenv("PASSWORD_PBKDF2_ITERS") or 600000)
 #   FACET_URI   — where users reach the front end
 #   ORIGIN_URI  — this service: identity, OIDC issuer, JWT `iss`
 FACET_URI: str = os.getenv("FACET_URI", "http://localhost:8080")
-# `FACET_URIS` lists every facet base this authority admits, not just the one in `FACET_URI`.
-# `is_client_redirect_allowed` accepts only `FACET_URI` and `ORIGIN_URI` as redirect bases, but a
-# node runs many facets (e.g. `aria.`, `sage.`, `pharos.` alongside whichever facet holds the slot),
-# and each one needs to begin a sign-in through this authority. `FACET_URIS` adds the rest without
-# renaming or replacing `FACET_URI`, which remains first: it is read on its own elsewhere
-# (branding, the local-dev detection just below in `is_client_redirect_allowed`), and every
-# existing node declares it.
+# `FACET_URIS` lists every facet base this authority serves, not just the one in `FACET_URI`
+# (CORS, links). It decides no redirect: where a code may go is `CLIENT_REDIRECT_URIS`, exactly.
 FACET_URIS: list = [
     u.strip() for u in os.getenv("FACET_URIS", "").split(",") if u.strip()
 ]
 ORIGIN_URI: str = os.getenv("ORIGIN_URI", "http://localhost:8080")
-# Mantle's own address. Mantle serves pages under it, so it is never a first-party redirect base,
-# whatever `FACET_URI`/`FACET_URIS` list (`auth_service.is_client_redirect_allowed`).
+# Mantle's own address. Mantle serves pages under it, so no redirect URI on its origin is ever
+# admitted, whatever a list names (`auth_service.is_client_redirect_allowed`).
 MANTLE_URI: str = os.getenv("MANTLE_URI", "")
 
 
@@ -169,10 +164,40 @@ def without_mantle(values) -> list:
     return out
 
 
-#: The platform client's development redirect bases (http loopback, vscode.dev, oauth.pstmn.io):
-#: opt-in, off unless set (production leaves it unset).
-PLATFORM_DEV_REDIRECTS: bool = os.getenv("PLATFORM_DEV_REDIRECTS", "").strip().lower() in (
-    "1", "true", "yes")
+def _redirect_map_from_env() -> dict:
+    """`CLIENT_REDIRECT_URIS`: a JSON object, first-party client id → list of exact redirect URIs.
+
+    Unset is an empty map, and an empty map admits no first-party redirect at all. A value that is
+    not such an object stops the process at import, naming the setting: a sign-in that silently
+    admits nothing would be read as an outage rather than a typo."""
+    import json
+
+    raw = os.getenv("CLIENT_REDIRECT_URIS", "").strip()
+    if not raw:
+        return {}
+    try:
+        doc = json.loads(raw)
+    except ValueError as exc:
+        raise RuntimeError(f"CLIENT_REDIRECT_URIS is not JSON: {exc}") from None
+    if not isinstance(doc, dict) or not all(
+            isinstance(k, str) and isinstance(v, list) and all(isinstance(u, str) for u in v)
+            for k, v in doc.items()):
+        raise RuntimeError('CLIENT_REDIRECT_URIS must be a JSON object of client id → list of '
+                           'URIs, e.g. {"platform": ["https://app.example/auth/callback"]}')
+    # Kept as written: a URI on Mantle's origin is refused at each check (`auth_service._on_mantle`,
+    # scheme, host and port), so another port on Mantle's host, such as Origin's own on a
+    # single-host install, stays listed.
+    return {k: [u.strip() for u in v if u.strip()] for k, v in doc.items()}
+
+
+#: The exact redirect URIs each first-party client (`PLATFORM_CLIENT_ID`, `PLATFORM_CLIENT_IDS`)
+#: may receive a code at, compared whole (`auth_service.is_client_redirect_allowed`). No redirect
+#: target exists in code: a node, a local install included, lists its own.
+CLIENT_REDIRECT_URIS: dict = _redirect_map_from_env()
+#: The exact redirect URIs a dynamic registration (`POST /auth/register`) may name. Empty refuses
+#: every one. A loopback entry admits any port, as RFC 8252 §7.3 requires; nothing else varies.
+CLIENT_REGISTRATION_REDIRECT_URIS: list = [
+    u.strip() for u in os.getenv("CLIENT_REGISTRATION_REDIRECT_URIS", "").split(",") if u.strip()]
 #: New accounts paused (review 11, M8): Origin itself refuses every registration route, whatever
 #: sits in front of it. Also the platform setting `auth.registration.paused`.
 REGISTRATION_PAUSED: bool = os.getenv("REGISTRATION_PAUSED", "").strip().lower() in (

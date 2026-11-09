@@ -9,10 +9,9 @@ comes to consult the registry.
 
 A row here is a permission, in two separable ways. `/authorize` refuses a `client_id` that is
 neither configured first-party nor present here, so the row's existence is what admits a client no
-operator named. And it holds a client present here to this row's `redirect_uris` — the
-authority-wide `is_client_redirect_allowed` applies on top, but it is client-blind and cannot say
-that client X's code belongs at X's callback rather than at Y's. Deleting a row revokes a client;
-editing `redirect_uris` moves where its codes may land.
+operator named. And it holds a client present here to this row's `redirect_uris`, compared whole
+(`auth_service.is_registered_redirect_allowed`): client X's code goes only to X's callbacks.
+Deleting a row revokes a client; editing `redirect_uris` moves where its codes may land.
 
 What a row does not confer is trust: `_is_first_party_client` does not read this table, so a client
 that enrolled itself is admitted to the flow and receives the scoped `mcp_client` token.
@@ -47,8 +46,8 @@ class OAuthClient(Base):
     # field an operator has when reading a table that (in open mode) anonymous callers can write to.
     client_name = Column(String(256), nullable=True)
     # RFC 7591 §2 `redirect_uris`. The security-relevant field: it is the only registered metadata
-    # that says where a code may be delivered. Every entry was admitted by
-    # `auth_service.is_client_redirect_allowed` at registration time.
+    # that says where a code may be delivered. Every entry was listed in
+    # `CLIENT_REGISTRATION_REDIRECT_URIS` at registration time.
     redirect_uris = Column(JSON, nullable=False, default=list)
     # RFC 7591 §2 `grant_types` / `response_types`. Stored because they are what a later enforcement
     # step would compare a request against; today they record what the client said it would use.

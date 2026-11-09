@@ -14,6 +14,7 @@ from sqlalchemy import func, select, update as sa_update
 from sqlalchemy.orm import Session
 
 from origin.models.person import Person
+from origin.services.email_address import lookup_email
 
 
 def get_by_id(db: Session, person_id: str) -> Optional[Person]:
@@ -21,8 +22,10 @@ def get_by_id(db: Session, person_id: str) -> Optional[Person]:
 
 
 def get_by_email(db: Session, email: str) -> Optional[Person]:
+    """The person holding this address, compared in its canonical form (`email_address`): a
+    trailing dot, a Unicode domain, case and surrounding space all name the one stored row."""
     return db.execute(
-        select(Person).where(Person.email == email.strip()).limit(1)
+        select(Person).where(Person.email == lookup_email(email)).limit(1)
     ).scalar_one_or_none()
 
 

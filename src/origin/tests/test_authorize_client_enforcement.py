@@ -6,10 +6,9 @@ Two rules.
   `PLATFORM_CLIENT_IDS`) or because this authority issued it (`POST /auth/register`). Nothing else
   reaches a login page.
 
-· BINDING. `is_client_redirect_allowed` is authority-wide and client-blind — it admits this node's
-  facets, the well-known tool callbacks and loopback for every caller alike — so on its own it would
-  let any client name any admitted callback, including another client's. A registered client is held
-  to its own `redirect_uris` as well, and the cross-client test below is what pins that.
+· BINDING. A client's code goes only to a URI configured for that client, compared whole: a
+  first-party client's entry in `CLIENT_REDIRECT_URIS`, a registered client's own `redirect_uris`.
+  No URI is admitted by code, and no client may name another's. Every refusal is a 403.
 
 Two properties carry as much weight as the rules.
 
@@ -31,6 +30,8 @@ from __future__ import annotations
 
 import pytest
 
+from origin.tests.conftest import PKCE
+
 
 FACET_REDIRECT = "http://localhost:8080/cb"
 LOOPBACK_REDIRECT = "http://127.0.0.1:54321/callback"
@@ -49,12 +50,21 @@ def db_client(origin_app):
         yield c
 
 
+#: What the registrations in this file may name (`CLIENT_REGISTRATION_REDIRECT_URIS`).
+REGISTRABLE = [
+    "http://127.0.0.1/callback", "http://127.0.0.1/other-client/callback", FACET_REDIRECT,
+    "http://localhost:8080/a/callback", "http://localhost:8080/b/callback",
+    "http://localhost:8080/private/callback",
+]
+
+
 @pytest.fixture
 def registration_open(monkeypatch):
     from origin import config
 
     monkeypatch.setattr(config, "CLIENT_REGISTRATION_ENABLED", True)
     monkeypatch.setattr(config, "CLIENT_REGISTRATION_INITIAL_ACCESS_TOKEN", "")
+    monkeypatch.setattr(config, "CLIENT_REGISTRATION_REDIRECT_URIS", list(REGISTRABLE))
 
 
 def _register(client, redirect_uris):
@@ -72,6 +82,7 @@ def _authorize(client, *, client_id, redirect_uri=FACET_REDIRECT):
             "redirect_uri": redirect_uri,
             "scope": "openid email profile",
             "state": "st",
+            **PKCE,
         },
         follow_redirects=False,
     )
@@ -95,6 +106,7 @@ def test_an_id_enrolled_in_platform_client_ids_is_admitted(db_client, monkeypatc
     from origin import config
 
     monkeypatch.setattr(config, "PLATFORM_CLIENT_IDS", ["mantle-browser"])
+    monkeypatch.setattr(config, "CLIENT_REDIRECT_URIS", {"mantle-browser": [FACET_REDIRECT]})
     assert _authorize(db_client, client_id="mantle-browser").status_code == 200
 
 
@@ -170,7 +182,7 @@ def test_a_redirect_binding_failure_does_not_redirect_either(db_client, registra
     """The same clause covers "mismatching redirection URI", and for the same reason."""
     client_id = _register(db_client, [LOOPBACK_REDIRECT])
     resp = _authorize(db_client, client_id=client_id, redirect_uri=FACET_REDIRECT)
-    assert resp.status_code == 400
+    assert resp.status_code == 403
     assert "location" not in {k.lower() for k in resp.headers}
 
 
@@ -185,20 +197,15 @@ def test_the_refusal_is_not_cacheable(db_client):
 # Redirect binding — the finding this closes
 # ---------------------------------------------------------------------------
 def test_a_registered_client_cannot_use_another_clients_redirect(db_client, registration_open):
-    """Two URIs on the authority-wide allow-list, and a client held to its own. Without the
-    registration check, client A could name client B's callback and have B's address receive A's
-    code."""
+    """Client A may not name client B's callback, though both were registrable: B's address
+    receives only B's code."""
     a = _register(db_client, ["http://localhost:8080/a/callback"])
     b_uri = "http://localhost:8080/b/callback"
     _register(db_client, [b_uri])
 
-    from origin.services.auth_service import is_client_redirect_allowed
-
-    assert is_client_redirect_allowed(b_uri), "the point is that the allow-list admits it"
-
     resp = _authorize(db_client, client_id=a, redirect_uri=b_uri)
-    assert resp.status_code == 400
-    assert resp.json()["error"] == "invalid_request"
+    assert resp.status_code == 403
+    assert "registration" in resp.json()["detail"]
 
 
 def test_the_refusal_does_not_disclose_what_the_client_registered(db_client, registration_open):
@@ -210,41 +217,29 @@ def test_the_refusal_does_not_disclose_what_the_client_registered(db_client, reg
     assert own not in resp.text
 
 
-def test_a_registered_client_still_answers_to_the_authority_wide_allow_list(
-    db_client, registration_open, monkeypatch
-):
-    """Composition, not replacement. Registration validates each URI against the allow-list, so a
-    registered set is a subset of it and the conjunction is the registered set — until an operator
-    edits `FACET_URIS`, and then the withdrawal reaches every registered client holding it, in that
-    one edit. Config stays the outer bound, which is the direction that can only narrow."""
+def test_a_registered_client_is_not_widened_by_a_first_party_list(db_client, registration_open):
+    """A URI configured for a first-party client (`CLIENT_REDIRECT_URIS`) entitles a registered
+    client to nothing: it keeps exactly its own registration."""
+    client_id = _register(db_client, [LOOPBACK_REDIRECT])
+    first_party_uri = "http://localhost:8080/auth/callback"
+    assert _authorize(db_client, client_id=client_id,
+                      redirect_uri=first_party_uri).status_code == 403
+
+
+def test_a_first_party_client_is_bound_by_its_own_list(db_client, monkeypatch):
+    """A configured client has no registration; its entry in `CLIENT_REDIRECT_URIS` is all there
+    is. Another path on a listed host, another first-party client's URI, and any other host are
+    refused."""
     from origin import config
 
-    facet = "http://facet.example:8080"
-    facet_cb = f"{facet}/cb"
-
-    monkeypatch.setattr(config, "FACET_URIS", [facet])
-    client_id = _register(db_client, [facet_cb])
-    assert _authorize(db_client, client_id=client_id, redirect_uri=facet_cb).status_code == 200
-
-    # The facet is decommissioned. The row still names it; the allow-list no longer does.
-    monkeypatch.setattr(config, "FACET_URIS", [])
-    assert _authorize(db_client, client_id=client_id, redirect_uri=facet_cb).status_code == 403
-
-
-def test_a_first_party_client_is_bound_by_the_allow_list_alone(db_client, monkeypatch):
-    """There is no registration for a configured client, so the allow-list is all there is — and
-    that is the answer rather than a gap: which ids are first-party and which bases are admitted are
-    the same operator's configuration. This pins the deliberate half (any allowlisted base) and the
-    bound that still holds (nothing else)."""
-    from origin import config
-
+    own = "http://localhost:8080/mantle/callback"
     monkeypatch.setattr(config, "PLATFORM_CLIENT_IDS", ["mantle-browser"])
-    assert _authorize(
-        db_client, client_id="mantle-browser", redirect_uri="http://localhost:8080/anywhere"
-    ).status_code == 200
-    assert _authorize(
-        db_client, client_id="mantle-browser", redirect_uri="https://evil.example/cb"
-    ).status_code == 403
+    monkeypatch.setattr(config, "CLIENT_REDIRECT_URIS",
+                        {**config.CLIENT_REDIRECT_URIS, "mantle-browser": [own]})
+    assert _authorize(db_client, client_id="mantle-browser", redirect_uri=own).status_code == 200
+    for other in ("http://localhost:8080/anywhere", FACET_REDIRECT, "https://evil.example/cb"):
+        assert _authorize(db_client, client_id="mantle-browser",
+                          redirect_uri=other).status_code == 403, other
 
 
 def test_a_configured_id_that_is_also_registered_is_treated_as_configured(
@@ -252,15 +247,17 @@ def test_a_configured_id_that_is_also_registered_is_treated_as_configured(
 ):
     """The both-case, stated so it is a decision rather than an accident of ordering. Naming an id
     in `PLATFORM_CLIENT_IDS` is an operator saying "this is one of ours" — the stronger statement —
-    so it keeps the allow-list, and a first-party sign-in keeps depending on no database row."""
+    so it is held to `CLIENT_REDIRECT_URIS`, and a first-party sign-in depends on no database row."""
     from origin import config
 
     client_id = _register(db_client, [LOOPBACK_REDIRECT])
     monkeypatch.setattr(config, "PLATFORM_CLIENT_IDS", [client_id])
+    monkeypatch.setattr(config, "CLIENT_REDIRECT_URIS", {client_id: [FACET_REDIRECT]})
 
-    # Outside its registration, inside the allow-list: refused as a registered client, admitted as
-    # a configured one.
     assert _authorize(db_client, client_id=client_id, redirect_uri=FACET_REDIRECT).status_code == 200
+    # Its registration no longer speaks for it.
+    assert _authorize(db_client, client_id=client_id,
+                      redirect_uri=LOOPBACK_REDIRECT).status_code == 403
 
 
 # ---------------------------------------------------------------------------
@@ -287,11 +284,11 @@ def test_the_loopback_relaxation_is_the_port_and_nothing_else(db_client, registr
     client_id = _register(db_client, [LOOPBACK_REDIRECT])
     assert _authorize(
         db_client, client_id=client_id, redirect_uri="http://127.0.0.1:61234/evil"
-    ).status_code == 400
+    ).status_code == 403
     # Nor does a loopback registration reach off the loopback interface.
     assert _authorize(
         db_client, client_id=client_id, redirect_uri=FACET_REDIRECT
-    ).status_code == 400
+    ).status_code == 403
 
 
 def test_two_loopback_clients_on_the_same_path_are_one_address(db_client, registration_open):
@@ -311,7 +308,7 @@ def test_two_loopback_clients_on_the_same_path_are_one_address(db_client, regist
     # Distinct paths ARE distinct addresses, which is the binding doing its work on loopback.
     c_own_path = "http://127.0.0.1:2000/other-client/callback"
     _register(db_client, [c_own_path])
-    assert _authorize(db_client, client_id=a, redirect_uri=c_own_path).status_code == 400
+    assert _authorize(db_client, client_id=a, redirect_uri=c_own_path).status_code == 403
 
 
 def test_a_non_loopback_registration_is_matched_with_its_port(origin_app):

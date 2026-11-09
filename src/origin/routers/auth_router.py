@@ -14,6 +14,7 @@ import hashlib
 import html as _html
 import ipaddress
 import logging
+import re
 import secrets
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -44,6 +45,7 @@ from origin.services import email_service
 from origin.services import guess_budget
 from origin.services import otp_service
 from origin.services import person_service
+from origin.services.email_address import require_canonical_email
 from origin.services import auth_service as origin_auth_service
 from origin.services.auth_service import (
     access_token_expires_in_seconds,
@@ -53,6 +55,8 @@ from origin.services.auth_service import (
     hash_password,
     is_client_redirect_allowed,
     is_deactivated,
+    is_registered_redirect_allowed,
+    is_registration_redirect_allowed,
     person_token_claims,
     refuse_if_deactivated,
     run_kdf,
@@ -990,13 +994,20 @@ def _compute_roles(user_id: str) -> list[str]:
 authorization_codes: dict[str, dict] = {}
 pkce_challenges: dict[str, dict] = {}
 
+#: How long a started sign-in (`pkce_challenges`) waits for the person: long enough to type a
+#: password or fetch a mailed code.
 _AUTH_CACHE_TTL = timedelta(minutes=10)
+#: How long a minted authorization code lives. A code is redeemed by the page it is delivered to,
+#: at once; RFC 6749 §4.1.2 asks for a short life, and RFC 9700 §2.1.1 for single use.
+_CODE_TTL = timedelta(seconds=60)
 _AUTH_CACHE_MAX_ITEMS = 5000
+#: A PKCE S256 challenge: the unpadded base64url of a SHA-256 digest, 43 characters.
+_B64URL_RE = re.compile(r"[A-Za-z0-9_-]{43}")
 
 
 def _prune_auth_cache(now: datetime) -> None:
-    cutoff = now - _AUTH_CACHE_TTL
-    for cache in (pkce_challenges, authorization_codes):
+    for cache, ttl in ((pkce_challenges, _AUTH_CACHE_TTL), (authorization_codes, _CODE_TTL)):
+        cutoff = now - ttl
         expired = [
             k
             for k, v in cache.items()
@@ -1385,7 +1396,7 @@ def _complete_local_signin(
     if auth_request.get("state"):
         params["state"] = auth_request["state"]
     from origin.services import origin_session
-    response = JSONResponse({"redirect": f"{auth_request['redirect_uri']}?{urlencode(params)}"})
+    response = JSONResponse({"redirect": _with_query(auth_request['redirect_uri'], params)})
     if _starts_origin_session(auth_request, db):
         origin_session.start(db, response, str(person.id))
     return response
@@ -1794,6 +1805,24 @@ def _is_first_party_client(client_id: str) -> bool:
     return client_id in configured
 
 
+def _with_query(uri: str, params: dict) -> str:
+    """`uri` with `params` appended to its query (RFC 6749 §4.1.2): a listed URI may carry one."""
+    return f"{uri}{'&' if '?' in uri else '?'}{urlencode(params)}"
+
+
+def _require_s256_verifier(auth_data: dict, code_verifier: Optional[str]) -> None:
+    """The code's PKCE proof: an S256 challenge was recorded (every flow records one), and
+    `code_verifier` hashes to it. 400 otherwise."""
+    if auth_data.get("code_challenge_method") != "S256" or not auth_data.get("code_challenge"):
+        raise HTTPException(status_code=400, detail="This code carries no PKCE challenge (S256).")
+    if not code_verifier:
+        raise HTTPException(status_code=400, detail="Missing code_verifier for PKCE")
+    digest = hashlib.sha256(code_verifier.encode()).digest()
+    computed = base64.urlsafe_b64encode(digest).decode().rstrip("=")
+    if not secrets.compare_digest(computed, str(auth_data["code_challenge"])):
+        raise HTTPException(status_code=400, detail="Invalid code_verifier")
+
+
 def _authorize_refusal(error: str, description: str) -> JSONResponse:
     """An RFC 6749 §4.1.2.1 refusal — returned to the browser, never sent to `redirect_uri`.
 
@@ -1855,27 +1884,20 @@ async def authorize(
 
     ## Where a client's code may be delivered
 
-    A registered client is held to the authority-wide allow-list AND its own `redirect_uris`.
-    `is_client_redirect_allowed` is client-blind — it admits this node's facets, the well-known tool
-    callbacks and loopback for every caller alike — so on its own it would let any client name any
-    admitted callback, including another client's. The per-client set is what pins a client to its
-    own address.
+    Only to a URI configured for that client, compared whole (RFC 6749 §3.1.2.2,
+    `auth_service.redirect_uri_matches_registered`). A first-party client's URIs are its entry in
+    `CLIENT_REDIRECT_URIS`; a registered client's are its own registration, which
+    `CLIENT_REGISTRATION_REDIRECT_URIS` bounded when it was made. No URI is admitted by code: no
+    tool page, no loopback default, no base taken from `FACET_URI`/`FACET_URIS`/`ORIGIN_URI`. The
+    one variation is RFC 8252 §7.3's: a listed http loopback URI admits any port. Every refusal is
+    a 403 naming the setting to change.
 
-    Both, rather than its own set alone. Registration already refuses any URI `/authorize` would
-    refuse (`_validated_redirect_uris`), so a registered set is a subset of the allow-list and the
-    conjunction equals it — until an operator edits `FACET_URIS`. Then a facet withdrawn from
-    configuration is withdrawn from every registered client holding it, in that one edit, with no
-    rows to hunt through. Configuration stays the outer bound, and that bound can only narrow.
+    An id that is both configured and registered is treated as configured, and is held to
+    `CLIENT_REDIRECT_URIS` rather than its registration: naming an id in `PLATFORM_CLIENT_IDS` is
+    the operator's stronger statement, and it keeps a first-party sign-in from depending on a row.
 
-    A configured first-party client has no registration, so the allow-list is the whole of its
-    binding. Both halves — which ids are first-party, which bases are admitted — are the same
-    operator's configuration in the same file, so binding one to the other would mean a third
-    configuration shape (client id → URIs) that every node would have to grow before it could sign
-    anyone in, to separate two surfaces the operator already trusts equally.
-
-    An id that is both configured and registered is treated as configured, and keeps the allow-list
-    rather than the registration binding. Naming an id in `PLATFORM_CLIENT_IDS` is the operator's
-    stronger statement, and it keeps a first-party sign-in from depending on a database row.
+    PKCE with S256 is required of every flow (RFC 9700 §2.1.1); `plain` and a missing challenge
+    are refused before anything starts.
     """
     if response_type != "code":
         raise HTTPException(status_code=400, detail="Unsupported response_type. Only 'code' is supported.")
@@ -1903,43 +1925,45 @@ async def authorize(
             )
             return _authorize_refusal("invalid_client", detail)
 
-    if not is_client_redirect_allowed(redirect_uri, platform_client=registration is None):
-        # Named settings, because the two ways to be here are an operator's and an attacker's and
-        # only the operator reads this: either the redirect base belongs to a facet this authority
-        # has not been told about, or the caller is a first-party client nobody enrolled.
-        raise HTTPException(
-            status_code=403,
-            detail="Invalid redirect_uri — its base is not among FACET_URI/FACET_URIS/ORIGIN_URI. "
-                   + _FIRST_PARTY_HINT,
-        )
-
-    if registration is not None and not origin_auth_service.redirect_uri_matches_registered(
-        redirect_uri, registration.redirect_uris
-    ):
-        # The finding this change exists to close. Passing the allow-list means only that some
-        # client on this node may be delivered a code here; it says nothing about THIS one.
-        #
-        # The registered URIs are not listed back. The caller either registered them and has them,
-        # or did not and is asking this authority to describe a client that is not theirs.
+    # Where the code may go: only to a URI configured for this client, compared whole. A
+    # first-party client's URIs are `CLIENT_REDIRECT_URIS[client_id]`; a registered client's are
+    # its registration's. No URI is admitted by code, and none is refused by name. The listed URIs
+    # are not echoed back: the operator has them, and anyone else is asking to be told.
+    if registration is None:
+        if not is_client_redirect_allowed(redirect_uri, client_id=client_id):
+            logger.warning("Refused /authorize: redirect_uri not configured for client_id=%s",
+                           client_id)
+            raise HTTPException(
+                status_code=403,
+                detail=f"redirect_uri is not configured for client_id {client_id!r}. A first-party "
+                       "client receives its code only at a URI listed for it, exactly, in "
+                       "CLIENT_REDIRECT_URIS; add the URI there to use it.",
+            )
+    elif not is_registered_redirect_allowed(redirect_uri, registration.redirect_uris):
         logger.warning(
             "Refused /authorize: registered client_id=%s asked for an unregistered redirect_uri",
             client_id,
         )
-        return _authorize_refusal(
-            "invalid_request",
-            f"redirect_uri {redirect_uri!r} is not one this client registered. A registered client "
-            "receives its code only at a redirect_uri from its own registration — this authority's "
-            "allow-list bounds which URIs may be registered at all, and entitles no client to "
-            "another's. Register the URI you intend to use, or start the flow at one you did.",
+        raise HTTPException(
+            status_code=403,
+            detail=f"redirect_uri is not in client_id {client_id!r}'s registration. A registered "
+                   "client receives its code only at a URI it registered, exactly; register the "
+                   "URI to use it (POST /auth/register, bounded by "
+                   "CLIENT_REGISTRATION_REDIRECT_URIS).",
         )
 
-    if code_challenge:
-        if code_challenge_method not in ("S256", "plain"):
-            raise HTTPException(status_code=400, detail="code_challenge_method must be 'S256' or 'plain'.")
-        if len(code_challenge) < 43 or len(code_challenge) > 128:
-            raise HTTPException(
-                status_code=400, detail="code_challenge must be between 43 and 128 characters"
-            )
+    # PKCE, S256 only, on every authorization-code flow (RFC 9700 §2.1.1). A request without a
+    # challenge, or with `plain`, starts nothing: the code it would mint could be redeemed by
+    # whoever intercepted it.
+    if not code_challenge:
+        raise HTTPException(status_code=400, detail="code_challenge is required (PKCE, S256).")
+    if code_challenge_method != "S256":
+        raise HTTPException(status_code=400, detail="code_challenge_method must be 'S256'.")
+    if len(code_challenge) != 43 or not _B64URL_RE.fullmatch(code_challenge):
+        raise HTTPException(
+            status_code=400,
+            detail="code_challenge must be the 43-character base64url SHA-256 of the verifier.",
+        )
 
     # No `provider` means "show me the choices," not "pick one for me": the local page renders
     # every method this node actually has (password, OTP, and any registered federated provider),
@@ -2072,7 +2096,7 @@ async def auth_callback(request: Request):
             if auth_request.get("state"):
                 error_params["state"] = auth_request["state"]
             return RedirectResponse(
-                url=f"{auth_request['redirect_uri']}?{urlencode(error_params)}",
+                url=_with_query(auth_request['redirect_uri'], error_params),
                 status_code=status.HTTP_302_FOUND,
             )
 
@@ -2108,8 +2132,10 @@ async def auth_callback(request: Request):
         params = {"code": auth_code}
         if auth_request["state"]:
             params["state"] = auth_request["state"]
+        # The sign-in this state began is spent: the code now carries it.
+        pkce_challenges.pop(oauth_state, None)
         response = RedirectResponse(
-            url=f"{auth_request['redirect_uri']}?{urlencode(params)}",
+            url=_with_query(auth_request['redirect_uri'], params),
             status_code=status.HTTP_302_FOUND,
         )
         # Origin's own session, for a person Origin already knows by this identity.
@@ -2133,7 +2159,7 @@ async def auth_callback(request: Request):
             if auth_request["state"]:
                 error_params["state"] = auth_request["state"]
             return RedirectResponse(
-                url=f"{auth_request['redirect_uri']}?{urlencode(error_params)}",
+                url=_with_query(auth_request['redirect_uri'], error_params),
                 status_code=status.HTTP_302_FOUND,
             )
         return JSONResponse(
@@ -2335,31 +2361,21 @@ async def _grant_authorization_code(
     client_id: str,
     code_verifier: Optional[str],
 ):
-    if code not in authorization_codes:
-        raise HTTPException(status_code=400, detail="Invalid or expired authorization code")
-    auth_data = authorization_codes[code]
+    # Single use (RFC 9700 §2.1.1): the code is taken out of the store before anything is checked,
+    # so a failed attempt (wrong client, redirect_uri or verifier) spends it as a success would.
+    auth_data = authorization_codes.pop(code, None)
     _prune_auth_cache(datetime.now(timezone.utc))
+    if auth_data is None:
+        raise HTTPException(status_code=400, detail="Invalid or expired authorization code")
 
     if client_id != auth_data["client_id"]:
         raise HTTPException(status_code=400, detail="Invalid client_id")
+    # The exact URI the code was issued for (RFC 6749 §4.1.3), compared whole.
     if redirect_uri != auth_data["redirect_uri"]:
         raise HTTPException(status_code=400, detail="Invalid redirect_uri")
-    if datetime.now(timezone.utc) - auth_data["timestamp"] > _AUTH_CACHE_TTL:
-        del authorization_codes[code]
+    if datetime.now(timezone.utc) - auth_data["timestamp"] > _CODE_TTL:
         raise HTTPException(status_code=400, detail="Authorization code expired")
-
-    if auth_data.get("code_challenge"):
-        if not code_verifier:
-            raise HTTPException(status_code=400, detail="Missing code_verifier for PKCE")
-        if auth_data["code_challenge_method"] == "S256":
-            digest = hashlib.sha256(code_verifier.encode()).digest()
-            verifier_challenge = base64.urlsafe_b64encode(digest).decode().rstrip("=")
-        else:
-            verifier_challenge = code_verifier
-        if not secrets.compare_digest(verifier_challenge, auth_data["code_challenge"]):
-            raise HTTPException(status_code=400, detail="Invalid code_verifier")
-
-    del authorization_codes[code]
+    _require_s256_verifier(auth_data, code_verifier)
 
     info = auth_data["user_info"]
     try:
@@ -2450,10 +2466,10 @@ async def _grant_authorization_code(
             _FIRST_PARTY_HINT,
         )
 
-    # A sign-in delivered to a persona's facet (a `FACET_URIS` origin other than the web app)
-    # gets a delegation narrowed to that facet, never the platform token or a refresh token.
-    # Only a facet Origin lists is narrowed to; one it admits as a redirect but does not list gets
-    # no token at all (review 12): a redirect URL never picks the audience.
+    # A sign-in delivered to a persona's facet (`NARROW_FACETS`) gets a delegation narrowed to that
+    # facet, never the platform token or a refresh token. Delivered anywhere but the web app
+    # (`APP_URI`), Origin's own pages or such a facet, it gets no token at all (review 12): a
+    # redirect URL never picks the audience.
     if _is_first_party_client(issuing_client_id):
         persona = origin_auth_service.facet_narrowing(auth_data.get("redirect_uri") or "")
         if persona is False:
@@ -2699,19 +2715,14 @@ def _presented_bearer(request: Request) -> str:
 
 
 def _validated_redirect_uris(raw) -> list[str]:
-    """Every registered redirect must be one `/authorize` would honour.
+    """Every registered redirect must be one the operator configured for registration.
 
-    THE AGREEMENT IS THE POINT. `is_client_redirect_allowed` is the gate `/authorize` applies to
-    every client, registered or not; it is what admits loopback, which is where an MCP client's
-    callback lands. Registering a URI that gate would refuse promises delivery to an address this
-    authority will never deliver to — a lie told at registration time, discovered by the client one
-    whole browser round-trip later, as a 403 on a flow that had already worked twice.
-
-    So the check here IS that function, called on each entry, plus two syntactic rules it does not
-    apply because `/authorize` has no need of them: the URI must be absolute, and it must carry no
-    fragment (RFC 6749 §3.1.2). Both narrow this endpoint relative to `/authorize`, which is the
-    safe direction to differ in — a URI refused here is one that would have been honoured, never
-    the reverse, so nothing registered is ever refused later.
+    Registration is how a URI comes to be configured for a client, so what it may record is itself
+    configuration: each entry must appear in `CLIENT_REGISTRATION_REDIRECT_URIS`, compared whole
+    (`auth_service.is_registration_redirect_allowed`; a listed http loopback URI admits any port,
+    RFC 8252 §7.3). Nothing registers an arbitrary third-party address, and an empty list refuses
+    every one. Two syntactic rules come first: the URI must be absolute, and it must carry no
+    fragment (RFC 6749 §3.1.2).
     """
     if raw is None:
         raise _RegistrationRefused(
@@ -2741,15 +2752,12 @@ def _validated_redirect_uris(raw) -> list[str]:
             raise _RegistrationRefused(
                 "invalid_redirect_uri", f"redirect_uri must not contain a fragment: {uri!r}"
             )
-        if not is_client_redirect_allowed(uri):
-            # Named settings, for the same reason `/authorize` names them: the operator is the only
-            # reader who can act on this, and the two ways to be here are a facet this authority has
-            # not been told about and a caller asking for somewhere it may not go.
+        if not is_registration_redirect_allowed(uri):
+            # Named setting: the operator is the only reader who can act on this.
             raise _RegistrationRefused(
                 "invalid_redirect_uri",
-                f"redirect_uri {uri!r} is not one this authority will deliver a code to — its base "
-                "is not among FACET_URI/FACET_URIS/ORIGIN_URI and it is not loopback. Registering "
-                "it would promise a delivery /authorize refuses.",
+                f"redirect_uri {uri!r} is not one a registration may name: it is not listed, "
+                "exactly, in CLIENT_REGISTRATION_REDIRECT_URIS.",
             )
         validated.append(uri)
     return validated
@@ -3238,7 +3246,7 @@ async def email_verify_request(
     `/auth/password/reset-request` shares; see there for what a flooded address keeps."""
     if not email_service.is_configured():
         raise HTTPException(status_code=503, detail="Email service not configured.")
-    email = (payload.email or "").strip().lower()
+    email = otp_service.normalize_email(payload.email)
     tag = _mail_send_admitted(request, email, "verification resend")
     if tag is None:
         return {"sent": True}
@@ -3576,7 +3584,7 @@ async def password_reset_request(
             detail="Email service not configured — cannot send a reset link.",
         )
 
-    email = (payload.email or "").strip().lower()
+    email = otp_service.normalize_email(payload.email)
     tag = _mail_send_admitted(request, email, "password reset request")
     if tag is None:
         return {"sent": True}
@@ -3760,7 +3768,10 @@ async def bootstrap_claim(body: BootstrapClaimRequest, db: Session = Depends(get
     if body.password and len(body.password) < 12:
         raise HTTPException(status_code=422, detail="Password must be at least 12 characters")
 
-    op_email = (body.email or "").strip().lower()
+    try:
+        op_email = require_canonical_email(body.email) if (body.email or "").strip() else ""
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
     person_name = (body.name or "").strip() or (op_email.split("@")[0] if op_email else "operator")
     password_hash = await run_kdf(hash_password, body.password) if body.password else None
 
@@ -4139,7 +4150,7 @@ async def person_reauth_complete(request: Request, code: str, state: str,
     token is minted, and no session is started or replaced: the one it began in stays."""
     from origin.services import origin_session, person_step_up
 
-    row = person_step_up.complete(db, state, code, authorization_codes, _AUTH_CACHE_TTL,
+    row = person_step_up.complete(db, state, code, authorization_codes, _CODE_TTL,
                                   session_sha256=origin_session.digest_of(request))
     return HTMLResponse(
         "<!doctype html><meta charset=utf-8><title>Confirmed</title>"
@@ -4176,9 +4187,11 @@ async def link_provider(
         raise HTTPException(status_code=403, detail="the sign-in to be linked was not made for "
                             "this link attempt")
     await person_step_up.require(request, db, str(person.id))
-    if body.code not in authorization_codes:
+    # Single use from here: the step-up above may ask the person to confirm and come back, so the
+    # code survives it; past it, every outcome spends the code.
+    auth_data = authorization_codes.pop(body.code, None)
+    if auth_data is None:
         raise HTTPException(status_code=400, detail="Invalid or expired authorization code")
-    auth_data = authorization_codes[body.code]
     if body.redirect_uri != auth_data["redirect_uri"]:
         raise HTTPException(status_code=400, detail="Invalid redirect_uri")
     # Made by Origin's own page for this: its own platform client, back to `/passkey` (review 11).
@@ -4186,22 +4199,10 @@ async def link_provider(
             or auth_data.get("redirect_uri") != person_step_up.link_uri()):
         raise HTTPException(status_code=403, detail="the sign-in to be linked was not made by "
                             "Origin's own page for this link")
-    if datetime.now(timezone.utc) - auth_data["timestamp"] > _AUTH_CACHE_TTL:
-        authorization_codes.pop(body.code, None)
+    if datetime.now(timezone.utc) - auth_data["timestamp"] > _CODE_TTL:
         raise HTTPException(status_code=400, detail="Authorization code expired")
+    _require_s256_verifier(auth_data, body.code_verifier)
 
-    if auth_data.get("code_challenge"):
-        if not body.code_verifier:
-            raise HTTPException(status_code=400, detail="Missing code_verifier")
-        if auth_data["code_challenge_method"] == "S256":
-            digest = hashlib.sha256(body.code_verifier.encode()).digest()
-            computed = base64.urlsafe_b64encode(digest).decode().rstrip("=")
-        else:
-            computed = body.code_verifier
-        if not secrets.compare_digest(computed, auth_data["code_challenge"]):
-            raise HTTPException(status_code=400, detail="Invalid code_verifier")
-
-    authorization_codes.pop(body.code, None)
     link_attempts.spend(db, attempt)
     info = auth_data["user_info"]
     try:
@@ -4295,7 +4296,7 @@ def _discovery_document() -> dict:
         "jwks_uri": f"{base_url}/.well-known/jwks.json",
         "response_types_supported": ["code"],
         "grant_types_supported": ["authorization_code", "refresh_token", "client_credentials"],
-        "code_challenge_methods_supported": ["S256", "plain"],
+        "code_challenge_methods_supported": ["S256"],
         "scopes_supported": ["read", "write", "openid", "email", "profile"],
         "token_endpoint_auth_methods_supported": ["none", "client_secret_post"],
         "subject_types_supported": ["public"],

@@ -54,16 +54,24 @@ def test_mantle_token_refuses_when_the_session_is_another_person_s(custody_clien
 ])
 @pytest.mark.parametrize("platform", [True, False])
 def test_mantle_s_loopback_origin_is_refused_however_spelled(monkeypatch, mantle, uri, platform):
+    """Mantle's loopback origin is refused however spelled, even when listed: for a first-party
+    client, whose list is exact (the URI and another port both named), and for a registered one,
+    whose loopback entries admit any port (RFC 8252 §7.3)."""
     from origin import config
-    from origin.services.auth_service import is_client_redirect_allowed
+    from origin.services.auth_service import (is_client_redirect_allowed,
+                                              is_registered_redirect_allowed)
 
+    registered = ["http://127.0.0.1/cb", "http://localhost/cb", "http://[::1]/cb"]
+    first_party = [uri, "http://127.0.0.1:8083/cb"]
     monkeypatch.setattr(config, "MANTLE_URI", mantle, raising=False)
-    monkeypatch.setattr(config, "FACET_URI", "http://localhost:5173")
-    monkeypatch.setattr(config, "FACET_URIS", [], raising=False)
-    monkeypatch.setattr(config, "ORIGIN_URI", "http://localhost:8080", raising=False)
-    monkeypatch.setattr(config, "PLATFORM_DEV_REDIRECTS", True, raising=False)
-    assert is_client_redirect_allowed(uri, platform_client=platform) is False
-    assert is_client_redirect_allowed("http://127.0.0.1:8083/cb", platform_client=platform)
+    monkeypatch.setattr(config, "CLIENT_REDIRECT_URIS", {"platform": first_party}, raising=False)
+
+    def allowed(u):
+        return (is_client_redirect_allowed(u, client_id="platform") if platform
+                else is_registered_redirect_allowed(u, registered))
+
+    assert allowed(uri) is False
+    assert allowed("http://127.0.0.1:8083/cb")
 
 
 # -- LOW 2: Mantle is never an SSO return or the app -----------------------------------------------
@@ -77,10 +85,10 @@ def test_mantle_s_origin_is_never_published_as_a_return(monkeypatch):
     monkeypatch.setattr(config, "AUTHORITY_ISSUER", "https://origin.agience.ai", raising=False)
     monkeypatch.setattr(config, "APP_URI", "https://MANTLE.agience.ai.", raising=False)
     monkeypatch.setattr(config, "SSO_RETURN_URIS",
-                        ["https://mantle.agience.ai:443/", "https://lumen.agience.ai/cb"],
+                        ["https://mantle.agience.ai:443/", "https://sp.agience.ai/cb"],
                         raising=False)
     assert auth_router._app_uri() is None
-    assert auth_router._sso_return_uris() == ["https://lumen.agience.ai/cb"]
+    assert auth_router._sso_return_uris() == ["https://sp.agience.ai/cb"]
 
 
 # -- LOW 3: deactivation ends Origin sessions --------------------------------------------------
@@ -186,6 +194,7 @@ def test_only_a_grantee_of_the_item_itself_is_named(custody_client, people):
 
 
 def test_a_new_account_s_name_is_not_its_address(custody_client, monkeypatch):
+    from origin.tests.conftest import PKCE
     from origin.db import persons as db_persons
     from origin.db.session import SessionLocal
 
@@ -196,7 +205,7 @@ def test_a_new_account_s_name_is_not_its_address(custody_client, monkeypatch):
     from origin import config
     page = c.get("/auth/authorize", params={
         "response_type": "code", "client_id": getattr(config, "PLATFORM_CLIENT_ID", "platform"),
-        "redirect_uri": f"{config.ORIGIN_URI.rstrip('/')}/", "provider": "local"})
+        "redirect_uri": f"{config.ORIGIN_URI.rstrip('/')}/", "provider": "local", **PKCE})
     assert page.status_code == 200, page.text[:300]
     state = page.text.split('data-state="')[1].split('"')[0]
     reg = c.post("/auth/authorize/register", json={"oauth_state": state,

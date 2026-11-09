@@ -144,12 +144,12 @@ class TestSsoReturnUris:
 
     def test_explicit_entries_keep_their_path_and_are_normalised(self, monkeypatch):
         assert self._list(monkeypatch, app="https://my.agience.ai", sso=[
-            "https://Lumen.Agience.ai:443/auth/cb", "https://my.agience.ai/",
-        ]) == ["https://my.agience.ai/", "https://lumen.agience.ai/auth/cb"]
+            "https://Sp.Agience.ai:443/auth/cb", "https://my.agience.ai/",
+        ]) == ["https://my.agience.ai/", "https://sp.agience.ai/auth/cb"]
 
     @pytest.mark.parametrize("bad", [
-        "http://lumen.agience.ai/", "https://lumen.agience.ai/?next=x", "https://lumen.agience.ai/#x",
-        "https://u:p@lumen.agience.ai/", "https://localhost/", "https://origin.agience.ai/",
+        "http://sp.agience.ai/", "https://sp.agience.ai/?next=x", "https://sp.agience.ai/#x",
+        "https://u:p@sp.agience.ai/", "https://localhost/", "https://origin.agience.ai/",
         "not a url",
     ])
     def test_unqualified_entries_are_left_out(self, monkeypatch, bad):

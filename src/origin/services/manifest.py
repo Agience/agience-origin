@@ -25,6 +25,7 @@ from sqlalchemy.orm import Session
 
 from origin.db import persons as db_persons
 from origin.services import auth_service as origin_auth
+from origin.services.email_address import require_canonical_email
 from origin.services.platform_settings_service import settings as platform_settings
 
 logger = logging.getLogger(__name__)
@@ -112,9 +113,18 @@ def apply(db: Session, manifest: dict[str, Any]) -> dict[str, int]:
 
 
 def _ensure_operator(db: Session, operator: dict) -> bool:
-    """Create the operator Person if no one with this email exists yet."""
-    email = (operator.get("email") or "").strip().lower()
-    if not email:
+    """Create the operator Person if no one with this email exists yet.
+
+    The manifest's address is the operator's own, written to create their account: canonical or
+    refused (`email_address.require_canonical_email`), never rewritten. A refused address creates
+    nothing and is logged."""
+    raw = (operator.get("email") or "").strip()
+    if not raw:
+        return False
+    try:
+        email = require_canonical_email(raw)
+    except ValueError as exc:
+        logger.error("manifest operator email refused: %s", exc)
         return False
     existing = db_persons.get_by_email(db, email)
     if existing:

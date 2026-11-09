@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 from origin.db import otp_codes as db_otp
 from origin.services import guess_budget
 from origin.services.auth_service import log_tag, run_kdf
+from origin.services.email_address import lookup_email
 
 logger = logging.getLogger(__name__)
 
@@ -119,14 +120,14 @@ async def _verify_code_hash_async(code: str, code_hash: str) -> bool:
 
 
 def normalize_email(email: str) -> str:
-    """The one form of an address the OTP ledger is keyed by: stripped and lower-cased, the form
-    `person_service` stores addresses in.
+    """The one form of an address the OTP ledger is keyed by: the canonical form
+    (`email_address.lookup_email`) that `person_service` stores addresses in.
 
     Every entry point normalises before it looks anything up. Keyed by the raw string instead, a
     whitespace or case variant of an address would get a ledger of its own — its own live code and
     its own caps — while still resolving to the same person when it verified.
     """
-    return (email or "").strip().lower()
+    return lookup_email(email)
 
 
 def _limit_reached(db: Session, email: str, now: datetime) -> Optional[str]:

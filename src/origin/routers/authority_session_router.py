@@ -428,11 +428,19 @@ async def make_invite(request: Request, body: dict = Body(...), db: Session = De
     from origin.services import authority_ledger, email_service
     from origin.services.person_service import registration_paused
 
+    from origin.services.email_address import canonical_email
+
     person = _person(request, db)
     resource_id, email = body.get("resource_id"), str(body.get("email") or "").strip()
     if not isinstance(resource_id, str) or not resource_id:
         raise HTTPException(status_code=400, detail="resource_id is required")
-    if "@" not in email or len(email) > 254:
+    # The target is the canonical form: a claimant's stored address is canonical, so an invite to
+    # `x@d.com.` or `x@BÜCHER.de` would otherwise name a digest no account could ever match.
+    try:
+        email = canonical_email(email)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="email is the invitee's address")
+    if len(email) > 254:
         raise HTTPException(status_code=400, detail="email is the invitee's address")
     actions = _actions(body.get("actions"))
     # The name the owner typed or confirmed for what they share (review 14): echoed in the answer

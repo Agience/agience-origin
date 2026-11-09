@@ -12,9 +12,10 @@ Three claims carry this suite.
   population, the redirect binding, the shape of the refusal — is pinned in
   `test_authorize_client_enforcement`, which is where enforcement lives.
 
-· A registration is not a promise this authority will break. Every redirect URI accepted here is one
-  `is_client_redirect_allowed` admits, asserted against that function directly rather than against a
-  copy of its rules — the two cannot drift while this test reads the real one.
+· A registration names only what the operator configured. Every redirect URI accepted here is
+  listed, exactly, in `CLIENT_REGISTRATION_REDIRECT_URIS` (a listed loopback URI admits any port),
+  asserted against `is_registration_redirect_allowed` directly; nothing self-registers an arbitrary
+  third-party address. A registered URI is then honoured at `/authorize` for that client alone.
 
 · OFF IS THE DEFAULT. Open registration lets anyone write a row; the operator turns it on, and may
   gate it with an initial access token.
@@ -27,6 +28,8 @@ app reads. Same note as `test_server_credentials_authz`.
 from __future__ import annotations
 
 import pytest
+
+from origin.tests.conftest import PKCE
 
 
 REDIRECT = "http://127.0.0.1:54321/callback"
@@ -79,6 +82,7 @@ def _authorize(client, *, client_id, redirect_uri=REDIRECT):
             "redirect_uri": redirect_uri,
             "scope": "openid email profile",
             "state": "st",
+            **PKCE,
         },
     )
 
@@ -242,15 +246,30 @@ def test_registration_is_not_a_client_configuration_endpoint(db_client, monkeypa
 # ---------------------------------------------------------------------------
 # Redirect URIs — the security-relevant field
 # ---------------------------------------------------------------------------
-def test_a_loopback_callback_registers_because_authorize_honours_it(db_client, monkeypatch):
-    """Where an MCP client's callback actually lands: a loopback listener on an ephemeral port."""
-    from origin.services.auth_service import is_client_redirect_allowed
+def test_a_listed_loopback_callback_registers_on_any_port(db_client, monkeypatch):
+    """Where an MCP client's callback lands: a loopback listener on an ephemeral port. A listed
+    loopback URI admits any port (RFC 8252 §7.3), and nothing else about it varies."""
+    from origin import config
 
     _enable(monkeypatch)
+    monkeypatch.setattr(config, "CLIENT_REGISTRATION_REDIRECT_URIS",
+                        ["http://127.0.0.1/cb", "http://localhost/cb"])
     for uri in ("http://127.0.0.1:1/cb", "http://localhost:65535/cb"):
-        assert is_client_redirect_allowed(uri), "the premise of this test moved"
         resp = _register(db_client, body={"redirect_uris": [uri]})
         assert resp.status_code == 201, f"{uri} was refused: {resp.text}"
+    for uri in ("http://127.0.0.1:1/other", "http://[::1]:1/cb", "http://LOCALHOST:1/cb"):
+        assert _register(db_client, body={"redirect_uris": [uri]}).status_code == 400, uri
+
+
+def test_nothing_registers_when_the_operator_lists_nothing(db_client, monkeypatch):
+    """Registration on, and no URI listed for it: every redirect is refused, loopback included."""
+    from origin import config
+
+    _enable(monkeypatch)
+    monkeypatch.setattr(config, "CLIENT_REGISTRATION_REDIRECT_URIS", [])
+    resp = _register(db_client, body={"redirect_uris": [REDIRECT]})
+    assert resp.status_code == 400
+    assert "CLIENT_REGISTRATION_REDIRECT_URIS" in resp.json()["error_description"]
 
 
 @pytest.mark.parametrize("uri", [
@@ -258,27 +277,23 @@ def test_a_loopback_callback_registers_because_authorize_honours_it(db_client, m
     "ftp://localhost:5173/cb",
     "https://facet.evil.example/cb",
 ])
-def test_a_redirect_authorize_would_refuse_cannot_be_registered(db_client, monkeypatch, uri):
-    """The agreement, asserted against the real gate rather than a copy of its rules: if
-    `/authorize` will not deliver there, registration must not promise it."""
-    from origin.services.auth_service import is_client_redirect_allowed
+def test_an_unlisted_redirect_cannot_be_registered(db_client, monkeypatch, uri):
+    """A URI the operator did not list for registration is refused, asserted against the real
+    check rather than a copy of its rules."""
+    from origin.services.auth_service import is_registration_redirect_allowed
 
     _enable(monkeypatch)
-    assert not is_client_redirect_allowed(uri), "the premise of this test moved"
+    assert not is_registration_redirect_allowed(uri), "the premise of this test moved"
     resp = _register(db_client, body={"redirect_uris": [uri]})
     assert resp.status_code == 400
     assert resp.json()["error"] == "invalid_redirect_uri"
 
 
-def test_nothing_registrable_is_a_redirect_authorize_would_refuse(db_client, monkeypatch):
-    """The one-directional guarantee stated as a property over a spread of shapes, so a future
-    loosening of either side is caught by the pair rather than by one case.
-
-    Registration is allowed to be STRICTER than `/authorize` — a fragment-bearing URI is refused
-    here and would have been honoured there — because that direction breaks no promise. The reverse
-    must never happen.
+def test_nothing_registrable_is_unlisted(db_client, monkeypatch):
+    """The guarantee stated as a property over a spread of shapes: whatever registers is listed
+    (`is_registration_redirect_allowed`), so no shape slips past the list.
     """
-    from origin.services.auth_service import is_client_redirect_allowed
+    from origin.services.auth_service import is_registration_redirect_allowed
 
     _enable(monkeypatch)
     candidates = [
@@ -293,8 +308,8 @@ def test_nothing_registrable_is_a_redirect_authorize_would_refuse(db_client, mon
     for uri in candidates:
         registered = _register(db_client, body={"redirect_uris": [uri]}).status_code == 201
         if registered:
-            assert is_client_redirect_allowed(uri), \
-                f"registration promised {uri!r}, which /authorize refuses"
+            assert is_registration_redirect_allowed(uri), \
+                f"registration recorded {uri!r}, which no list names"
 
 
 def test_a_fragment_bearing_redirect_is_refused(db_client, monkeypatch):

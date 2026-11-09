@@ -43,13 +43,20 @@ function qs(n) { return new URLSearchParams(location.search).get(n); }
 // `Referer`, and `localStorage` outlives the tab. It survives here only for the pages that already
 // use it — no new caller should reach for it.
 //
-// `SP_ALLOW` admits any `*.agience.ai` page, and is the outer bound. Every hand-off also needs
-// `isListedReturn`: the target's origin and path must be one of the exact return URIs the server
-// publishes (`sso_return_uris` on `/auth/providers`). Without that, an open redirect, a
-// user-authored page on any subdomain, or Mantle's own host would receive a token.
-const SP_ALLOW = /^https:\/\/([a-z0-9-]+\.)*agience\.ai(\/|$)/i;
+// No host is written here. `isSpCandidate` is shape only: an absolute https URL with no userinfo,
+// worth keeping while the list loads. Every hand-off needs `isListedReturn`: the target's origin
+// and path must be one of the exact return URIs the server publishes (`sso_return_uris` on
+// `/auth/providers`, which never names Origin's own origin, a loopback host or Mantle's origin).
+function isSpCandidate(rd) {
+  if (typeof rd !== "string" || !rd.startsWith("https://")) return false;
+  // `URL` drops a written default port, so `:443` would compare equal to a list entry without one.
+  if (/^https:\/\/[^/?#]*:443(?:[/?#]|$)/i.test(rd)) return false;
+  let u;
+  try { u = new URL(rd); } catch (e) { return false; }
+  return u.protocol === "https:" && !u.username && !u.password;
+}
 function isListedReturn(rd, listed) {
-  if (typeof rd !== "string" || !SP_ALLOW.test(rd) || !Array.isArray(listed)) return false;
+  if (!isSpCandidate(rd) || !Array.isArray(listed)) return false;
   let u;
   try { u = new URL(rd); } catch (e) { return false; }
   if (u.username || u.password || u.search || u.hash) return false;
@@ -88,7 +95,7 @@ async function spToken(token, rd, appUri) {
 async function finishLogin(token) {
   saveToken(token);
   const rd = qs("redirect_uri");
-  if (rd && SP_ALLOW.test(rd)) {
+  if (rd && isSpCandidate(rd)) {
     const r = await get("/auth/providers");
     const listed = r.ok && r.data && Array.isArray(r.data.sso_return_uris)
       ? r.data.sso_return_uris.filter((u) => typeof u === "string") : [];
@@ -137,7 +144,7 @@ function newNonce() {
 // A page without its own return target keeps the one already stashed and still live, so a second
 // attempt from a bare `/login` does not discard where the person came from.
 function stashVerification(nonce, email) {
-  const rd = qs("redirect_uri"), ok = !!rd && SP_ALLOW.test(rd), kept = ok ? null : readReturn();
+  const rd = qs("redirect_uri"), ok = !!rd && isSpCandidate(rd), kept = ok ? null : readReturn();
   try {
     localStorage.setItem(VERIFY_KEY, JSON.stringify({
       n: nonce, e: (email || "").toLowerCase(),
@@ -162,7 +169,7 @@ function readNonce() {
 }
 function readReturn() {
   const s = readVerification();
-  if (!s || typeof s.rd !== "string" || !SP_ALLOW.test(s.rd) || Date.now() - s.ts >= RETURN_TTL_MS) return null;
+  if (!s || typeof s.rd !== "string" || !isSpCandidate(s.rd) || Date.now() - s.ts >= RETURN_TTL_MS) return null;
   return s;
 }
 // Put a live return back on this page's URL and consume the stash, when its target is one of the

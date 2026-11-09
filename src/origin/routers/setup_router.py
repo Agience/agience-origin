@@ -25,6 +25,7 @@ from origin import config
 from origin.key_manager import delete_setup_token, get_setup_token
 from origin.db import persons as db_persons
 from origin.db.session import get_db
+from origin.services.email_address import require_canonical_email
 from origin.services.auth_service import (
     create_jwt_token,
     hash_password,
@@ -241,7 +242,11 @@ async def complete_setup(
             await run_kdf(hash_password, body.operator.password)
             if body.operator.password else None
         )
-        op_email = (body.operator.email or "").lower() if body.operator.email else ""
+        try:
+            # Typed by the operator to create their account: canonical or refused, not rewritten.
+            op_email = require_canonical_email(body.operator.email) if body.operator.email else ""
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
         person_name = body.operator.name or (op_email.split("@")[0] if op_email else "operator")
 
         person = db_persons.create(

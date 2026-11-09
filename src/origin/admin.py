@@ -3,11 +3,17 @@
     python -m origin.admin person show <email|username|id>
     python -m origin.admin person deactivate <email|username|id> --reason TEXT
     python -m origin.admin person reactivate <email|username|id> [--restore-password-from FILE]
+    python -m origin.admin person noncanonical
 
 `deactivate` switches an account off: it signs in nowhere and is mailed nothing. Nothing else about
 it changes, so `reactivate` restores it exactly. `--restore-password-from` puts back a password hash
 removed by hand before deactivation existed, from a JSON backup of person rows (`id`,
 `password_hash`); it is refused for an account that has a password. No hash is ever printed.
+
+`noncanonical` reads, and changes nothing: it lists every person whose stored address is not in the
+canonical form (`services.email_address`), such as `john@ikailo.com.`, with the canonical form and
+who holds it. Lookups by address use the canonical form, so these rows are reached by id:
+`person deactivate <id> --reason ...`.
 """
 
 from __future__ import annotations
@@ -18,7 +24,7 @@ import sys
 from pathlib import Path
 
 from origin.db.session import SessionLocal, init_engine
-from origin.services import person_service
+from origin.services import email_address, person_service
 
 
 def scheme(password_hash: str | None) -> str:
@@ -54,6 +60,7 @@ def run(argv: list[str] | None = None, out=print) -> int:
     sub = ap.add_subparsers(dest="noun", required=True)
     person = sub.add_parser("person").add_subparsers(dest="verb", required=True)
     person.add_parser("show").add_argument("who")
+    person.add_parser("noncanonical")
     d = person.add_parser("deactivate")
     d.add_argument("who")
     d.add_argument("--reason", required=True)
@@ -65,6 +72,14 @@ def run(argv: list[str] | None = None, out=print) -> int:
     init_engine()
     db = SessionLocal()
     try:
+        if args.verb == "noncanonical":
+            rows = email_address.non_canonical_rows(db)
+            for row in rows:
+                out(f"{row['id']}  email={row['email']!r}  canonical={row['canonical'] or '-'}  "
+                    f"canonical_holder={row['canonical_holder'] or '-'}  "
+                    f"deactivated={'yes' if row['deactivated'] else 'no'}")
+            out(f"{len(rows)} stored address(es) not in canonical form")
+            return 0
         p = person_service.find(db, args.who)
         if p is None:
             out(f"no person is named {args.who!r}")

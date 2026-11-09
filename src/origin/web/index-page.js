@@ -15,7 +15,7 @@ async function silentSso() {
   if (!isAuthed() || qs("code") || qs("error") || qs("prompt") === "login") return;
   const rd = qs("redirect_uri");
   if (!rd) { location.replace("/account"); return; }
-  if (!SP_ALLOW.test(rd)) return;
+  if (!isSpCandidate(rd)) return;
   const listed = await ssoReturnUris();
   if (signInBegun) return;
   if (isListedReturn(rd, listed) && ssoHandoffAllowed()) finishLogin(getToken());

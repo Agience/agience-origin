@@ -2,7 +2,7 @@
 and `js/page_scripts.test.cjs` (the inline scripts of `web/index.html` and `web/verify-email.html`).
 
 The session helpers the sign-in, verify and account pages share (the verification stash, the
-nonce, `SP_ALLOW`, the silent-SSO loop guard) are JavaScript, and a string match on the source
+nonce, `isSpCandidate`, the silent-SSO loop guard) are JavaScript, and a string match on the source
 cannot tell a guard that works from one that is merely present. Node runs them against stubbed
 browser storage instead. Skipped, with the reason printed under `-rs`, where no `node` is on PATH.
 """

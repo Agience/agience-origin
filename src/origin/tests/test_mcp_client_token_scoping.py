@@ -68,6 +68,11 @@ PERSON_EMAIL = "person@example.com"
 PERSON_NAME = "Test Person"
 
 
+_VERIFIER = "v" * 64
+_S256_OF_VERIFIER = __import__("base64").urlsafe_b64encode(
+    __import__("hashlib").sha256(_VERIFIER.encode()).digest()).decode().rstrip("=")
+
+
 def _seed_code(auth_router_module, *, client_id, code="test-code", scope="read write"):
     """Put a spent-once authorization code in place, as the OAuth callback would."""
     auth_router_module.authorization_codes[code] = {
@@ -82,7 +87,8 @@ def _seed_code(auth_router_module, *, client_id, code="test-code", scope="read w
         "client_id": client_id,
         "redirect_uri": "http://localhost:8080/cb",
         "scope": scope,
-        "code_challenge": None,
+        # Every code carries an S256 challenge; `_exchange` sends its verifier.
+        "code_challenge": _S256_OF_VERIFIER,
         "code_challenge_method": "S256",
         "timestamp": datetime.now(timezone.utc),
     }
@@ -97,7 +103,7 @@ def _exchange(client, *, code, client_id):
             "code": code,
             "redirect_uri": "http://localhost:8080/cb",
             "client_id": client_id,
-            "code_verifier": "v" * 64,
+            "code_verifier": _VERIFIER,
         },
     )
 
@@ -139,6 +145,8 @@ def _authorize(client, *, client_id, redirect_uri="http://localhost:8080/cb"):
             "redirect_uri": redirect_uri,
             "scope": "openid email profile",
             "state": "st",
+            "code_challenge": _S256_OF_VERIFIER,
+            "code_challenge_method": "S256",
         },
     )
 
@@ -178,19 +186,15 @@ def test_authorize_admits_a_registered_client_and_still_scopes_its_token(db_clie
 
 
 def test_authorize_refuses_a_redirect_base_this_authority_does_not_admit(db_client):
-    """The allowlist is the outer bound on delivery, and it holds for every client — here for a
-    configured first-party one, which has no registration to be bound by instead."""
+    """A first-party client's code goes only to a URI configured for it (`CLIENT_REDIRECT_URIS`)."""
     from origin import config
 
     resp = _authorize(
         db_client, client_id=config.PLATFORM_CLIENT_ID, redirect_uri="https://evil.example/cb"
     )
     assert resp.status_code == 403
-    # The operator reading this must be told where to look; an "Invalid redirect_uri" alone
-    # cannot distinguish an unlisted facet from a first-party client nobody enrolled.
-    detail = resp.json()["detail"]
-    assert "PLATFORM_CLIENT_IDS" in detail
-    assert "FACET_URIS" in detail
+    # The operator reading this is told which setting to change.
+    assert "CLIENT_REDIRECT_URIS" in resp.json()["detail"]
 
 
 # ---------------------------------------------------------------------------

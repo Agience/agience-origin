@@ -189,82 +189,49 @@ def test_is_person_allowed_glob_pattern(auth_modules):
     assert not auth_service.is_person_allowed(None, "user@example.com")  # bare domain doesn't match *.x
 
 
-def test_is_client_redirect_allowed(auth_modules):
+def test_is_client_redirect_allowed(auth_modules, monkeypatch):
+    """A first-party client's code goes only to a URI listed for it in `CLIENT_REDIRECT_URIS`."""
     cfg = auth_modules["config"]
     auth_service = auth_modules["auth_service"]
-    cfg.FACET_URI = "http://localhost:5173"
-    cfg.ORIGIN_URI = "http://localhost:8081"
+    monkeypatch.setattr(cfg, "CLIENT_REDIRECT_URIS",
+                        {"platform": ["http://localhost:5173/callback"]}, raising=False)
 
-    assert auth_service.is_client_redirect_allowed("http://localhost:5173/callback")
-    assert auth_service.is_client_redirect_allowed("http://localhost:8081/callback")
-    assert auth_service.is_client_redirect_allowed("https://vscode.dev/redirect")
-    assert auth_service.is_client_redirect_allowed("http://127.0.0.1:9000/cb")
-    assert not auth_service.is_client_redirect_allowed("http://evil.example/cb")
-    assert not auth_service.is_client_redirect_allowed("ftp://localhost:5173/")
+    assert auth_service.is_client_redirect_allowed("http://localhost:5173/callback",
+                                                   client_id="platform")
+    # Another client id, another path, another host, another scheme: none is listed.
+    assert not auth_service.is_client_redirect_allowed("http://localhost:5173/callback",
+                                                       client_id="agience-client")
+    for uri in ("http://localhost:5173/other", "http://evil.example/cb", "ftp://localhost:5173/",
+                "https://vscode.dev/redirect", "http://127.0.0.1:9000/cb"):
+        assert not auth_service.is_client_redirect_allowed(uri, client_id="platform"), uri
 
 
-def test_many_facets_are_admitted_and_an_unlisted_one_is_still_refused(auth_modules):
-    """Many observation planes, one authority.
-
-    A node runs several facets (mantle's browser, a persona's surface, pharos). `FACET_URIS`
-    admits all of them: a delegation is minted from a user token a facet forwards, so a facet
-    that cannot sign in never has one to forward.
-    """
+def test_facet_uris_no_longer_decides_a_redirect(auth_modules, monkeypatch):
+    """`FACET_URI`, `FACET_URIS` and `ORIGIN_URI` name the node's surfaces; none of them admits a
+    redirect. With nothing in `CLIENT_REDIRECT_URIS`, a facet's own callback is refused."""
     cfg = auth_modules["config"]
     auth_service = auth_modules["auth_service"]
-    # https + a non-local ORIGIN_URI, so the localhost dev-range escape hatch cannot be what passes.
-    cfg.FACET_URI = "https://mantle.example.test"
+    cfg.FACET_URI = "https://app.example.test"
     cfg.ORIGIN_URI = "https://origin.example.test"
-    cfg.FACET_URIS = [
-        "https://mantle.example.test",
-        "https://aria.example.test",
-        "https://pharos.example.test",
-    ]
+    cfg.FACET_URIS = ["https://aria.example.test", "https://pharos.example.test"]
+    monkeypatch.setattr(cfg, "CLIENT_REDIRECT_URIS", {}, raising=False)
 
-    assert auth_service.is_client_redirect_allowed("https://mantle.example.test/auth/callback")
-    assert auth_service.is_client_redirect_allowed("https://aria.example.test/auth/callback")
-    assert auth_service.is_client_redirect_allowed("https://pharos.example.test/auth/callback")
-
-    # The controls: widening which bases are admitted must not loosen how one is matched.
-    # `sage.` is a real sibling facet that simply was not listed — the everyday case.
-    assert not auth_service.is_client_redirect_allowed("https://sage.example.test/auth/callback")
-    # A suffix match would admit this; the netloc comparison must not.
-    assert not auth_service.is_client_redirect_allowed("https://evil-aria.example.test/cb")
-    # A prefix/substring match would admit both of these — the classic open-redirect shapes.
-    assert not auth_service.is_client_redirect_allowed("https://aria.example.test.evil.com/cb")
-    assert not auth_service.is_client_redirect_allowed(
-        "https://evil.com/?next=https://aria.example.test/auth/callback"
-    )
+    for uri in ("https://app.example.test/auth/callback", "https://origin.example.test/",
+                "https://aria.example.test/auth/callback"):
+        assert not auth_service.is_client_redirect_allowed(uri, client_id="platform"), uri
 
 
-def test_facet_uris_survives_being_set_as_one_string(auth_modules):
-    """An operator can set the env var by hand, and a bare string is iterable.
-
-    Without normalisation, `extend()` over a str would admit its individual characters as allowed
-    bases — a failure mode that resembles nothing that looks like a URL in any log.
-    """
+def test_one_uri_set_as_a_string_is_one_uri(auth_modules, monkeypatch):
+    """A hand-written value can put one string where a client's list belongs; it is one URI, never
+    its characters."""
     cfg = auth_modules["config"]
     auth_service = auth_modules["auth_service"]
-    cfg.FACET_URI = "https://mantle.example.test"
-    cfg.ORIGIN_URI = "https://origin.example.test"
-    cfg.FACET_URIS = "https://aria.example.test,https://pharos.example.test"
+    monkeypatch.setattr(cfg, "CLIENT_REDIRECT_URIS",
+                        {"platform": "https://app.example.test/auth/callback"}, raising=False)
 
-    assert auth_service.is_client_redirect_allowed("https://aria.example.test/auth/callback")
-    assert auth_service.is_client_redirect_allowed("https://pharos.example.test/auth/callback")
-    assert not auth_service.is_client_redirect_allowed("https://sage.example.test/auth/callback")
-
-
-def test_an_empty_facet_uris_changes_nothing(auth_modules):
-    """A node that declares only `FACET_URI` and leaves `FACET_URIS` empty is unaffected by it."""
-    cfg = auth_modules["config"]
-    auth_service = auth_modules["auth_service"]
-    cfg.FACET_URI = "https://mantle.example.test"
-    cfg.ORIGIN_URI = "https://origin.example.test"
-    cfg.FACET_URIS = []
-
-    assert auth_service.is_client_redirect_allowed("https://mantle.example.test/auth/callback")
-    assert auth_service.is_client_redirect_allowed("https://origin.example.test/auth/callback")
-    assert not auth_service.is_client_redirect_allowed("https://aria.example.test/auth/callback")
+    assert auth_service.is_client_redirect_allowed("https://app.example.test/auth/callback",
+                                                   client_id="platform")
+    assert not auth_service.is_client_redirect_allowed("h", client_id="platform")
 
 
 def test_authcontext_field_parity(auth_modules):

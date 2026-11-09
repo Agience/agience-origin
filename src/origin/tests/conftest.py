@@ -9,7 +9,26 @@ import os as _os
 # machine-local `.env` (real creds) must not leak in (see origin.config.load_env).
 _os.environ.setdefault("AGIENCE_NO_DOTENV", "1")
 
+import base64
+import hashlib
+import json
 from pathlib import Path
+
+#: The test node's own redirect URIs (`CLIENT_REDIRECT_URIS`), on the in-code default host
+#: (`FACET_URI` = `ORIGIN_URI` = http://localhost:8080): a callback, the web app's callback and
+#: Origin's own pages, for both first-party ids. A test about another address configures it.
+_TEST_HOST = "http://localhost:8080"
+_TEST_PAGES = [f"{_TEST_HOST}/cb", f"{_TEST_HOST}/auth/callback", f"{_TEST_HOST}/",
+               f"{_TEST_HOST}/passkey", f"{_TEST_HOST}/auth/reauth/complete"]
+TEST_CLIENT_REDIRECT_URIS = {"agience-client": _TEST_PAGES, "platform": _TEST_PAGES}
+#: What a test registration may name: a loopback callback (any port, RFC 8252 §7.3) and the test host's.
+TEST_REGISTRATION_REDIRECT_URIS = "http://127.0.0.1/callback,http://localhost:8080/cb"
+
+#: A fixed PKCE pair for tests that start a flow: every `/authorize` requires an S256 challenge.
+PKCE_VERIFIER = "test-verifier-" + "v" * 50
+PKCE_CHALLENGE = base64.urlsafe_b64encode(
+    hashlib.sha256(PKCE_VERIFIER.encode()).digest()).decode().rstrip("=")
+PKCE = {"code_challenge": PKCE_CHALLENGE, "code_challenge_method": "S256"}
 
 import pytest
 from cryptography.hazmat.primitives import serialization
@@ -138,6 +157,10 @@ def origin_app(monkeypatch, jwt_keypair):
     monkeypatch.setenv("ORIGIN_SKIP_MIGRATIONS", "1")
     monkeypatch.setenv("ORIGIN_SKIP_DB_SETTINGS", "1")
     monkeypatch.setenv("DATABASE_URL", "sqlite:///:memory:")
+    # No redirect target exists in code, so the test node configures its own, as any install does:
+    # the default host's pages for both first-party ids, and a loopback callback for registration.
+    monkeypatch.setenv("CLIENT_REDIRECT_URIS", json.dumps(TEST_CLIENT_REDIRECT_URIS))
+    monkeypatch.setenv("CLIENT_REGISTRATION_REDIRECT_URIS", TEST_REGISTRATION_REDIRECT_URIS)
 
     # Re-import after env vars are set so module-level Path resolution picks them up.
     import importlib

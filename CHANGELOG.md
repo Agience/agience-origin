@@ -7,6 +7,17 @@ All notable changes to `agience-origin` are recorded here. The format follows
 
 ## [0.2.12] - 2026-11-08
 
+### Security
+- `/auth/authorize` delivers a code only to a redirect URI configured for the client, compared whole: a first-party client's entry in the new `CLIENT_REDIRECT_URIS` (a JSON object, client id to exact URIs), or a registered client's own registration. No redirect target exists in code: the tool pages (`vscode.dev`, `oauth.pstmn.io`), `PLATFORM_DEV_REDIRECTS`, the built-in loopback allowance and the local-development port range are removed, and `FACET_URI`, `FACET_URIS` and `ORIGIN_URI` no longer admit redirects. A listed http loopback URI admits any port (RFC 8252 §7.3). Every refusal is a 403 naming the setting; a URI on Mantle's origin is refused whatever lists it.
+- `POST /auth/register` records only redirect URIs listed in the new `CLIENT_REGISTRATION_REDIRECT_URIS`; empty refuses every one (400 `invalid_redirect_uri`).
+- PKCE with S256 is required on every authorization-code flow: a missing `code_challenge`, `plain`, or a challenge that is not a 43-character base64url digest is refused (400).
+- An authorization code is single-use from the first exchange attempt: a wrong client, redirect URI or verifier spends it. It lives 60 seconds and is redeemed only with the exact redirect URI it was issued for.
+- A first-party code delivered anywhere but the web app (`APP_URI`), Origin's own pages, or a facet in `NARROW_FACETS` is answered with no token.
+- One account per address, however the address is written. Every address Origin stores or looks up goes through one canonical form (`services.email_address`): stripped, lower-cased, the domain without a trailing dot and in its IDNA ASCII form (punycode), exactly one `@`. `john@ikailo.com.` and `anna@bücher.de` find the accounts at `john@ikailo.com` and `anna@xn--bcher-kva.de`. Registration (`/auth/password/register`, `/auth/authorize/register`), the setup wizard, the bootstrap claim and the manifest operator refuse an address that is not already canonical apart from case and surrounding space, and rewrite none; sign-in codes, password reset, the verification resend, passkey sign-in, invites, and an address a provider asserts are canonicalised, not refused. Plus-addressing and dots in the local part stay distinct. `python -m origin.admin person noncanonical` lists, read-only, every stored address that is not canonical, with the canonical form and who holds it; the operator deactivates such a row by its id (`person deactivate <id> --reason ...`), since its address now finds the canonical account. No stored address is changed.
+
+### Removed
+- The retired `lumen.agience.ai` site is gone from the suite: the sign-in and return-list tests use a neutral listed SP (`sp.agience.ai`), and the `/auth/userinfo` case for a narrowed delegation is stated for the staging gate, the one `forward_auth` that still asks it. `NARROWED_ROUTES` keeps `GET /auth/userinfo` for that gate.
+
 ### Fixed (release build)
 - Reviews 17–19's cross-repository cases skip, with the reason, where Mantle or Crystal is not importable: a lone checkout of Origin, as GitHub's build runs it, failed 31 of them on the import. The sovereign CI's workspace has both and runs them all.
 

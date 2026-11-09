@@ -17,6 +17,7 @@ from origin.db import person_identities as db_identities
 from origin.db import persons as db_persons
 from origin.models.person import Person
 from origin.services.auth_service import is_person_allowed
+from origin.services.email_address import canonical_email, lookup_email, require_canonical_email
 
 
 class RegistrationPaused(PermissionError):
@@ -137,8 +138,12 @@ def get_or_create_user_by_oidc_identity(
     with a fresh step-up by a method the account already has (`services.person_step_up`).
 
     `email_verified` decides only whether a new person's address is recorded as confirmed.
+
+    The provider's address is canonicalised (`email_address.lookup_email`), never refused: a
+    sign-in the provider completed is not the person typing an address, and the canonical form is
+    what makes `x@d.com.` from a provider find the account at `x@d.com`.
     """
-    email = (email or "").strip().lower()
+    email = lookup_email(email)
     name = (name or "").strip() or "User"
     google_id = oidc_subject if oidc_provider == "google" else None
     if not is_person_allowed(google_id, email):
@@ -215,7 +220,10 @@ def create_user_with_password(
     if not allow_paused:
         _refuse_new_account()
     username = (username or "").strip()
-    email = (email or "").strip().lower()
+    # Typed by the person creating the account: refused unless already canonical (apart from case
+    # and surrounding space), never rewritten. A ValueError, which both register routes answer
+    # with their one refusal.
+    email = require_canonical_email(email) if (email or "").strip() else ""
     # Only the name the person gave. A username is often their address, and a name made from it
     # would show the address to everyone they are shared with.
     name = (name or "").strip()
@@ -243,10 +251,9 @@ def create_user_with_password(
 
 
 def get_or_create_user_by_email(db: Session, email: str) -> Person:
-    """Used for email-OTP login. Creates a passwordless user if missing."""
-    email = (email or "").strip().lower()
-    if not email or "@" not in email:
-        raise ValueError("Valid email is required")
+    """Used for email-OTP login. Creates a passwordless user if missing, at the canonical form of
+    the address the code was mailed to (the OTP ledger is keyed by that form already)."""
+    email = canonical_email(email)
     if not is_person_allowed(None, email):
         raise PermissionError("Person is not allowed to access this system")
 
@@ -372,7 +379,7 @@ def find(db: Session, identifier: str) -> Optional[Person]:
     if not ident:
         return None
     if "@" in ident:
-        return get_user_by_email(db, ident.lower())
+        return get_user_by_email(db, ident)
     try:
         found = get_user_by_id(db, ident)
     except (ValueError, TypeError):

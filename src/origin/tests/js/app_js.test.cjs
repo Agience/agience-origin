@@ -69,18 +69,16 @@ const run = (ctx, code) => vm.runInContext(code, ctx);
 const SP = "https://my.agience.ai/";
 const stashFor = (rd, extra) => JSON.stringify(Object.assign({ n: "abc", rd, st: "S", ts: Date.now() }, extra));
 
-// ── readReturn / SP_ALLOW against hostile stored values ─────────────────────────────────────────
+// ── readReturn / isSpCandidate against hostile stored values ────────────────────────────────────
 test("an allowlisted stored return is read back", () => {
   const ctx = page("https://origin.agience.ai/verify-email", { local: storage({ "agience.verify": stashFor(SP) }) });
   assert.equal(run(ctx, "readReturn()").rd, SP);
 });
 
+// Malformed or credential-carrying targets: refused even when a list names them.
 for (const rd of [
-  "https://evil.example/",
-  "https://agience.ai.evil.example/",
   "https://agience.ai@evil.example/",
   "https://evil.example@agience.ai.evil.example/",
-  "https://evil.example\\.agience.ai/",
   "//my.agience.ai/",
   "http://my.agience.ai/",
   "javascript:alert(1)//agience.ai/",
@@ -96,18 +94,29 @@ for (const rd of [
   });
 }
 
+// A well-formed https target on any host is kept while the list loads, and handed nothing unless
+// the server lists it exactly: no host is admitted or refused by name.
+for (const rd of ["https://evil.example/", "https://agience.ai.evil.example/",
+                  "https://evil.example\\.agience.ai/"]) {
+  test(`an unlisted return of ${JSON.stringify(rd)} is handed nothing`, () => {
+    const ctx = page("https://origin.agience.ai/verify-email", { local: storage({ "agience.verify": stashFor(rd) }) });
+    assert.equal(run(ctx, `restoreReturn(${JSON.stringify([SP])})`), false);
+    assert.equal(run(ctx, `isListedReturn(${JSON.stringify(rd)}, ${JSON.stringify([SP])})`), false);
+  });
+}
+
 // ── exact return list: silent hand-offs go only to published targets ──────────────────────────
-const LISTED = ["https://my.agience.ai/", "https://lumen.agience.ai/auth/cb"];
+const LISTED = ["https://my.agience.ai/", "https://sp.agience.ai/auth/cb"];
 for (const [rd, ok] of [
   ["https://my.agience.ai/", true],
   ["https://MY.agience.ai/", true],
   ["https://my.agience.ai:443/", false],
-  ["https://lumen.agience.ai/auth/cb", true],
+  ["https://sp.agience.ai/auth/cb", true],
   ["https://my.agience.ai", true],
   ["https://evil.agience.ai/", false],
   ["https://user-content.agience.ai/me/page.html", false],
   ["https://my.agience.ai/redirect", false],
-  ["https://lumen.agience.ai/auth/cb/extra", false],
+  ["https://sp.agience.ai/auth/cb/extra", false],
   ["https://my.agience.ai/?next=https://evil.example", false],
   ["https://my.agience.ai/#x", false],
   ["https://x@my.agience.ai/", false],
@@ -297,17 +306,17 @@ for (const rd of ["https://mantle.agience.ai/", "https://user-content.agience.ai
 }
 
 test("another listed SP gets a delegation narrowed to it in the session, never the full token", async () => {
-  const lumen = "https://lumen.agience.ai/auth/cb";
-  const ctx = handoff(at(lumen), { "/auth/me/authority/narrow":
+  const other = "https://sp.agience.ai/auth/cb";
+  const ctx = handoff(at(other), { "/auth/me/authority/narrow":
     { status: 200, body: { access_token: "NARROWED" } } });
   await run(ctx, 'finishLogin("FULL")');
-  assert.deepEqual(ctx.navigations, [["replace", lumen + "#access_token=NARROWED&state=S1"]]);
+  assert.deepEqual(ctx.navigations, [["replace", other + "#access_token=NARROWED&state=S1"]]);
   const asked = ctx.fetched.find(([p]) => p === "/auth/me/authority/narrow");
-  assert.deepEqual(asked[1], { audience: "https://lumen.agience.ai" });
+  assert.deepEqual(asked[1], { audience: "https://sp.agience.ai" });
 });
 
 test("another listed SP Origin issues no delegation for is handed nothing", async () => {
-  const ctx = handoff(at("https://lumen.agience.ai/auth/cb"), { "/auth/me/authority/narrow":
+  const ctx = handoff(at("https://sp.agience.ai/auth/cb"), { "/auth/me/authority/narrow":
     { status: 400, body: { detail: "audience is not a narrow audience" } } });
   await run(ctx, 'finishLogin("FULL")');
   assert.deepEqual(ctx.navigations, [["href", "/account"]]);

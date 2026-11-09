@@ -468,9 +468,9 @@ def _allowed_origins() -> list[str]:
     """The browser origins Origin answers cross-site, never `["*"]`.
 
     The default is derived from configuration Origin already requires to be right: the issuer, its
-    own public URI, and the facet bases `is_client_redirect_allowed` admits as redirect targets.
-    Those are exactly the first-party browser surfaces — a page Origin will redirect a sign-in back
-    to is a page it should answer XHR for, and one it will not is not.
+    own public URI, and the facet bases (`FACET_URI`, `FACET_URIS`): the first-party browser
+    surfaces. Where a sign-in's code may be delivered is a separate, exact list
+    (`CLIENT_REDIRECT_URIS`).
 
     A wildcard is survivable only while every endpoint stays bearer-only and the OAuth cookies stay
     same-site, and that is not a property the service minting every token in the platform should be

@@ -103,16 +103,16 @@ def test_origin_serves_the_page_that_runs_the_ceremonies(db_client):
 # -- F2: redirects --------------------------------------------------------------------------------
 
 def test_mantle_s_host_is_never_a_redirect_base(monkeypatch):
+    """A URI on Mantle's origin is refused even when a list names it."""
     from origin import config
     from origin.services.auth_service import is_client_redirect_allowed
 
     monkeypatch.setattr(config, "MANTLE_URI", "https://mantle.example.test", raising=False)
-    monkeypatch.setattr(config, "FACET_URIS", ["https://mantle.example.test",
-                                               "https://my.example.test"])
-    assert not is_client_redirect_allowed("https://mantle.example.test/callback")
-    assert is_client_redirect_allowed("https://my.example.test/callback")
-    monkeypatch.setattr(config, "FACET_URI", "https://mantle.example.test")
-    assert not is_client_redirect_allowed("https://mantle.example.test/callback")
+    monkeypatch.setattr(config, "CLIENT_REDIRECT_URIS", {"platform": [
+        "https://mantle.example.test/callback", "https://my.example.test/callback"]})
+    assert not is_client_redirect_allowed("https://mantle.example.test/callback",
+                                          client_id="platform")
+    assert is_client_redirect_allowed("https://my.example.test/callback", client_id="platform")
 
 
 
@@ -125,20 +125,21 @@ def test_mantle_s_origin_alone_is_refused_not_every_port_on_its_host(monkeypatch
 
     monkeypatch.setattr(config, "MANTLE_URI", "http://127.0.0.1:18082", raising=False)
     monkeypatch.setattr(config, "ORIGIN_URI", "http://127.0.0.1:18080", raising=False)
-    monkeypatch.setattr(config, "FACET_URI", "http://127.0.0.1:15173")
-    monkeypatch.setattr(config, "FACET_URIS", ["http://127.0.0.1:15173",
-                                               "http://127.0.0.1:18082"])
-    assert is_client_redirect_allowed("http://127.0.0.1:18080/auth/reauth/complete",
-                                      platform_client=True)
-    assert is_client_redirect_allowed("http://127.0.0.1:15173/auth/callback",
-                                      platform_client=True)
-    assert not is_client_redirect_allowed("http://127.0.0.1:18082/callback", platform_client=True)
-    # Not through the local-development range or the loopback rule either.
+    listed = ["http://127.0.0.1:18080/auth/reauth/complete", "http://127.0.0.1:15173/auth/callback",
+              "http://127.0.0.1:18082/callback"]
+    monkeypatch.setattr(config, "CLIENT_REDIRECT_URIS", {"platform": listed})
+    assert is_client_redirect_allowed(listed[0], client_id="platform")
+    assert is_client_redirect_allowed(listed[1], client_id="platform")
+    # Listed, and on Mantle's origin: refused.
+    assert not is_client_redirect_allowed(listed[2], client_id="platform")
+    # A first-party list is exact, loopback included: Mantle's port is refused though listed, a
+    # listed other port is admitted, and an unlisted port is not.
     monkeypatch.setattr(config, "MANTLE_URI", "http://localhost:8082", raising=False)
-    monkeypatch.setattr(config, "PLATFORM_DEV_REDIRECTS", True, raising=False)
-    assert not is_client_redirect_allowed("http://localhost:8082/callback", platform_client=True)
-    assert not is_client_redirect_allowed("http://localhost:8082/callback")
-    assert is_client_redirect_allowed("http://localhost:8083/callback")
+    monkeypatch.setattr(config, "CLIENT_REDIRECT_URIS", {"platform": [
+        "http://localhost:8082/callback", "http://localhost:8083/callback"]})
+    assert not is_client_redirect_allowed("http://localhost:8082/callback", client_id="platform")
+    assert is_client_redirect_allowed("http://localhost:8083/callback", client_id="platform")
+    assert not is_client_redirect_allowed("http://localhost:8084/callback", client_id="platform")
 
 # -- F2: refresh tokens ---------------------------------------------------------------------------
 

@@ -275,15 +275,16 @@ def test_a_legacy_refresh_token_is_refused_after_the_cut_off(custody_client, mon
     assert _refresh(c, legacy).status_code == 400
 
 
-def test_the_development_redirect_bases_are_opt_in(monkeypatch):
+def test_no_development_redirect_exists_in_code(monkeypatch):
+    """Loopback and the hosted tool pages are not built in: with nothing configured, each is
+    refused for a first-party client, and no setting other than the exact list admits them."""
     from origin import config
     from origin.services.auth_service import is_client_redirect_allowed
-    monkeypatch.setattr(config, "PLATFORM_DEV_REDIRECTS", False, raising=False)
-    for uri in ("http://127.0.0.1:8765/cb", "https://vscode.dev/redirect",
-                "https://oauth.pstmn.io/v1/callback"):
-        assert not is_client_redirect_allowed(uri, platform_client=True), uri
-    monkeypatch.setattr(config, "PLATFORM_DEV_REDIRECTS", True, raising=False)
-    assert is_client_redirect_allowed("http://127.0.0.1:8765/cb", platform_client=True)
+    monkeypatch.setattr(config, "CLIENT_REDIRECT_URIS", {}, raising=False)
+    assert not hasattr(config, "PLATFORM_DEV_REDIRECTS")
+    for uri in ("http://127.0.0.1:8765/cb", "http://localhost:3000/cb",
+                "https://vscode.dev/redirect", "https://oauth.pstmn.io/v1/callback"):
+        assert not is_client_redirect_allowed(uri, client_id=config.PLATFORM_CLIENT_ID), uri
 
 
 def test_mantle_s_host_is_never_an_allowed_origin_sso_return_or_app_address(monkeypatch):
@@ -328,16 +329,15 @@ def test_a_sign_in_delivered_to_a_persona_facet_gets_only_a_narrowed_delegation(
     assert claims["scope"] == "persona"
 
 
-def test_the_ember_proxy_s_forward_auth_accepts_an_ember_delegation(custody_client, monkeypatch):
-    """lumen.agience.ai's proxy asks Origin's `/auth/userinfo` before it passes a request to
-    Ember: the narrowed delegation Facet now sends there must be accepted, or the Ember API is
-    shut."""
+def test_the_staging_gate_s_forward_auth_accepts_a_narrowed_delegation(custody_client, monkeypatch):
+    """The staging gate asks the staging Origin's `/auth/userinfo` before it passes a bearer
+    request to the release candidate (`staging.gate_snippet`): a persona page's narrowed
+    delegation must be accepted there, or the persona's tools are shut behind the gate."""
     from origin import config
-    monkeypatch.setattr(config, "NARROW_AUDIENCES",
-                        {"ember": ["ember:memory", "ember:share", "ember:read"]}, raising=False)
+    monkeypatch.setattr(config, "NARROW_AUDIENCES", {"sage": ["persona:sage"]}, raising=False)
     c = custody_client
     alice, alice_token = af.person("Alice")
-    delegation = _exchange(c, alice_token, "ember").json()["access_token"]
+    delegation = _exchange(c, alice_token, "sage").json()["access_token"]
     r = c.get("/auth/userinfo", headers={"Authorization": f"Bearer {delegation}"})
     assert r.status_code == 200, r.text
     assert r.json()["id"] == alice

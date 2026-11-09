@@ -39,6 +39,7 @@ from origin import config
 from origin.db import passkey_challenges as db_challenges
 from origin.db import passkey_credentials as db_passkeys
 from origin.db import persons as db_persons
+from origin.services.email_address import lookup_email
 from origin.services.platform_settings_service import settings
 
 logger = logging.getLogger(__name__)
@@ -353,7 +354,8 @@ def get_decoy_authentication_options(email: str) -> Optional[dict]:
 
     # Normalized so `Alice@Example.com` and `alice@example.com` do not present as two different
     # non-accounts — `db_persons.get_by_email` resolves them to one row.
-    subject = (email or "").strip().lower().encode("utf-8")
+    # Canonical for the same reason: `x@d.com.` and `x@d.com` are one row there too.
+    subject = lookup_email(email).encode("utf-8")
 
     def _mac(label: bytes, extra: bytes = b"") -> bytes:
         return hmac.new(key, label + subject + extra, hashlib.sha256).digest()

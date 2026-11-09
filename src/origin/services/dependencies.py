@@ -88,8 +88,9 @@ def _validate_aud_for_principal(payload: dict) -> None:
 
 
 #: The Origin routes a narrowed delegation (a person's token exchanged for Ember or a persona's
-#: facet, review 8 R3) opens, by method and path: the identity check a proxy in front of Ember asks
-#: (`lumen.agience.ai`'s `forward_auth`). Every other Origin route refuses one (review 10).
+#: facet, review 8 R3) opens, by method and path: the identity check the staging gate's
+#: `forward_auth` asks of the staging Origin (`staging.gate_snippet` in agience-cloud). Every other
+#: Origin route refuses one (review 10).
 NARROWED_ROUTES = frozenset({("GET", "/auth/userinfo")})
 
 

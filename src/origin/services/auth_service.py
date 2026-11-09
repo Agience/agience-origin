@@ -681,12 +681,9 @@ def email_verification_required(email: Optional[str]) -> bool:
     return not (email_l in allowlist or domain in allowlist)
 
 
-#: The hosts a redirect URI may name and still count as loopback. RFC 8252 §7.3 is written about the
-#: IP literals; `localhost` is in the set because this allow-list has always admitted it, and taking
-#: it out would refuse a redirect that works today. ONE definition, read by the authority-wide
-#: allow-list below and by the per-client match beside it, so "is this loopback" cannot come to mean
-#: two different things inside a single request.
-_LOOPBACK_REDIRECT_HOSTS = frozenset({"127.0.0.1", "localhost"})
+#: The hosts a LISTED redirect URI may name and have its port left out of the comparison
+#: (RFC 8252 §7.3): the IP literals, and `localhost`. Exact spelling, as written in the list.
+_LOOPBACK_REDIRECT_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
 
 
 def _loopback(host: str) -> bool:
@@ -748,19 +745,19 @@ def _never_narrowed_origins() -> set:
 
 
 def facet_narrowing(redirect_uri: str):
-    """How a first-party sign-in delivered to `redirect_uri` is answered (review 12): `None` for
-    the web app, Origin's own pages, or any address that is no facet (a registered client's own
-    callback); the audience for a facet Origin lists (`NARROW_FACETS`); and `False` for a facet
-    Origin admits as a redirect (`FACET_URIS`) but does not list, which gets no token at all. A
-    redirect URL never makes itself an audience."""
+    """How a first-party sign-in delivered to `redirect_uri` is answered (review 12): `None` (the
+    full token) for the web app (`APP_URI`) and Origin's own pages (`ORIGIN_URI`); the audience
+    for a facet Origin lists (`NARROW_FACETS`); and `False`, no token at all, for anywhere else.
+    Listing a URI in `CLIENT_REDIRECT_URIS` says a code may be delivered there, not who the token
+    is for: a redirect URL never makes itself an audience, and never a full-token one."""
     origin = _origin_of(redirect_uri or "")
+    if not origin:
+        return False
     if origin in _never_narrowed_origins():
         return None
     if origin in narrow_audiences() and origin in (getattr(config, "NARROW_FACETS", None) or []):
         return origin
-    if origin in _facet_origins():
-        return False
-    return None
+    return False
 
 
 def narrow_audiences() -> dict:
@@ -827,109 +824,86 @@ def issue_narrow_delegation(person_id: str, audience: str, scopes: list, *,
                       headers={"kid": get_key_id()})
 
 
-def is_client_redirect_allowed(uri: str, *, platform_client: bool = False) -> bool:
-    """Built-in platform client redirect-uri check (RFC 8252 + well-known tools).
+def configured_redirect_uris(client_id: str) -> list:
+    """The exact redirect URIs `CLIENT_REDIRECT_URIS` lists for this first-party client; empty when
+    it lists none. Read at each call, so a test or a settings reload sees the current value."""
+    mapping = getattr(config, "CLIENT_REDIRECT_URIS", None) or {}
+    uris = mapping.get(client_id) if isinstance(mapping, dict) else None
+    if isinstance(uris, str):
+        uris = [uris]
+    return [u for u in (uris or []) if isinstance(u, str) and u]
 
-    Many facets, one authority: `FACET_URIS` carries every observation plane this Origin admits;
-    `FACET_URI` stays as the first entry so nothing that declares only it changes behaviour. A node
-    runs several facets — mantle's browser, a persona's surface, pharos — and each is a distinct
-    host that must be able to start an authorization-code flow against this issuer.
 
-    Still an allow-list, and the match is still exact on `scheme://netloc`. Widening which bases
-    are admitted does not loosen how one is matched: no wildcards, no prefix matching, no suffix
-    matching — a check that accepted `https://evil.com/?x=https://facet` or
-    `https://facet.evil.com` would be an open redirect, and both are what prefix/suffix comparison
-    would produce. An unlisted host does not match, which is asserted by test.
-
-    This answers "may a code be delivered here at all", not "may *this* client have it". It is
-    authority-wide and client-blind by construction — the same answer for every caller — so on its
-    own it lets any client name any admitted callback, including another client's. What binds a
-    client to its own callbacks is `redirect_uri_matches_registered` below, applied by `/authorize`
-    to a client that has a registration. This function stays the outer bound in both cases: a URI it
-    refuses is refused for everyone, registered or not.
-    """
-    allowed_bases = [config.FACET_URI, getattr(config, "ORIGIN_URI", "")]
-    # Read with getattr and normalised to a list: a DB-stored value arrives through
-    # `_CSV_LIST_KEYS`, but an operator who sets the env var by hand can still hand us one string.
-    # Treating that string as an iterable would admit its individual characters as bases.
-    _extra = getattr(config, "FACET_URIS", None) or []
-    if isinstance(_extra, str):
-        _extra = [u.strip() for u in _extra.split(",") if u.strip()]
-    allowed_bases.extend(u.rstrip("/") for u in _extra if u)
-    # Mantle's origin (scheme, host and port) is never a redirect base, whatever the facet lists
-    # say: Mantle serves pages there, so a code delivered to it would hand Mantle a sign-in
-    # (review 7, F2). The origin, not the hostname: a single-host install serves Origin, Mantle and
-    # the web app on one host, each on its own port, and Origin's own pages must stay bases.
+def _on_mantle(uri: str) -> bool:
+    """Is `uri` on Mantle's origin (scheme, host, port)? Mantle serves pages there, so a code
+    delivered to it would hand Mantle a sign-in (review 7, F2), whatever a list names. Mantle's
+    address is configuration (`MANTLE_URI`), not a host written here."""
     mantle = _redirect_origin(getattr(config, "MANTLE_URI", "") or "")
-    # For the platform's own (unregistered, first-party) client, the development bases
-    # (vscode.dev, Postman, http loopback) are opt-in, off unless `PLATFORM_DEV_REDIRECTS` is set.
-    # A registered native client keeps its loopback callback (RFC 8252), bound to its own
-    # registration by `redirect_uri_matches_registered`.
-    dev = (not platform_client) or bool(getattr(config, "PLATFORM_DEV_REDIRECTS", False))
-    always_allowed = {"https://vscode.dev", "https://oauth.pstmn.io"} if dev else set()
-    allowed_loopback_hosts = _LOOPBACK_REDIRECT_HOSTS if dev else ()
-
-    backend_local = (getattr(config, "ORIGIN_URI", "") or "").startswith(("http://localhost", "http://127.0.0.1"))
-    frontend_local = (config.FACET_URI or "").startswith(("http://localhost", "http://127.0.0.1"))
-    if backend_local or frontend_local:
-        allowed_bases.extend([f"http://localhost:{p}" for p in range(3000, 9000)])
-
-    try:
-        parsed = urlparse(uri)
-        if parsed.scheme not in ("http", "https"):
-            return False
-        base_url = f"{parsed.scheme}://{parsed.netloc}"
-        if mantle and _same_redirect_origin(_redirect_origin(uri), mantle):
-            return False
-        if base_url in allowed_bases or base_url in always_allowed:
-            return True
-        if parsed.scheme == "http" and parsed.hostname in allowed_loopback_hosts:
-            return True
-        return False
-    except Exception:
-        return False
+    return bool(mantle) and _same_redirect_origin(_redirect_origin(uri), mantle)
 
 
-def redirect_uri_matches_registered(requested: str, registered) -> bool:
-    """Is `requested` one of the redirect URIs this client registered?
+def is_client_redirect_allowed(uri: str, *, client_id: str) -> bool:
+    """May a first-party client's code be delivered to `uri`? Only when `CLIENT_REDIRECT_URIS`
+    lists `uri` for that client.
 
-    The client-specific half of the pair. `is_client_redirect_allowed` says where this authority
-    will deliver a code at all; this says where it will deliver *this* client's code, and a client
-    with a registration is held to both.
-
-    RFC 6749 §3.1.2.2 makes the comparison a simple string comparison, and that is the rule here for
-    every URI but one shape.
-
-    Loopback is compared without its port. RFC 8252 §7.3: "The authorization server
-    MUST allow any port to be specified at the time of the request for loopback IP redirect URIs, to
-    accommodate clients that obtain an available ephemeral port from the operating system at the
-    time of the request." A native client — an MCP client is exactly this — asks the OS for a free
-    port at the moment it starts the flow, so the port it registered on its first run is not the
-    port it listens on for its second. Simple string comparison would therefore admit one run and
-    refuse every run after it, turning a registration into a record of one afternoon's ephemeral
-    port. So for a loopback host, and only for a loopback host, the port is left out of the
-    comparison; scheme, host, path and query are all still compared exactly.
-
-    The relaxation reaches no further than the loopback interface, which is the reason the RFC can
-    require it: a port on 127.0.0.1 is reachable only from the machine already running the client,
-    so "any port" widens the set of addresses a code can reach by nothing. Every other URI is
-    compared whole, port included — a registered `https://facet.example:8443` does not admit
-    `https://facet.example:9000`.
-
-    A consequence of that rule: two loopback clients registering the same path have registered the
-    same address, and each matches the other's request. `http://127.0.0.1:1000/callback` and
-    `http://127.0.0.1:2000/callback` are one address under §7.3, because the port is not part of it,
-    and no comparison both honours "MUST allow any port" and tells those two apart. The cost is
-    already spent elsewhere: an attacker who can bind a loopback port is executing on the machine,
-    and the code delivered there is unredeemable without the `code_verifier` the legitimate client
-    kept. Two loopback clients are distinguished by their path (`/a/callback` vs `/b/callback`),
-    which is compared, and that is where the distinction is made.
+    No redirect target exists in code: no tool page, no loopback, no local-development range, no
+    base taken from `FACET_URI`/`FACET_URIS`/`ORIGIN_URI`. A node, a local install included, lists
+    the exact URIs its own pages use, and the comparison is `redirect_uri_matches_registered`'s:
+    the whole string, so another path, a trailing slash, a different case, another port or a
+    longer host is a different URI and is refused.
     """
-    if not registered:
+    if not isinstance(uri, str) or not uri or _on_mantle(uri):
+        return False
+    # Exact, loopback included: RFC 8252's port variance is for a native client's registration,
+    # and a first-party list names the ports its own pages use.
+    return redirect_uri_matches_registered(uri, configured_redirect_uris(client_id),
+                                           loopback_any_port=False)
+
+
+def is_registered_redirect_allowed(uri: str, registered) -> bool:
+    """May a registered client's code be delivered to `uri`? Only to a URI in its own
+    registration (`redirect_uri_matches_registered`), and never on Mantle's origin."""
+    if not isinstance(uri, str) or not uri or _on_mantle(uri):
+        return False
+    return redirect_uri_matches_registered(uri, registered)
+
+
+def is_registration_redirect_allowed(uri: str) -> bool:
+    """May `POST /auth/register` record `uri`? Only when `CLIENT_REGISTRATION_REDIRECT_URIS` lists
+    it, so what a client may register is the operator's configuration, and nothing registers an
+    arbitrary third-party address. Empty refuses every URI."""
+    if not isinstance(uri, str) or not uri or _on_mantle(uri):
+        return False
+    listed = getattr(config, "CLIENT_REGISTRATION_REDIRECT_URIS", None) or []
+    if isinstance(listed, str):
+        listed = [u.strip() for u in listed.split(",") if u.strip()]
+    return redirect_uri_matches_registered(uri, listed)
+
+
+def redirect_uri_matches_registered(requested: str, registered, *,
+                                    loopback_any_port: bool = True) -> bool:
+    """Is `requested` one of the listed redirect URIs? The one comparison every list is read with:
+    a first-party client's configured URIs (`loopback_any_port=False`: exact, always), a client's
+    registration, and the registration bound.
+
+    RFC 6749 §3.1.2.2 makes it a simple string comparison: scheme, host, port, path, query and
+    fragment, byte for byte, with no normalising. That is the rule for every URI but one shape.
+
+    A loopback entry is compared without its port. RFC 8252 §7.3: "The authorization server MUST
+    allow any port to be specified at the time of the request for loopback IP redirect URIs, to
+    accommodate clients that obtain an available ephemeral port from the operating system at the
+    time of the request." The relaxation applies only when the LISTED entry is itself an http
+    loopback URI (`127.0.0.1`, `[::1]` or `localhost`); nothing adds loopback to a list that does
+    not name it. Scheme, host, path, query and fragment are still compared exactly, and userinfo
+    must be absent on both sides. A port on the loopback interface is reachable only from the
+    machine already running the client, so "any port" widens where a code can go by nothing; the
+    code is unredeemable there without the client's PKCE verifier besides.
+    """
+    if not registered or not isinstance(requested, str):
         return False
     if isinstance(registered, str):
-        # An operator or a hand-written row can put one string where a list belongs; iterating it
-        # would compare against its individual characters, which match nothing and hide the cause.
+        # A hand-written value can put one string where a list belongs; iterating it would compare
+        # against its individual characters, which match nothing and hide the cause.
         registered = [registered]
     try:
         want = urlparse(requested)
@@ -940,25 +914,48 @@ def redirect_uri_matches_registered(requested: str, registered) -> bool:
             continue
         if entry == requested:
             return True
+        if not loopback_any_port:
+            continue
         try:
             have = urlparse(entry)
         except Exception:
             continue
-        if (have.hostname or "").lower() not in _LOOPBACK_REDIRECT_HOSTS:
+        have_host = _host_as_written(have.netloc)
+        if (have.scheme != "http" or have_host is None
+                or have_host.strip("[]") not in _LOOPBACK_REDIRECT_HOSTS):
             continue
-        # Compared by `hostname` rather than by `netloc`, which is what actually takes the port out
-        # of the comparison — and userinfo out with it, so the two are required absent on both sides
-        # rather than silently ignored. `http://user@127.0.0.1/cb` is not `http://127.0.0.1/cb`.
+        # The host as written, without its port: `urlparse`'s `hostname` lower-cases, and a case
+        # variant is a different URI. Userinfo makes `_host_as_written` None on either side.
+        want_host = _host_as_written(want.netloc)
         if (
-            want.scheme == have.scheme
-            and (want.hostname or "").lower() == (have.hostname or "").lower()
+            want_host is not None
+            and want.scheme == have.scheme
+            and want_host == have_host
             and want.path == have.path
+            and want.params == have.params
             and want.query == have.query
-            and not want.username
-            and not have.username
+            and want.fragment == have.fragment
         ):
             return True
     return False
+
+
+def _host_as_written(netloc: str):
+    """`netloc`'s host exactly as written, its port dropped; None when it carries userinfo or its
+    port is not digits. `[::1]` keeps its brackets."""
+    if not netloc or "@" in netloc:
+        return None
+    if netloc.startswith("["):
+        end = netloc.find("]")
+        if end < 0:
+            return None
+        host, rest = netloc[:end + 1], netloc[end + 1:]
+    else:
+        host, _, port = netloc.partition(":")
+        rest = (":" + port) if _ else ""
+    if rest and not (rest.startswith(":") and rest[1:].isdigit()):
+        return None
+    return host
 
 
 # ---------------------------------------------------------------------------
