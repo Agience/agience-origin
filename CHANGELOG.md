@@ -7,6 +7,10 @@ All notable changes to `agience-origin` are recorded here. The format follows
 
 ## [0.2.12] - 2026-11-09
 
+### Added
+- `python -m origin.scripts.authority_bootstrap --unseen` reads ids on stdin and prints those no ordinary entry brought into being (`authority_ledger.seen`, the predicate the bootstrap rule itself uses). `--ids-stdin` opens a bootstrap window that lists the ids on stdin, the only kind Origin accepts once its ledger has ordinary entries; a window with no ids is not opened.
+- `--probe-owner URL` calls `GET /auth/me/authority/grants` at that Origin as an owner the replica holds: it takes the first active account the replica lets share a resource, opens an Origin session for it, sends the web app's headers, and ends the session. It exits 0 on a 200 only. The release candidate's seed rehearsal runs it; the session's value is never printed.
+
 ### Fixed
 - `python -m origin.scripts.authority_bootstrap` builds what Origin's startup builds before it reads or signs: the service's `.env`, the signing keys, the encryption key, the nonce and setup secrets, Origin's service identity and the database engine (`origin.process.init_process`, which the startup now calls too). Run as its own process, the credential could not be minted (`JWT keys not initialized`), so the authority-ledger seed of release 2026.11.3 did not run.
 

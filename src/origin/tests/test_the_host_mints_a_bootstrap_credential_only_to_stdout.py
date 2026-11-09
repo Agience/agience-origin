@@ -156,3 +156,103 @@ def test_a_process_of_its_own_counts_mints_and_closes(tmp_path, jwt_keypair):
     run = _own_process(tmp_path, jwt_keypair, "--close")
     assert run.returncode == 0, run.stderr
     assert run.stdout == "bootstrap closed: 1 window(s)\n"
+
+
+class _Answer:
+    def __init__(self, r):
+        self.status, self._body = r.status_code, r.content
+
+    def read(self):
+        return self._body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def _through(client, monkeypatch):
+    """The probe's HTTP call, delivered to the app under test instead of a network."""
+    import io
+    import urllib.error
+    import urllib.request
+
+    def urlopen(req, timeout=None):
+        path = req.full_url.split("://", 1)[1]
+        r = client.get(path[path.index("/"):], headers=dict(req.header_items()))
+        if r.status_code >= 400:
+            raise urllib.error.HTTPError(req.full_url, r.status_code, "refused", {}, io.BytesIO(r.content))
+        return _Answer(r)
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+
+
+def test_the_owner_probe_reads_the_grants_route_as_an_owner_and_ends_its_session(custody_client,
+                                                                                    monkeypatch, capfd):
+    from origin import config
+    from origin.db.session import SessionLocal
+    from origin.models.origin_session import OriginSession
+
+    monkeypatch.setattr(config, "APP_URI", "https://app.example.com")   # the web app it speaks as
+    af.operator(monkeypatch)
+    owner, _ = af.person("owner")
+    _, out, _ = _run(capfd)
+    boot = out.strip()
+    af.ok(af.submit(custody_client, boot, af.root("B"), bootstrap=True))
+    af.ok(af.submit(custody_client, boot, af.grant("g-o", owner, "B", ("read", "share")), bootstrap=True))
+    _through(custody_client, monkeypatch)
+    code, out, err = _run(capfd, "--probe-owner", "http://127.0.0.1:8180")
+    assert code == 0, out + err
+    assert out == "owner probe: 200 grants=1\n"
+    with SessionLocal() as db:
+        mine = db.query(OriginSession).filter(OriginSession.person_id == owner).all()
+        assert mine and all(s.revoked_time is not None for s in mine), "the probe's session is ended"
+
+
+def test_the_owner_probe_fails_when_no_one_may_share(custody_client, monkeypatch, capfd):
+    af.operator(monkeypatch)
+    _through(custody_client, monkeypatch)
+    code, out, err = _run(capfd, "--probe-owner", "http://127.0.0.1:8180")
+    assert code == 1 and out == "" and "no active account" in err
+
+
+def _stdin(monkeypatch, *ids):
+    import io
+    import sys
+    monkeypatch.setattr(sys, "stdin", io.StringIO("".join(f"{i}\n" for i in ids)))
+
+
+def test_unseen_prints_only_the_ids_no_ordinary_entry_brought_into_being(custody_client, monkeypatch, capfd):
+    """2026-11-09, the RC's seed rehearsal: once accounts are made with their authority journaled,
+    Origin's replica holds ids an ordinary entry made, and a bootstrap that restates one is refused.
+    The seed states only the ids Origin says it has not seen."""
+    from origin.db.session import SessionLocal
+    from origin.models.authority_ledger import AuthorityNode
+
+    af.operator(monkeypatch)
+    with SessionLocal() as db:
+        db.add(AuthorityNode(node_id="New", created_by="someone", seq=1))
+        db.add(AuthorityNode(node_id="Boot", created_by="", seq=2))     # stated by a bootstrap
+        db.commit()
+    _stdin(monkeypatch, "New", "Old", "Boot", "Old", "")
+    code, out, _ = _run(capfd, "--unseen")
+    assert code == 0 and out == "Boot\nOld\n"
+
+
+def test_a_listed_window_states_only_the_ids_on_stdin(custody_client, monkeypatch, capfd):
+    af.operator(monkeypatch)
+    _stdin(monkeypatch, "Old", "g-old")
+    code, out, err = _run(capfd, "--ids-stdin")
+    assert code == 0, err
+    boot = out.strip()
+    af.ok(af.submit(custody_client, boot, af.root("Old"), bootstrap=True))
+    af.ok(af.submit(custody_client, boot, af.grant("g-old", "someone", "Old"), bootstrap=True))
+    r = af.submit(custody_client, boot, af.root("Other"), bootstrap=True)
+    assert r.status_code == 403 and "lists" in r.json()["detail"]
+
+
+def test_a_listed_window_with_no_ids_is_not_opened(custody_client, monkeypatch, capfd):
+    af.operator(monkeypatch)
+    _stdin(monkeypatch)
+    code, out, err = _run(capfd, "--ids-stdin")
+    assert code == 1 and out == "" and "no ids" in err

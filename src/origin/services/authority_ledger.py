@@ -2513,13 +2513,18 @@ def _entry_ids(b: dict) -> list:
     return [b["principal_id"]]
 
 
+def seen(db: Session, nid: str) -> bool:
+    """Whether an ordinary entry brought `nid` into being here: a bootstrap does not state it."""
+    node = db.get(AuthorityNode, nid)
+    return node is not None and bool(node.created_by)
+
+
 def _bootstrap_allowed(db: Session, b: dict, window_ids: Optional[list]) -> None:
     """A bootstrap entry states what Mantle held before the ledger, for ids no ordinary entry
     has touched. Once the ledger has ordinary entries, only the ids the operator listed when
     re-opening it are accepted."""
     for nid in _entry_ids(b):
-        node = db.get(AuthorityNode, nid)
-        if node is not None and node.created_by:
+        if seen(db, nid):
             raise EntryRefused(f"{nid!r} is an id the ledger already holds; a bootstrap states "
                                f"only what it has not seen")
     grant = db.get(AuthorityGrant, b["grant_id"]) if b["kind"] == "grant" else None
