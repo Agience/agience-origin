@@ -189,7 +189,7 @@ def test_the_invite_answer_and_mail_echo_the_resource_and_the_name_the_owner_con
 
     sent = []
 
-    async def send_invite(to_email, from_name, resource_name, claim_url, message=None):
+    async def send_invite(to_email, from_name, resource_name, claim_url, *, from_email):
         sent.append((to_email, resource_name, claim_url))
         return True
 

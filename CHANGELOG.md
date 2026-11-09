@@ -7,6 +7,15 @@ All notable changes to `agience-origin` are recorded here. The format follows
 
 ## [0.2.12] - 2026-11-09
 
+### Added
+- `python -m origin.scripts.authority_bootstrap`, run on Origin's host as its service user, mints the platform operator's authority-ledger bootstrap credential with no HTTP call: the host is the trust root. stdout carries only the credential, one line; it is never logged. `--minutes N` sets its life, 1 to 30 (default 30); no operator, no database or a failed mint exits non-zero with a stderr line. `--close` withdraws every open bootstrap window, as `DELETE /oracle/authority-ledger/bootstrap` does, and prints `bootstrap closed: <n> window(s)`. `--count` prints `grants=<n> roots=<n> edges=<n>` from the replica tables, so the release tool can check a seed.
+
+### Security
+- An invite mail carries one link, Origin's own `/invite/<token>`. The inviter's display name and the resource name they typed are defanged in the subject, the plain-text part and the HTML part (`origin.services.defang`, the website's lead-mail rules): `https://` becomes `hxxps://`, other link schemes have a letter bracketed, every host dot is bracketed (full-width and ideographic dots, Unicode, lookalike and punycode hosts, IPv4 included), and markdown links and HTML anchors become their text with the target defanged. The HTML escapes all of it; no inviter text sits inside an anchor.
+- The mail names its sender by display name and verified address. `POST /auth/me/authority/invites` from an account whose address is not verified is refused (403) and nothing is mailed or recorded. `email_service.send_invite` takes the sender's address (`from_email`) and no longer takes a personal message: no route ever passed one.
+
+## [0.2.12] - 2026-11-09
+
 ### Fixed
 - Origin's pages name their scripts and stylesheets by content (`/web/app.js?v=<sha256 prefix>`), and the pages and `/web/*` are served with `Cache-Control: no-cache`, revalidated by ETag. After a release a browser kept the previous release's unversioned `/web/app.js`, cached by heuristic, against the new pages, and its sign-in looped back to `/login`.
 

@@ -34,7 +34,7 @@ def sent(monkeypatch):
     lambda: E.send_password_reset("a@example.com", _URL),
     lambda: E.send_email_verification("a@example.com", _URL),
     lambda: E.send_otp("a@example.com", "123456"),
-    lambda: E.send_invite("a@example.com", "Ann", "Notes", _URL, "hello"),
+    lambda: E.send_invite("a@example.com", "Ann", "Notes", _URL, from_email="ann@example.com"),
 ], ids=["reset", "verify", "code", "invite"])
 def test_every_message_is_a_whole_document_with_a_text_twin(sent, send):
     asyncio.run(send())
@@ -64,10 +64,10 @@ def test_links_are_escaped_into_the_html_and_kept_whole_in_the_text(sent):
 
 
 def test_an_invitation_never_writes_caller_text_into_the_html(sent):
-    asyncio.run(E.send_invite("a@example.com", '<img src=x onerror="alert(1)">', "<b>doc</b>", _URL,
-                              '<script>steal()</script>'))
+    asyncio.run(E.send_invite("a@example.com", '<img src=x onerror="alert(1)">',
+                              "<script>steal()</script>", _URL, from_email="<b>a</b>@example.com"))
     (_, _, body, _), = sent
-    for raw in ("<img src=x", "<b>doc</b>", "<script>"):
+    for raw in ("<img src=x", "<b>a</b>", "<script>"):
         assert raw not in body, raw
     assert "&lt;script&gt;steal()&lt;/script&gt;" in body
 

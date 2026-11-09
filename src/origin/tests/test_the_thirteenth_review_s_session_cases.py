@@ -60,7 +60,7 @@ def mail(monkeypatch):
     from origin.services import email_service
     sent = []
 
-    async def send_invite(to_email, from_name, resource_name, claim_url, message=None):
+    async def send_invite(to_email, from_name, resource_name, claim_url, *, from_email):
         sent.append((to_email, claim_url))
         return True
 

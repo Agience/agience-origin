@@ -17,7 +17,8 @@ ledger rules as any of the person's, appended as theirs (`authority_ledger.sessi
     POST /auth/me/authority/claim            {token}
     POST /auth/me/authority/narrow           {audience, scope?}  -> a delegation narrowed to it
     POST /auth/me/authority/mantle-token     -> the person's token addressed to Mantle
-        401 no live Origin session   403 refused (CSRF, or the ledger's rule)   400 malformed
+        401 no live Origin session   403 refused (CSRF, the ledger's rule, or an invite
+        from an account whose address is not verified)   400 malformed
         404 a grant or invite Origin does not hold
 
 Grants are Origin's own record (review 13, H2). The person's view of a resource's grants, and the
@@ -431,6 +432,12 @@ async def make_invite(request: Request, body: dict = Body(...), db: Session = De
     from origin.services.email_address import canonical_email
 
     person = _person(request, db)
+    # The mail names its sender by their verified address, so the invitee can tell who sent it: an
+    # account whose address is not verified sends no invite.
+    owner = db.get(Person, _uuid.UUID(person)) if _is_uuid(person) else None
+    if owner is None or not owner.email_verified or "@" not in (owner.email or ""):
+        raise HTTPException(status_code=403, detail="verify your email address first: an invite "
+                            "names its sender by their verified address")
     resource_id, email = body.get("resource_id"), str(body.get("email") or "").strip()
     if not isinstance(resource_id, str) or not resource_id:
         raise HTTPException(status_code=400, detail="resource_id is required")
@@ -463,10 +470,9 @@ async def make_invite(request: Request, body: dict = Body(...), db: Session = De
                         "digest": authority_ledger.target_digest("email", email)},
              "max_claims": 1}
     _append(db, person, entry)
-    owner = db.get(Person, _uuid.UUID(person)) if _is_uuid(person) else None
     link = f"{(config.APP_URI or config.ORIGIN_URI).rstrip('/')}/invite/{token}"
-    sent = await email_service.send_invite(email, (getattr(owner, "name", "") or "Someone"),
-                                           name, link)
+    sent = await email_service.send_invite(email, owner.name or "Someone", name, link,
+                                           from_email=owner.email)
     if not sent:
         # Never left live unmailed: the owner sees the failure and the invite is withdrawn.
         _append(db, person, {**entry, "state": "revoked"})
