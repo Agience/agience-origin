@@ -53,6 +53,7 @@ class _Feed:
 
 @pytest.fixture
 def mantle_store(tmp_path, monkeypatch):
+    pytest.importorskip("mantle", reason="a cross-repository case: it reads Mantle's own code, which the sovereign CI's workspace has and a lone checkout of Origin does not")
     from jose import jwk
     from mantle.db import lattice_api as la
     from mantle.services import authority_ledger as mantle_ledger
@@ -159,6 +160,7 @@ def test_a_store_that_skipped_them_catches_up_once(custody_client, world, mantle
 def test_both_repos_read_one_list_of_credential_kinds():
     """The kinds Origin writes, and which of them Mantle applies, are written once, in prism, and
     each repo's own names are that list's (review 17)."""
+    pytest.importorskip("mantle", reason="a cross-repository case: it reads Mantle's own code, which the sovereign CI's workspace has and a lone checkout of Origin does not")
     from mantle.services import authority_ledger as mantle_ledger
     from origin.services import authority_ledger as origin_ledger
     from prism.trust import ledger as shared
@@ -181,6 +183,7 @@ def test_both_repos_read_one_list_of_credential_kinds():
 def test_the_invite_target_digest_is_one_function():
     """Origin, Mantle and Facet digest an invite's target the same way; Origin and Mantle read
     prism's, and Facet's is pinned to the same vector (`review17SharedNames.test.ts`)."""
+    pytest.importorskip("mantle", reason="a cross-repository case: it reads Mantle's own code, which the sovereign CI's workspace has and a lone checkout of Origin does not")
     from mantle.db import reach_journal
     from origin.services import authority_ledger as origin_ledger
     from prism.trust import ledger as shared
@@ -193,6 +196,7 @@ def test_the_invite_target_digest_is_one_function():
 
 
 def test_both_sides_digest_reach_in_one_canonical_form():
+    pytest.importorskip("mantle", reason="a cross-repository case: it reads Mantle's own code, which the sovereign CI's workspace has and a lone checkout of Origin does not")
     from mantle.services import authority_ledger as mantle_ledger
     from origin.services import authority_digest
     grants = [("g-1", "bob", "user", "W", ["share", "read"], "allow", "active")]

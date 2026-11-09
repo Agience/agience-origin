@@ -18,6 +18,9 @@ from fastapi import HTTPException
 from jose import jwk as jose_jwk
 from jose import jwt
 
+pytest.importorskip("mantle", reason="a cross-repository case: it reads Mantle's own code, which the sovereign CI's workspace has and a lone checkout of Origin does not")
+pytest.importorskip("crystal", reason="a cross-repository case: it reads Crystal's own code, which the sovereign CI's workspace has and a lone checkout of Origin does not")
+
 
 def _anchor():
     key = rsa.generate_private_key(public_exponent=65537, key_size=2048)

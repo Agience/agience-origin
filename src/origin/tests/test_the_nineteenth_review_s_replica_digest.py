@@ -21,6 +21,8 @@ from origin.tests import test_a_key_share_is_released_only_to_mantle as _shares
 from origin.tests.test_origin_co_signs_only_changes_the_actor_may_make import (  # noqa: F401
     ALL, world)
 
+pytest.importorskip("mantle", reason="a cross-repository case: it reads Mantle's own code, which the sovereign CI's workspace has and a lone checkout of Origin does not")
+
 custody_client = _shares.custody_client
 
 

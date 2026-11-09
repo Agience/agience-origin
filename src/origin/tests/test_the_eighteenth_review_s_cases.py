@@ -27,6 +27,7 @@ class _RealFeed:
 
 @pytest.fixture
 def mantle_store(tmp_path, monkeypatch):
+    pytest.importorskip("mantle", reason="a cross-repository case: it reads Mantle's own code, which the sovereign CI's workspace has and a lone checkout of Origin does not")
     from jose import jwk
     from mantle.db import lattice_api as la
     from mantle.services import authority_ledger as mantle_ledger
@@ -170,6 +171,7 @@ def test_a_short_page_leaves_the_catch_up_undone(custody_client, world, mantle_s
 # -- F2: one stored expiry, read one way on both sides -------------------------------------------
 
 def test_a_padded_expiry_is_stored_canonical_and_past_on_both_sides():
+    pytest.importorskip("mantle", reason="a cross-repository case: it reads Mantle's own code, which the sovereign CI's workspace has and a lone checkout of Origin does not")
     from datetime import datetime, timedelta, timezone
 
     from mantle.db.lattice_api import _unexpired as mantle_unexpired
@@ -189,6 +191,7 @@ def test_a_padded_expiry_is_stored_canonical_and_past_on_both_sides():
 
 
 def test_an_expiry_mantle_cannot_parse_is_already_past():
+    pytest.importorskip("mantle", reason="a cross-repository case: it reads Mantle's own code, which the sovereign CI's workspace has and a lone checkout of Origin does not")
     from mantle.db.lattice_api import _unexpired as mantle_unexpired
     assert mantle_unexpired({"expires_at": "9999 never"}) is False
     assert mantle_unexpired({"expires_at": None}) is True

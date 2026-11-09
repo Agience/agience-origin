@@ -7,6 +7,9 @@ All notable changes to `agience-origin` are recorded here. The format follows
 
 ## [0.2.12] - 2026-11-08
 
+### Fixed (release build)
+- Reviews 17–19's cross-repository cases skip, with the reason, where Mantle or Crystal is not importable: a lone checkout of Origin, as GitHub's build runs it, failed 31 of them on the import. The sovereign CI's workspace has both and runs them all.
+
 ### Fixed (local check, 2026-11-08)
 - A password sign-in, a registration that signs in, or a mailed-code sign-in on Origin's own page (`/auth/password/login`, `/auth/password/register`, `/auth/otp/verify`, with Origin's own origin as `Origin` or `Referer`) starts the person's Origin session, as `/auth/authorize`'s form does: HttpOnly, SameSite=Strict, `__Host-` on https. One posted from any other page starts none.
 - `is_client_redirect_allowed` refuses Mantle's origin (scheme, host and port), not every port on Mantle's host, so Origin's own `/auth/reauth/complete` stays a redirect base on a single-host install. Mantle's origin is refused through the local-development range and the loopback rule too.
