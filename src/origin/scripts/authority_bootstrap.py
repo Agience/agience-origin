@@ -57,9 +57,12 @@ def main(argv=None) -> int:
         print(f"--minutes must be 1 to {MAX_MINUTES}", file=sys.stderr)
         return 2
     try:
-        from origin.db.session import SessionLocal
+        from origin.db.session import SessionLocal, init_engine
         from origin.services import authority_ledger
 
+        # A process of its own, as the release tool runs it: the engine Origin's startup builds
+        # does not exist here until this builds it, from the same settings.
+        init_engine()
         with SessionLocal() as db:
             if args.count:
                 print(_count(db))

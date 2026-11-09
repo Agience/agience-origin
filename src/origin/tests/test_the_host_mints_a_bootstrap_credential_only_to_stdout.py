@@ -111,3 +111,26 @@ def test_count_reports_the_replica_s_counts(custody_client, monkeypatch, capfd):
     code, out, _ = _run(capfd, "--count")
     assert code == 0 and out == want
     assert out != "grants=0 roots=0 edges=0\n"
+
+
+def test_a_process_of_its_own_builds_the_engine(tmp_path):
+    """The release tool runs the script as a fresh process, where Origin's startup has not built
+    the engine; the script builds it from the same settings and reads the database."""
+    import os
+    import subprocess
+    import sys
+
+    from sqlalchemy import create_engine
+
+    import origin.models  # noqa: F401 — registers every table on the metadata
+    from origin.db.base import Base
+
+    url = f"sqlite:///{(tmp_path / 'origin.db').as_posix()}"
+    engine = create_engine(url)
+    Base.metadata.create_all(engine)
+    engine.dispose()
+    env = {**os.environ, "DATABASE_URL": url}
+    run = subprocess.run([sys.executable, "-m", "origin.scripts.authority_bootstrap", "--count"],
+                         capture_output=True, text=True, env=env, timeout=120)
+    assert run.returncode == 0, run.stderr
+    assert run.stdout == "grants=0 roots=0 edges=0\n"

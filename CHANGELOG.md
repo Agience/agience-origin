@@ -7,6 +7,11 @@ All notable changes to `agience-origin` are recorded here. The format follows
 
 ## [0.2.12] - 2026-11-09
 
+### Fixed
+- `python -m origin.scripts.authority_bootstrap` builds Origin's database engine itself (`init_engine()`), from the settings Origin's startup reads. Run as a process of its own, as the release tool runs it, every mode failed with `Session factory not initialized`, so the authority-ledger seed of release 2026.11.2 did not run.
+
+## [0.2.12] - 2026-11-09
+
 ### Added
 - `python -m origin.scripts.authority_bootstrap`, run on Origin's host as its service user, mints the platform operator's authority-ledger bootstrap credential with no HTTP call: the host is the trust root. stdout carries only the credential, one line; it is never logged. `--minutes N` sets its life, 1 to 30 (default 30); no operator, no database or a failed mint exits non-zero with a stderr line. `--close` withdraws every open bootstrap window, as `DELETE /oracle/authority-ledger/bootstrap` does, and prints `bootstrap closed: <n> window(s)`. `--count` prints `grants=<n> roots=<n> edges=<n>` from the replica tables, so the release tool can check a seed.
 
