@@ -133,6 +133,14 @@ def _describe(method: str, path: str, body: Optional[str] = None,
             raise HTTPException(status_code=400, detail="a job grant's step-up carries the "
                                 "grant's body (job, expires_at, collections), so Origin's page "
                                 "can show what is granted")
+        reach_in = want.get("reach")
+        if reach_in:
+            if not isinstance(reach_in, list):
+                raise HTTPException(status_code=400, detail="reach is a list of ids")
+            # A timer's grant (John, 2026-11-10): it acts as the person within what it names.
+            return _fit_job_grant(f"let the timer {want['job']} until {want['expires_at']} read, "
+                                  f"write and run as you, in", [str(r) for r in reach_in],
+                                  joiner=" ", unit="item")
         whose = f" {want['principal']}" if want.get("principal") else ""
         return _fit_job_grant(f"let the background job {want['job']} until "
                               f"{want['expires_at']} open your key{whose}",
@@ -144,12 +152,13 @@ def _describe(method: str, path: str, body: Optional[str] = None,
 DESCRIBE_MAX = 250
 
 
-def _fit_job_grant(head: str, cols: list) -> str:
-    """The job grant's action, its expiry and principal first, then as many collections as fit and
-    "and N more" for the rest. One that cannot be named whole is refused: the confirm page never
-    shows a cut-off grant."""
+def _fit_job_grant(head: str, cols: list, *, joiner: str = " and ",
+                   unit: str = "collection") -> str:
+    """The job grant's action, its expiry and principal first, then as many collections (a
+    timer's: the items it reaches) as fit and "and N more" for the rest. One that cannot be named
+    whole is refused: the confirm page never shows a cut-off grant."""
     if not cols:
-        text = f"{head} and no collection"
+        text = f"{head}{joiner}no {unit}"
         if len(text) > DESCRIBE_MAX:
             raise HTTPException(status_code=400, detail="this job grant is too long for Origin's "
                                 "page to name; shorten its job or principal")
@@ -158,7 +167,7 @@ def _fit_job_grant(head: str, cols: list) -> str:
         rest = len(cols) - shown
         named = ", ".join(cols[:shown])
         tail = (f" and {rest} more" if rest else "")
-        text = (f"{head} and {named}{tail}" if shown else f"{head} and {rest} collection"
+        text = (f"{head}{joiner}{named}{tail}" if shown else f"{head}{joiner}{rest} {unit}"
                 f"{'s' if rest != 1 else ''}")
         if len(text) <= DESCRIBE_MAX:
             return text

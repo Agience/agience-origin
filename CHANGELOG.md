@@ -5,6 +5,11 @@ All notable changes to `agience-origin` are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.2.14] - 2026-11-10
+
+### Added
+- A timer runs on a job grant the person approves at Origin (BUG-024, BUG-035; John, 2026-11-10). A job grant may name a `reach`, the ids its delegations touch; a timer's (`lumen.timer.<timer id>`) must, over the person's own key and no collection, and no other grant may. Origin's `/job-grant` page shows the grant and makes it in the person's Origin session behind a step-up bound to its body, then posts its id back to the app's origin only. `POST /internal/job-delegation` mints, for Lumen on its own key, a five-minute delegation narrowed to Lumen or Crystal under the live timer grant it names (never another for the same timer), carrying `job_reach`; the server delegation and every hop exchanged from it keep it. A timer's grant releases no key share.
+
 ## [0.2.13] - 2026-11-10
 
 ### Changed

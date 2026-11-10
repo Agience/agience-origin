@@ -181,6 +181,8 @@ class AuthorityJobGrant(Base):
     job = Column(String(64), nullable=False)
     principal = Column(String(128), nullable=False, index=True)
     collections = Column(Text, nullable=False, default="[]")     # JSON list of collection ids
+    #: A timer's grant: the JSON list of ids its delegations may touch (`job_reach`); else null.
+    reach = Column(Text, nullable=True)
     expires_at = Column(String(64), nullable=False)
     state = Column(String(32), nullable=False)
     created_by = Column(String(128), nullable=False)

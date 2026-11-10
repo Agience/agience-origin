@@ -397,6 +397,10 @@ def mint_background_delegation(db: Session, principal_id: str, job: str,
     why_not = custody_plane.custody_refusal()
     if why_not:
         raise CredentialRefused(why_not)
+    if job.startswith(authority_ledger.TIMER_JOB_PREFIX):
+        # A timer's grant opens content within its reach, as the person, through Lumen; it never
+        # releases a key share, whoever asks.
+        raise CredentialRefused(f"job {job!r} is a timer's, and releases no key share")
     grant = authority_ledger.live_job_grant(db, job=job, principal=principal_id)
     if grant is None:
         raise CredentialRefused(f"no live job grant names job {job!r} for {principal_id!r}; "

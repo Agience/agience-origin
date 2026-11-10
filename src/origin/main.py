@@ -788,6 +788,34 @@ def passkey_page() -> Response:
     return out
 
 
+def _app_origins() -> set:
+    """The origins of the app and the facets this authority serves: where a page here may answer
+    the window that opened it."""
+    from urllib.parse import urlsplit
+    out = set()
+    for uri in [config.APP_URI, *config.FACET_URIS]:
+        parts = urlsplit(str(uri or ""))
+        if parts.scheme in ("https", "http") and parts.netloc:
+            out.add(f"{parts.scheme}://{parts.netloc}".lower())
+    return out
+
+
+@app.get("/job-grant", include_in_schema=False)
+def job_grant_page(back: str = "") -> Response:
+    """Where a person approves, or stops, a timer's job grant (John, 2026-11-10): the app opens it
+    with the grant to make (`job`, `reach`, `days`, `title`) or the one to revoke (`revoke`), and
+    `back`, the app's origin. The grant is made here, in the person's Origin session with a fresh
+    step-up bound to its body, and its id is posted back to `back` only, which must be the app or
+    a facet this authority serves."""
+    if back.rstrip("/").lower() not in _app_origins():
+        return Response(status_code=400, content="unknown app origin", media_type="text/plain")
+    out = _page("job-grant.html")
+    out.headers["Content-Security-Policy"] = PASSKEY_PAGE_CSP
+    out.headers["Cache-Control"] = "no-store"
+    out.headers["Referrer-Policy"] = "no-referrer"
+    return out
+
+
 # The assets those pages reference, mounted under a prefix rather than at `/` — so a future
 # route can never be shadowed by a filename, and nothing outside `web/` is reachable. Every HTML
 # file under `web/` references its assets at this `/web/...` prefix accordingly.

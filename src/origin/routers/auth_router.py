@@ -416,6 +416,7 @@ def internal_issue_delegation_token(
     # A persona server holds the caller only as a delegation narrowed to itself (review 11, H3):
     # it exchanges that, and only that, for its own server delegation, which it signs for itself.
     narrowed_scope = None
+    job: dict = {}
     # Only a delegation narrowed to the asking persona is exchanged (review 27): a person's own
     # access token never becomes a server delegation, so no server delegation carries a person's
     # unscoped reach, and the shared `chorus` identity, which nothing is narrowed to, exchanges
@@ -430,6 +431,8 @@ def internal_issue_delegation_token(
         # The server delegation keeps the narrowing it came from (review 12, H5): its scope and
         # Origin's `narrowed` claim, so Mantle bounds it as it bounds the narrowed delegation.
         narrowed_scope = str(claims.get("scope") or "")
+        # A timer's delegation keeps its reach on every exchange: never wider than its grant.
+        job = origin_auth_service.job_reach_of(claims) or {}
         claims = {**claims, "principal_type": "user", "aud": config.AUTHORITY_ISSUER,
                   "act": None}
     if claims.get("principal_type") in _NON_USER_PRINCIPALS:
@@ -464,6 +467,7 @@ def internal_issue_delegation_token(
     token = origin_auth_service.issue_delegation_token(
         body.server_client_id, str(user_id), ttl, signer=signer, jti=jti,
         **({"narrowed_scope": narrowed_scope} if narrowed_scope is not None else {}),
+        **job,
     )
     db.add(DelegationRecord(jti=jti, subject=str(user_id),
                             audience=_SERVER_DELEGATION_AUDIENCE,
@@ -521,7 +525,8 @@ def _narrow_hop(db: Session, caller: str, subject_token: str, audience: str,
     ends = datetime.fromtimestamp(float(claims.get("exp") or 0), timezone.utc)
     token = origin_auth_service.issue_narrow_delegation(
         str(person.id), audience, wanted, expires_at=ends,
-        hop={"from": caller, "jti": str(claims.get("jti") or "")})
+        hop={"from": caller, "jti": str(claims.get("jti") or "")},
+        **(origin_auth_service.job_reach_of(claims) or {}))
     issued = _jose_jwt.get_unverified_claims(token)
     db.add(NarrowHop(jti=str(issued["jti"]), sub=str(person.id),
                      subject_jti=str(claims.get("jti") or ""), from_aud=caller, to_aud=audience))
@@ -542,6 +547,79 @@ def internal_narrow_hop(body: _NarrowHopRequest, auth: AuthContext = Depends(get
                                             and caller not in config.PERSONA_AUDIENCES):
         raise HTTPException(status_code=403, detail="a hop is a persona's own exchange")
     return _narrow_hop(db, caller, body.subject_token, body.audience, body.scope)
+
+
+class _JobDelegationRequest(BaseModel):
+    """Body for POST /internal/job-delegation."""
+    model_config = ConfigDict(extra="forbid")
+    principal: str
+    job: str
+    audience: str
+    #: The grant the timer was armed on: the one minted under, and no other.
+    job_grant: str
+
+
+#: Whom a timer's delegation is narrowed to: Lumen, which keeps the timer and records its runs, and
+#: Crystal, which runs its target and hops on to the persona that serves it.
+TIMER_AUDIENCES = ("lumen", "crystal")
+
+
+@internal_router.post("/job-delegation")
+def internal_job_delegation(body: _JobDelegationRequest, auth: AuthContext = Depends(get_auth),
+                            db: Session = Depends(get_db)):
+    """A delegation for a timer's firing (John, 2026-11-10: timers run on an Origin job grant),
+    asked by Lumen on its own key. Minted only under the person's live grant for that timer's job
+    (`lumen.timer.<id>`, made at Origin's page with a step-up), narrowed to Lumen or Crystal with
+    that audience's own scope, five minutes and never past the grant, carrying the grant's reach
+    (`job_reach`), which every exchange from it keeps and Mantle holds it to. Each one is recorded
+    under its grant and rate-limited with it; a revoked or expired grant mints nothing."""
+    import json as _json
+
+    from origin.models.key_custody import KeyCustodyDelegation
+    from origin.services import authority_ledger as _ledger, share_credentials
+
+    if (auth.principal_type != "service" or auth.principal_id != "lumen"
+            or auth.actor not in (None, "agience-server-lumen")):
+        raise HTTPException(status_code=403, detail="a timer's delegation is Lumen's own to ask, "
+                            "on its own key")
+    if not body.job.startswith(_ledger.TIMER_JOB_PREFIX) or body.audience not in TIMER_AUDIENCES:
+        raise HTTPException(status_code=400, detail="a timer's job, for lumen or crystal")
+    # The grant the timer was armed on, by its id: an older grant for the same timer, perhaps
+    # wider, is never drawn on in its place.
+    grant = share_credentials._live_grant_row(db, body.job_grant, job=body.job)
+    reach = _json.loads(getattr(grant, "reach", None) or "[]") if grant is not None else []
+    if grant is None or grant.principal != body.principal or not reach:
+        raise HTTPException(status_code=403, detail=f"no live job grant for {body.job} by this "
+                            f"person; arm the timer again")
+    person = db_persons.get_by_id(db, body.principal)
+    if person is None:
+        raise HTTPException(status_code=403, detail="no such person")
+    refuse_if_deactivated(person)
+    scopes = origin_auth_service.narrow_audiences().get(body.audience)
+    if not scopes:
+        raise HTTPException(status_code=403, detail=f"{body.audience} is not a narrow audience")
+    now = datetime.now(timezone.utc)
+    recent = db.query(KeyCustodyDelegation).filter(
+        KeyCustodyDelegation.job_grant_id == grant.grant_id,
+        KeyCustodyDelegation.created_time > now - timedelta(seconds=60)).count()
+    if recent >= share_credentials.JOB_ISSUANCE_PER_MINUTE:
+        raise HTTPException(status_code=429, detail=f"job grant {grant.grant_id} has had its "
+                            f"delegations for the minute")
+    ends = min(_ledger.parse_time(grant.expires_at),
+               now + timedelta(seconds=origin_auth_service.NARROW_TTL_SECONDS))
+    token = origin_auth_service.issue_narrow_delegation(
+        str(person.id), body.audience, list(scopes), expires_at=ends, job_reach=reach,
+        job_grant=grant.grant_id)
+    from jose import jwt as _jose_jwt
+    issued = _jose_jwt.get_unverified_claims(token)
+    db.add(KeyCustodyDelegation(jti=str(issued["jti"]), subject=str(person.id),
+                                issued_by=grant.created_by or "", job_grant_id=grant.grant_id,
+                                job=body.job, collections="[]", expires_at=ends))
+    db.commit()
+    logger.info("timer delegation for %s: job=%s grant=%s audience=%s", person.id, body.job,
+                grant.grant_id, body.audience)
+    return {"access_token": token, "expires_in": max(0, int(issued["exp"] - now.timestamp())),
+            "job_grant": grant.grant_id}
 
 
 _JWT_BEARER = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"
@@ -4088,12 +4166,16 @@ async def make_my_job_grant(request: Request, body: dict = Body(...),
     await person_step_up.require(request, db, who)
     job, until = body.get("job"), body.get("expires_at")
     cols = body.get("collections") or []
-    if not isinstance(job, str) or not job or not isinstance(until, str) or             not isinstance(cols, list) or not all(isinstance(c, str) for c in cols):
+    reach = body.get("reach") or []
+    if (not isinstance(job, str) or not job or not isinstance(until, str)
+            or not isinstance(cols, list) or not all(isinstance(c, str) for c in cols)
+            or not isinstance(reach, list) or not all(isinstance(r, str) for r in reach)):
         raise HTTPException(status_code=400, detail="job and expires_at are required; "
-                            "collections is a list of ids")
+                            "collections and reach are lists of ids")
     try:
         receipt = _ledger.page_job_grant(db, who, job=job, expires_at=until,
-                                         principal=body.get("principal"), collections=cols)
+                                         principal=body.get("principal"), collections=cols,
+                                         reach=reach)
     except _ledger.EntryRefused as exc:
         raise HTTPException(status_code=exc.status, detail=str(exc))
     row = db.query(__import__("origin.models.authority_ledger", fromlist=["x"])

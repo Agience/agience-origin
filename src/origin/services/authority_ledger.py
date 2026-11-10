@@ -138,6 +138,10 @@ _FIELDS = {
     "root.confirm_empty": {"principal_id"},
 }
 KINDS = frozenset(_FIELDS)
+#: Fields an entry may carry beyond `_FIELDS`, kept in its body only when given, so an entry made
+#: before the field existed hashes as it did. A job grant's `reach` (John, 2026-11-10): the ids a
+#: timer's delegation may touch, and nothing outside them.
+_OPTIONAL: Dict[str, frozenset] = {"job_grant": frozenset({"reach"})}
 TARGET_KINDS = frozenset({"user_id", "email", "domain"})
 
 
@@ -176,7 +180,7 @@ def normalise(body: Any, *, canonical_times: bool = True) -> dict:
     kind = body.get("kind")
     if kind not in _FIELDS:
         raise EntryRefused(f"unknown entry kind {kind!r}", 400)
-    extra = sorted(set(body) - _FIELDS[kind] - {"kind"})
+    extra = sorted(set(body) - _FIELDS[kind] - _OPTIONAL.get(kind, frozenset()) - {"kind"})
     missing = sorted(_FIELDS[kind] - set(body))
     if extra or missing:
         raise EntryRefused(f"a {kind} entry has exactly {sorted(_FIELDS[kind])}; extra {extra}, "
@@ -252,6 +256,13 @@ def normalise(body: Any, *, canonical_times: bool = True) -> dict:
                                                  for c in cols) or len(cols) > 64:
             raise EntryRefused("collections is a list of at most 64 ids", 400)
         out["collections"] = sorted(set(cols))
+        reach_ids = body.get("reach")
+        if reach_ids is not None:
+            if (not isinstance(reach_ids, list) or len(reach_ids) > 64 or not all(
+                    isinstance(r, str) and r and len(r) <= _MAX_ID for r in reach_ids)):
+                raise EntryRefused("reach is a list of at most 64 ids", 400)
+            if reach_ids:
+                out["reach"] = sorted(set(reach_ids))
         exp = body["expires_at"]
         try:
             parse_time(exp) if isinstance(exp, str) else (_ for _ in ()).throw(ValueError())
@@ -270,6 +281,10 @@ def normalise(body: Any, *, canonical_times: bool = True) -> dict:
 _JOB_NAME = re.compile(r"[A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+){0,7}")
 #: How long a job grant may run before it is granted again.
 JOB_GRANT_MAX_DAYS = 30
+#: A timer's job: `lumen.timer.<timer id>`. Its grant names a `reach`, the person's own key and no
+#: collection; the delegations minted under it are narrowed to Lumen or Crystal and carry the reach
+#: (`job_reach`), and it never releases a key share (John, 2026-11-10, BUG-024/BUG-035).
+TIMER_JOB_PREFIX = "lumen.timer."
 
 
 def body_digest(body: dict) -> str:
@@ -1067,7 +1082,8 @@ def _decide_job_grant(rc: Reach, ctx: Context, b: dict) -> Optional[str]:
                            "session with a fresh step-up (POST /auth/me/job-grants)")
     if prior is not None:
         same = {k: prior[k] for k in ("job", "principal", "collections", "expires_at")}
-        if same != {k: b[k] for k in same}:
+        if (same != {k: b[k] for k in same}
+                or sorted(prior.get("reach") or []) != list(b.get("reach") or [])):
             raise EntryRefused("a job grant does not change; grant a new one", 409)
         if prior["state"] == b["state"]:
             return None
@@ -1087,6 +1103,13 @@ def _decide_job_grant(rc: Reach, ctx: Context, b: dict) -> Optional[str]:
     if not _job_scope(rc, ctx.actor, b["principal"], b["collections"]):
         raise EntryRefused("a job grant is made by the person whose key it is, or an Admin of "
                            "each collection it names")
+    timer = b["job"].startswith(TIMER_JOB_PREFIX)
+    if timer != bool(b.get("reach")):
+        raise EntryRefused("a timer's job grant names what it reaches (reach), and only a timer's "
+                           "does", 400)
+    if timer and (b["principal"] != ctx.actor or b["collections"]):
+        raise EntryRefused("a timer's job grant is over the person's own key, and no collection",
+                           400)
     return "a job grant within the actor's own authority"
 
 
@@ -1314,7 +1337,16 @@ def revoke_entry(db: Session, seq: int, operator_id: str, ref: str) -> Optional[
 def job_grant_view(row) -> dict:
     return {"grant_id": row.grant_id, "job": row.job, "principal": row.principal,
             "collections": json.loads(row.collections or "[]"), "expires_at": row.expires_at,
+            "reach": json.loads(getattr(row, "reach", None) or "[]"),
             "state": row.state, "created_by": row.created_by, "seq": row.seq}
+
+
+def _job_grant_body(v: dict, state: str) -> dict:
+    """A job grant's entry body from its view, in `state`: its reach kept when it has one."""
+    return {"kind": "job_grant", "grant_id": v["grant_id"], "job": v["job"],
+            "principal": v["principal"], "collections": v["collections"],
+            "expires_at": v["expires_at"], "state": state,
+            **({"reach": v["reach"]} if v.get("reach") else {})}
 
 
 def _held_for_tests(grant_id: str) -> bool:
@@ -1420,12 +1452,14 @@ def person_job_grants(db: Session, person_id: str) -> list:
 
 
 def page_job_grant(db: Session, person_id: str, *, job: str, expires_at: str,
-                   principal: Optional[str] = None, collections: Optional[list] = None) -> dict:
+                   principal: Optional[str] = None, collections: Optional[list] = None,
+                   reach: Optional[list] = None) -> dict:
     """A job grant the person makes at Origin's own page (their session and a step-up, checked by
     the route), appended as theirs."""
     entry = {"kind": "job_grant", "grant_id": "jg-" + secrets.token_hex(8), "job": job,
              "principal": principal or person_id, "collections": list(collections or []),
-             "expires_at": expires_at, "state": _ACTIVE}
+             "expires_at": expires_at, "state": _ACTIVE,
+             **({"reach": list(reach)} if reach else {})}
     return append(db, entry, actor=Actor(person_id, ORIGIN_PAGE, f"page:{person_id}"))
 
 
@@ -1453,9 +1487,7 @@ def page_revoke_job_grant(db: Session, person_id: str, grant_id: str) -> Optiona
     v = job_grant_view(row)
     if v["state"] != _ACTIVE:
         return {"grant_id": grant_id, "state": v["state"]}
-    return append(db, {"kind": "job_grant", "grant_id": grant_id, "job": v["job"],
-                       "principal": v["principal"], "collections": v["collections"],
-                       "expires_at": v["expires_at"], "state": "revoked"},
+    return append(db, _job_grant_body(v, "revoked"),
                   actor=Actor(person_id, ORIGIN_PAGE, f"page:{person_id}"))
 
 
@@ -1467,9 +1499,7 @@ def revoke_person_job_grants(db: Session, person_id: str) -> int:
     for row in db.query(AuthorityJobGrant).filter(AuthorityJobGrant.created_by == person_id,
                                                   AuthorityJobGrant.state == _ACTIVE).all():
         v = job_grant_view(row)
-        append(db, {"kind": "job_grant", "grant_id": row.grant_id, "job": v["job"],
-                    "principal": v["principal"], "collections": v["collections"],
-                    "expires_at": v["expires_at"], "state": "revoked"},
+        append(db, _job_grant_body(v, "revoked"),
                actor=Actor(person_id, "operator", f"sign-out:{person_id}"),
                submitted_jti=f"sign-out:{person_id}")
         n += 1
@@ -1808,9 +1838,7 @@ def revoke_job_grant(db: Session, grant_id: str, operator_id: str, ref: str) -> 
     if row is None:
         raise EntryRefused("no such job grant", 404)
     v = job_grant_view(row)
-    return append(db, {"kind": "job_grant", "grant_id": grant_id, "job": v["job"],
-                       "principal": v["principal"], "collections": v["collections"],
-                       "expires_at": v["expires_at"], "state": "revoked"},
+    return append(db, _job_grant_body(v, "revoked"),
                   actor=Actor(operator_id, "operator", ref), submitted_jti=f"console:{ref}")
 
 
@@ -2034,6 +2062,8 @@ def _decide_operator(rc: Reach, ctx: "Context", b: dict) -> Optional[str]:
             if b["state"] == "revoked":
                 return "the operator revokes a job grant"
             raise EntryRefused("a revoked job grant stays revoked", 409)
+        if b["job"].startswith(TIMER_JOB_PREFIX) or b.get("reach"):
+            raise EntryRefused("a timer's job grant is the person's own, made at Origin's page")
         system = service_identity.get_system_principal_id()
         if (system and b["principal"] != system and b["job"] == NON_PERSON_CUSTODY_JOB
                 and not b["collections"] and ctx.db is not None):
@@ -2322,6 +2352,7 @@ def _apply(db: Session, b: dict, seq: int, ctx: Context) -> None:
             db.add(row)
         row.job, row.principal = b["job"], b["principal"]
         row.collections, row.expires_at = json.dumps(b["collections"]), b["expires_at"]
+        row.reach = json.dumps(b["reach"]) if b.get("reach") else None
         row.state, row.seq = b["state"], seq
     elif kind == "root.retire":
         for model in (AuthorityRoot, AuthorityNode):

@@ -1,0 +1,31 @@
+<!doctype html><html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Timer · Agience</title><link rel="icon" href="/web/favicon.png"><link rel="stylesheet" href="/web/app.css">
+</head><body>
+<div class="bg"><div class="grad"></div><div class="blob b1"></div><div class="blob b2"></div></div>
+<div class="card">
+  <img class="logo" src="/web/logo_v.png" alt="Agience">
+  <h1 id="heading">Arm a timer</h1>
+
+  <div id="signin" class="hidden">
+    <p class="muted">Sign in at Origin to approve this.</p>
+    <input id="email" type="email" autocomplete="username webauthn" placeholder="Email">
+    <button class="primary" id="signinBtn" type="button">Sign in with a passkey</button>
+    <p class="muted"><a href="/login" target="_blank" rel="noopener">Sign in another way</a>, then reload this page.</p>
+  </div>
+
+  <div id="grant" class="hidden">
+    <p id="what"></p>
+    <p class="muted" id="until"></p>
+    <div id="reach"></div>
+    <button class="primary" id="approveBtn" type="button">Approve</button>
+    <button class="link" id="cancelBtn" type="button">Cancel</button>
+  </div>
+
+  <div class="msg" id="msg"></div>
+</div>
+<script src="/web/bg.js"></script>
+<script src="/web/app.js"></script>
+<script src="/web/passkey.js"></script>
+<script src="/web/job-grant-page.js"></script>
+</body></html>
