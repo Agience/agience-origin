@@ -13,8 +13,11 @@ from contextlib import contextmanager
 from jose import jwt as jose_jwt
 
 from origin.tests import authority_fixtures as af
-from origin.tests.test_background_work_runs_on_a_job_grant import (  # noqa: F401 — fixtures
-    _mint, _root, custody_client, job_grant, people)
+from origin.tests import test_background_work_runs_on_a_job_grant as _jobs
+from origin.tests.test_background_work_runs_on_a_job_grant import _mint, _root, job_grant
+
+custody_client = _jobs.custody_client
+people = _jobs.people
 
 TIMER = "lumen.timer.t-1"
 
