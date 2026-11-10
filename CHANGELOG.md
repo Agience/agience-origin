@@ -5,6 +5,11 @@ All notable changes to `agience-origin` are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.2.16] - 2026-11-10
+
+### Fixed
+- A step-up taken at Origin's own sign-in returns to the Origin page that asked for it (BUG-037). Approving a timer, linking or removing a sign-in, or adding a passkey without a passkey sends the person to sign in again; afterwards they were left on "return to Origin's page" with that page gone, in the same tab, so the approval never finished. The confirmation page now goes back to it, an Origin page only, where approving again sends the request on the proven step-up.
+
 ## [0.2.15] - 2026-11-10
 
 ### Changed

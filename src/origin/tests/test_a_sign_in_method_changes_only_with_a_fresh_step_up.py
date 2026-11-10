@@ -280,8 +280,13 @@ def test_without_a_passkey_the_person_re_authenticates_on_origin_s_page(custody_
     body = _attempted_body(c, alice_token, _code("google", "alice-2nd", "a2@team.test"))
     ticket = _page_reauth(c, alice_token, alice, "POST", LINK, body)
     assert _send(c, "POST", LINK, alice_token, body, f"reauth:{ticket}").status_code == 403
-    assert _complete_fresh(c, ticket, "google", "alice-google",
-                           "alice@team.test").status_code == 200
+    done = _complete_fresh(c, ticket, "google", "alice-google", "alice@team.test")
+    assert done.status_code == 200
+    # It goes back to the Origin page that asked (BUG-037), by Origin's own script, never inline.
+    assert '<script src="/web/reauth-complete.js"></script>' in done.text
+    csp = done.headers["content-security-policy"]
+    assert "script-src 'self'" in csp and "'unsafe-inline'" not in csp.split("script-src")[1].split(";")[0]
+    assert c.get("/web/reauth-complete.js").status_code == 200
     r = _send(c, "POST", LINK, alice_token, body, f"reauth:{ticket}")
     assert r.status_code == 200, r.text
     assert _send(c, "POST", LINK, alice_token, body, f"reauth:{ticket}").status_code == 403

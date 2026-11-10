@@ -78,7 +78,8 @@ async function stepUp(method, path, bodyText) {
   if (!o.ok) throw new Error(o.detail || "step-up refused");
   if (o.data.kind === "reauth") {
     sessionStorage.setItem("pending_step_up", JSON.stringify({ method: method, path: path,
-                                                                ticket: o.data.ticket }));
+                                                                ticket: o.data.ticket,
+                                                                back: location.href }));
     location.href = o.data.url;               // Origin's own sign-in; comes back proven
     return null;
   }
@@ -173,7 +174,8 @@ async function stepUpWithBody(method, path, bodyText) {
   if (o.data.kind === "reauth") {
     sessionStorage.setItem("pending_step_up", JSON.stringify({ method: method, path: path,
                                                                 ticket: o.data.ticket,
-                                                                body: bodyText }));
+                                                                body: bodyText,
+                                                                back: location.href }));
     location.href = o.data.url;
     return null;
   }

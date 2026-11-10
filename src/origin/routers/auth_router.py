@@ -4234,10 +4234,15 @@ async def person_reauth_complete(request: Request, code: str, state: str,
 
     row = person_step_up.complete(db, state, code, authorization_codes, _CODE_TTL,
                                   session_sha256=origin_session.digest_of(request))
+    # Back to the Origin page that asked, in this tab, where the request is sent with the proven
+    # ticket (`web/reauth-complete.js`, BUG-037).
+    from origin.main import PASSKEY_PAGE_CSP
     return HTMLResponse(
         "<!doctype html><meta charset=utf-8><title>Confirmed</title>"
-        f"<p>Confirmed: you may now {_html.escape(row.describe)}. "
-        "Return to Origin's page to finish it.</p>")
+        f"<p>Confirmed: you may now {_html.escape(row.describe)}.</p>"
+        '<p><a id="back" href="/passkey" hidden>Back to finish it</a></p>'
+        '<script src="/web/reauth-complete.js"></script>',
+        headers={"Content-Security-Policy": PASSKEY_PAGE_CSP, "Cache-Control": "no-store"})
 
 
 # ---------------------------------------------------------------------------
