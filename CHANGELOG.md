@@ -5,6 +5,11 @@ All notable changes to `agience-origin` are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.2.13] - 2026-11-10
+
+### Changed
+- Every persona Chorus hosts is a narrow audience the app may call directly (FR-006, John 2026-11-10): aria, astra, ophan and seraph join iris, lumen, sage and crystal in the defaults (`PERSONA_AUDIENCES`), each with its own `persona:<name>` scope only, and Crystal may hop to each (`NARROW_HOPS`). They were refused with 400 "audience is not a narrow audience".
+
 ## [0.2.12] - 2026-11-09
 
 ### Added

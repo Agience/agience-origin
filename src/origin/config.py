@@ -222,7 +222,9 @@ def forwarded_trust_problem() -> "str | None":
 
 #: The persona servers that receive a caller only as a narrowed delegation (review 11, H3): each its
 #: own audience and scope `persona:<name>`.
-PERSONA_AUDIENCES = ("iris", "lumen", "sage", "crystal")
+#: Every persona Chorus hosts, and Crystal: each a narrow audience the app may call directly
+#: (John, 2026-11-10, FR-006: aria, astra, ophan and seraph too).
+PERSONA_AUDIENCES = ("aria", "astra", "iris", "lumen", "ophan", "sage", "seraph", "crystal")
 #: Scopes no narrowed delegation ever carries: `platform:admin`, and Ember's share, which is gone
 #: (John, 2026-11-02: sharing happens only in the person's own session).
 NEVER_NARROWED = frozenset({"platform:admin", "ember:share"})
@@ -285,7 +287,7 @@ def _narrow_hops_from_env() -> dict:
     import json as _json
     raw = os.getenv("NARROW_HOPS", "").strip()
     if not raw:
-        return {"crystal": ["iris", "lumen", "sage"], "lumen": ["sage"]}
+        return {"crystal": [p for p in PERSONA_AUDIENCES if p != "crystal"], "lumen": ["sage"]}
     try:
         parsed = _json.loads(raw)
     except ValueError:
