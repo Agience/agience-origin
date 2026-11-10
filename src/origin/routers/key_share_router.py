@@ -138,13 +138,16 @@ def _bound(request: Request, principal_id: str, db: Session, **extra) -> str:
                       claims_must={"principal_id": principal_id, **extra})
 
 
-def acting_credential(request: Request, db: Session, what: str):
-    """The verified acting credential on this request, or 401/403 naming why."""
+def acting_credential(request: Request, db: Session, what: str, *, job: bool = False):
+    """The verified acting credential on this request, or 401/403 naming why. `job`: the release
+    route alone also takes a timer's job delegation (`share_credentials.verify_job_credential`)."""
     credential = request.headers.get(ACTING_CREDENTIAL_HEADER, "").strip()
     if not credential:
         logger.warning("%s refused: no acting credential", what)
         raise HTTPException(status_code=401, detail="the acting caller's credential is required")
     try:
+        if job and share_credentials.carries_job_grant(credential):
+            return share_credentials.verify_job_credential(db, credential)
         return share_credentials.verify_share_credential(db, credential)
     except share_credentials.CredentialRefused as exc:
         logger.warning("%s refused: acting credential refused (%s)", what, exc)
@@ -416,7 +419,8 @@ def get_share(principal_id: str, request: Request,
     _custody_here()
     collection_id, artifact_id = _scope_id(collection_id), _scope_id(artifact_id)
     _bound(request, principal_id, db, collection_id=collection_id, artifact_id=artifact_id)
-    acting = acting_credential(request, db, f"key share release: principal={principal_id}")
+    acting = acting_credential(request, db, f"key share release: principal={principal_id}",
+                               job=True)
     if acting.kind == "narrowed":
         # Ember acts for a person without ever opening their content (John, 2026-11-02).
         logger.warning("key share release refused: principal=%s for=%s (a narrowed delegation)",
@@ -426,6 +430,8 @@ def get_share(principal_id: str, request: Request,
     try:
         share_credentials.bind_to_principal(acting, principal_id)
         share_credentials.bind_to_collection(acting, principal_id, collection_id)
+        share_credentials.bind_to_job_reach(acting, principal_id, artifact_id,
+                                            authority_ledger.reach(db))
     except share_credentials.CredentialRefused as exc:
         logger.warning("key share release refused: principal=%s for=%s (%s)", principal_id,
                        acting.subject, exc)

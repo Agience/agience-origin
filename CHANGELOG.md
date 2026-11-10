@@ -5,6 +5,11 @@ All notable changes to `agience-origin` are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.2.15] - 2026-11-10
+
+### Changed
+- A timer's firing opens its owner's content key for the artifacts its job grant lists, by id, and for nothing else (John, 2026-11-10). At a key share release, and there alone, Origin takes a persona's server delegation carrying a live timer grant (`job_grant`, `job_reach` equal to the grant's reach) as the person's acting credential for an artifact the grant lists, and only for the key that artifact is keyed under (its creation collection's, or the person's or its root's master key); a release naming no artifact, or another one, or another key, is refused, as is any such delegation once its grant is revoked or over. It still stores no share, writes nothing to the ledger and mints no background delegation.
+
 ## [0.2.14] - 2026-11-10
 
 ### Added

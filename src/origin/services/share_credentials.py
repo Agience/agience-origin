@@ -20,6 +20,10 @@ it:
                (`scope=custody.share.release`, `aud=origin`, at most `MAX_BACKGROUND_TTL` seconds),
                present in `key_custody_delegations`, not revoked, under a background authority
                the operator granted and has not withdrawn. It opens that principal and no other.
+  job          a persona's server delegation carrying a timer's job grant (`job_grant`,
+               `job_reach`), accepted at a key share release only (`verify_job_credential`). It
+               opens the person's key for the artifacts its live grant lists, by id, and no other
+               (John, 2026-11-10).
 
 Everything else is refused: no credential, a token another key signed, a platform service's token,
 a refresh or single-purpose token, an mcp_client token, a system delegation issued for another
@@ -96,6 +100,9 @@ class VerifiedCredential:
     collections: tuple = ()
     #: For a narrowed delegation (kind `narrowed`), the scopes it carries.
     scopes: tuple = ()
+    #: For a job's delegation (kind `job`), the artifact ids its job grant lists: the only ones
+    #: whose key it opens.
+    reach: tuple = ()
 
 
 #: Ember's narrowed delegation acts, as an acting credential, for these scopes only (John,
@@ -377,6 +384,97 @@ def _live_grant_row(db: Session, grant_id: Optional[str], *, job: Optional[str] 
     except ValueError:
         return None
     return row if grant_still_held(db, row) else None
+
+
+def carries_job_grant(token: str) -> bool:
+    """Does `token` name a job grant (unverified: only which verifier to try)?"""
+    from jose import jwt as _jose_jwt
+
+    try:
+        claims = _jose_jwt.get_unverified_claims(token)
+    except Exception:  # noqa: BLE001 — not a JWT: the ordinary verifier refuses it
+        return False
+    return isinstance(claims, dict) and bool(claims.get("job_grant")) and "job_reach" in claims
+
+
+def verify_job_credential(db: Session, token: str) -> VerifiedCredential:
+    """A timer's job delegation, as a persona exchanged it to call Mantle: a key share release's
+    acting credential for the artifacts its grant lists and nothing else (John, 2026-11-10: a job
+    or persona opens a person's content key only under a live job grant the person approved at
+    Origin, only for the artifacts in its reach, for its lifetime). Refuses with
+    `CredentialRefused`.
+
+    Accepted only by the release route: every other route verifies with
+    `verify_share_credential`, which refuses a persona's server delegation outright, so a job's
+    delegation never writes the ledger, stores a share or answers a reach verdict."""
+    import json as _json
+
+    from origin.services import authority_ledger
+    from origin.services.auth_verifier import verify_token
+    from origin.services.use_verdict import UseRefused, verify_persona_credential
+
+    try:
+        persona = verify_persona_credential(db, token)
+    except UseRefused as exc:
+        raise CredentialRefused(str(exc)) from None
+    if persona.kind != "person":
+        raise CredentialRefused("a platform purpose's delegation carries no job grant")
+    claims = verify_token(token) or {}
+    iat, exp = claims.get("iat"), claims.get("exp")
+    if not isinstance(iat, (int, float)) or not isinstance(exp, (int, float)) \
+            or exp - iat > MAX_PERSON_DELEGATION_TTL + 5:
+        raise CredentialRefused(f"a job's delegation living over {MAX_PERSON_DELEGATION_TTL}s")
+    reach = claims.get("job_reach")
+    if not isinstance(reach, list) or not reach:
+        raise CredentialRefused("a job's delegation with no reach")
+    grant = _live_grant_row(db, str(claims.get("job_grant") or ""))
+    if grant is None or not str(grant.job).startswith(authority_ledger.TIMER_JOB_PREFIX):
+        raise CredentialRefused("the job grant this delegation names is revoked, over, or not a "
+                                "timer's")
+    if grant.principal != persona.subject:
+        raise CredentialRefused("a job grant another person made")
+    granted = _json.loads(getattr(grant, "reach", None) or "[]")
+    if sorted({str(r) for r in reach}) != sorted({str(r) for r in granted}):
+        raise CredentialRefused("a job's delegation whose reach is not its grant's")
+    # No `principal`: the key it opens is the one the listed artifact is keyed under, a
+    # collection's (`ck:<collection>`) or the person's own, which `bind_to_job_reach` and the
+    # release's own walk decide.
+    return VerifiedCredential(persona.subject, "job", persona.jti,
+                              reach=tuple(sorted({str(r) for r in granted})))
+
+
+def bind_to_job_reach(cred: VerifiedCredential, principal_id: str, artifact_id: Optional[str],
+                      rc=None) -> None:
+    """A job's delegation opens a key only for an artifact its grant lists, named by id, and only
+    the key that artifact is keyed under: its own collection's, by its creation edge, or the
+    person's own master key."""
+    if cred.kind != "job":
+        return
+    if not artifact_id or artifact_id not in cred.reach:
+        raise CredentialRefused("a job's delegation opens a key only for an artifact its job "
+                                "grant lists")
+    from origin.services.authority_reach import collection_key_collection
+    collection = collection_key_collection(principal_id)
+    if collection is None:
+        # The person's own master key, or the key of the root the listed artifact sits under.
+        node, seen = str(artifact_id), set()
+        while principal_id != cred.subject and node != principal_id and node not in seen \
+                and rc is not None and len(seen) < 64:
+            seen.add(node)
+            up = rc.origin_parent(node)
+            if not up:
+                break
+            node = str(up[0])
+        if principal_id != cred.subject and node != principal_id:
+            raise CredentialRefused("a job's delegation opens only the key its listed artifact "
+                                    "is keyed under")
+        return
+    if collection == str(artifact_id):
+        return                       # a top-level artifact is keyed under its own id
+    parent = rc.origin_parent(artifact_id) if rc is not None else None
+    if not parent or parent[0] != collection:
+        raise CredentialRefused("a job's delegation opens only the key its listed artifact is "
+                                "keyed under")
 
 
 class IssuanceLimited(CredentialRefused):

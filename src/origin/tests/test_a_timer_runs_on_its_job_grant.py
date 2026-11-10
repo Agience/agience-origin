@@ -4,7 +4,9 @@ Arming a timer is a job grant the person makes at Origin's page, in their Origin
 step-up: job `lumen.timer.<timer id>`, over their own key, naming what the timer reaches (`reach`)
 and nothing else. Lumen, on its own key, asks Origin for a firing's delegation under it: narrowed to
 Lumen or Crystal, five minutes, carrying the reach (`job_reach`), which every exchange from it
-keeps. A revoked grant mints nothing, and a timer's grant never releases a key share.
+keeps. A revoked grant mints nothing, and a timer's grant mints no background delegation: its
+firing opens the person's key only for the artifacts it lists
+(`test_a_job_s_delegation_opens_only_its_grant_s_artifacts`).
 """
 from __future__ import annotations
 
