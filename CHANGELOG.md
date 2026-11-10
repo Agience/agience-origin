@@ -5,6 +5,11 @@ All notable changes to `agience-origin` are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.2.17] - 2026-11-10
+
+### Added
+- A workflow's "Run now" runs on a one-shot job grant (John, 2026-11-10). Job `lumen.run.<workflow>.<nonce>`, made at Origin's `/job-grant` page in the person's Origin session with a step-up, over the person's own key and no collection, naming its `reach` (the workflow, its steps' operators and the items they link). It ends within `RUN_GRANT_MAX_MINUTES` (15; the page asks for 10), and only one delegation is ever minted under it, narrowed to Crystal and carrying the reach; a second, or one for Lumen, is refused. It releases a key share only for an artifact its reach lists, as a timer's does, and never a background delegation. The page and its step-up name it as one run.
+
 ## [0.2.16] - 2026-11-10
 
 ### Fixed

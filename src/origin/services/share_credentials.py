@@ -428,7 +428,7 @@ def verify_job_credential(db: Session, token: str) -> VerifiedCredential:
     if not isinstance(reach, list) or not reach:
         raise CredentialRefused("a job's delegation with no reach")
     grant = _live_grant_row(db, str(claims.get("job_grant") or ""))
-    if grant is None or not str(grant.job).startswith(authority_ledger.TIMER_JOB_PREFIX):
+    if grant is None or not authority_ledger.is_reach_job(str(grant.job)):
         raise CredentialRefused("the job grant this delegation names is revoked, over, or not a "
                                 "timer's")
     if grant.principal != persona.subject:
@@ -495,7 +495,7 @@ def mint_background_delegation(db: Session, principal_id: str, job: str,
     why_not = custody_plane.custody_refusal()
     if why_not:
         raise CredentialRefused(why_not)
-    if job.startswith(authority_ledger.TIMER_JOB_PREFIX):
+    if authority_ledger.is_reach_job(job):
         # A timer's grant opens content within its reach, as the person, through Lumen; it never
         # releases a key share, whoever asks.
         raise CredentialRefused(f"job {job!r} is a timer's, and releases no key share")

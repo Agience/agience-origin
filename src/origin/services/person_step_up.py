@@ -138,6 +138,11 @@ def _describe(method: str, path: str, body: Optional[str] = None,
             if not isinstance(reach_in, list):
                 raise HTTPException(status_code=400, detail="reach is a list of ids")
             # A timer's grant (John, 2026-11-10): it acts as the person within what it names.
+            if str(want.get("job") or "").startswith("lumen.run."):
+                # A workflow's one run, now (John, 2026-11-10).
+                return _fit_job_grant(f"run a workflow once ({want['job']}), until "
+                                      f"{want['expires_at']}, reading, writing and running as you, in",
+                                      [str(r) for r in reach_in], joiner=" ", unit="item")
             return _fit_job_grant(f"let the timer {want['job']} until {want['expires_at']} read, "
                                   f"write and run as you, in", [str(r) for r in reach_in],
                                   joiner=" ", unit="item")

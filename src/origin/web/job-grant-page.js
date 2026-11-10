@@ -14,6 +14,8 @@
     .filter(Boolean);
   const title = q.get("title") || job;
   const days = Math.max(1, Math.min(30, parseInt(q.get("days") || "30", 10) || 30));
+  /* A workflow's one run, now: ten minutes, and used once (John, 2026-11-10). */
+  const isRun = job.indexOf("lumen.run.") === 0;
   const PATH = "/auth/me/job-grants";
 
   function answer(message) {
@@ -28,7 +30,7 @@
    * leaves this page, and the request sent on return must be the same bytes. */
   /* Kept under the exact grant shown (job, reach and term), and only while a re-authentication for
    * it is pending: a page opened for another grant, or after one closed, starts from what it shows. */
-  const KEY = "job_grant_body:" + JSON.stringify([job, reach, days]);
+  const KEY = "job_grant_body:" + JSON.stringify([job, reach, isRun ? "run" : days]);
   if (!sessionStorage.getItem("pending_step_up")) {
     Object.keys(sessionStorage).forEach(function (k) {
       if (k.indexOf("job_grant_body:") === 0) sessionStorage.removeItem(k);
@@ -39,7 +41,8 @@
     const kept = sessionStorage.getItem(key);
     if (kept) return kept;
     /* An hour inside the term, so a clock running a little fast still asks for one Origin takes. */
-    const until = new Date(Date.now() + days * 86400000 - 3600000).toISOString();
+    const until = new Date(isRun ? Date.now() + 10 * 60000
+                                 : Date.now() + days * 86400000 - 3600000).toISOString();
     const body = JSON.stringify({ job: job, expires_at: until, reach: reach });
     sessionStorage.setItem(key, body);
     return body;
@@ -55,10 +58,18 @@
       $("#approveBtn").textContent = "Stop it";
       return;
     }
-    $("#what").textContent = "While you are away, the timer “" + title + "” reads, " +
-      "writes and runs operations as you, in these items and what they contain, and nowhere else:";
-    $("#until").textContent = "Until " + JSON.parse(bodyFor()).expires_at +
-      ", or until you disarm it. Mantle still holds it to what you yourself may do.";
+    if (isRun) {
+      $("#heading").textContent = "Run a workflow";
+      $("#what").textContent = "Run “" + title + "” once, now, as you: it reads, writes and runs " +
+        "operations in these items and what they contain, and nowhere else:";
+      $("#until").textContent = "This run only, and only until " + JSON.parse(bodyFor()).expires_at +
+        ". Mantle still holds it to what you yourself may do.";
+    } else {
+      $("#what").textContent = "While you are away, the timer “" + title + "” reads, " +
+        "writes and runs operations as you, in these items and what they contain, and nowhere else:";
+      $("#until").textContent = "Until " + JSON.parse(bodyFor()).expires_at +
+        ", or until you disarm it. Mantle still holds it to what you yourself may do.";
+    }
     reach.forEach(function (id) {
       const row = document.createElement("div"); row.className = "kv";
       const name = document.createElement("span"); name.textContent = id;

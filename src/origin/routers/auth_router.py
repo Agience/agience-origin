@@ -582,8 +582,11 @@ def internal_job_delegation(body: _JobDelegationRequest, auth: AuthContext = Dep
             or auth.actor not in (None, "agience-server-lumen")):
         raise HTTPException(status_code=403, detail="a timer's delegation is Lumen's own to ask, "
                             "on its own key")
-    if not body.job.startswith(_ledger.TIMER_JOB_PREFIX) or body.audience not in TIMER_AUDIENCES:
-        raise HTTPException(status_code=400, detail="a timer's job, for lumen or crystal")
+    run = body.job.startswith(_ledger.RUN_JOB_PREFIX)
+    if not _ledger.is_reach_job(body.job) or body.audience not in TIMER_AUDIENCES \
+            or (run and body.audience != "crystal"):
+        raise HTTPException(status_code=400, detail="a timer's job, for lumen or crystal, or a "
+                            "run's, for crystal")
     # The grant the timer was armed on, by its id: an older grant for the same timer, perhaps
     # wider, is never drawn on in its place.
     grant = share_credentials._live_grant_row(db, body.job_grant, job=body.job)
@@ -599,6 +602,21 @@ def internal_job_delegation(body: _JobDelegationRequest, auth: AuthContext = Dep
     if not scopes:
         raise HTTPException(status_code=403, detail=f"{body.audience} is not a narrow audience")
     now = datetime.now(timezone.utc)
+    if run:
+        # A run's grant is used once (John, 2026-11-10): one delegation, to Crystal, then none.
+        # Claimed by a row keyed on the grant, so two requests at once cannot both pass: the second
+        # fails on the primary key, not on a count it read before the first wrote.
+        from sqlalchemy.exc import IntegrityError
+        db.add(KeyCustodyDelegation(jti=("run:" + grant.grant_id)[:64], subject=str(person.id),
+                                    issued_by=grant.created_by or "", job_grant_id=grant.grant_id,
+                                    job=body.job, collections="[]",
+                                    expires_at=_ledger.parse_time(grant.expires_at)))
+        try:
+            db.commit()
+        except IntegrityError:
+            db.rollback()
+            raise HTTPException(status_code=403, detail=f"job grant {grant.grant_id} has had its "
+                                f"one run; run it again to approve another")
     recent = db.query(KeyCustodyDelegation).filter(
         KeyCustodyDelegation.job_grant_id == grant.grant_id,
         KeyCustodyDelegation.created_time > now - timedelta(seconds=60)).count()

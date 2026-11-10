@@ -285,6 +285,16 @@ JOB_GRANT_MAX_DAYS = 30
 #: collection; the delegations minted under it are narrowed to Lumen or Crystal and carry the reach
 #: (`job_reach`), and it never releases a key share (John, 2026-11-10, BUG-024/BUG-035).
 TIMER_JOB_PREFIX = "lumen.timer."
+#: A workflow's one run, now (John, 2026-11-10: Run now takes a one-shot grant): `lumen.run.<workflow
+#: id>.<nonce>`. As a timer's, it names a `reach` over the person's own key and no collection; it
+#: ends within `RUN_GRANT_MAX_MINUTES`, and only one delegation is ever minted under it, to Crystal.
+RUN_JOB_PREFIX = "lumen.run."
+RUN_GRANT_MAX_MINUTES = 15
+
+
+def is_reach_job(job: str) -> bool:
+    """A job that runs on a reach the person approved: a timer's, or a workflow's one run."""
+    return str(job or "").startswith((TIMER_JOB_PREFIX, RUN_JOB_PREFIX))
 
 
 def body_digest(body: dict) -> str:
@@ -1103,7 +1113,9 @@ def _decide_job_grant(rc: Reach, ctx: Context, b: dict) -> Optional[str]:
     if not _job_scope(rc, ctx.actor, b["principal"], b["collections"]):
         raise EntryRefused("a job grant is made by the person whose key it is, or an Admin of "
                            "each collection it names")
-    timer = b["job"].startswith(TIMER_JOB_PREFIX)
+    timer = is_reach_job(b["job"])
+    if b["job"].startswith(RUN_JOB_PREFIX) and until > now + timedelta(minutes=RUN_GRANT_MAX_MINUTES):
+        raise EntryRefused(f"a run's job grant ends within {RUN_GRANT_MAX_MINUTES} minutes", 400)
     if timer != bool(b.get("reach")):
         raise EntryRefused("a timer's job grant names what it reaches (reach), and only a timer's "
                            "does", 400)
@@ -2062,7 +2074,7 @@ def _decide_operator(rc: Reach, ctx: "Context", b: dict) -> Optional[str]:
             if b["state"] == "revoked":
                 return "the operator revokes a job grant"
             raise EntryRefused("a revoked job grant stays revoked", 409)
-        if b["job"].startswith(TIMER_JOB_PREFIX) or b.get("reach"):
+        if is_reach_job(b["job"]) or b.get("reach"):
             raise EntryRefused("a timer's job grant is the person's own, made at Origin's page")
         system = service_identity.get_system_principal_id()
         if (system and b["principal"] != system and b["job"] == NON_PERSON_CUSTODY_JOB
