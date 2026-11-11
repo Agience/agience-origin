@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 
 _SUITES = [Path(__file__).resolve().parent / "js" / n
-           for n in ("app_js.test.cjs", "page_scripts.test.cjs")]
+           for n in ("app_js.test.cjs", "page_scripts.test.cjs", "job_grant_page.test.cjs")]
 
 
 @pytest.mark.parametrize("suite", _SUITES, ids=[s.name for s in _SUITES])

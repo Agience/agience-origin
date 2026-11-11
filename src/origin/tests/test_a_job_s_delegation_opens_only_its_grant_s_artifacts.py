@@ -144,3 +144,36 @@ def test_a_server_delegation_with_no_job_still_opens_nothing(custody_client, peo
     _armed(c, alice)
     tok = _server_delegation(alice[0], persona="lumen", signer="lumen")
     assert af.release(c, alice[0], tok, artifact="t-1").status_code == 403
+
+
+def test_it_opens_the_key_of_an_item_held_in_a_collection_its_grant_lists(custody_client, people):
+    """BUG-052 (John, 2026-11-11): a run whose grant lists a collection reads the notes created in
+    it, under the collection's own key. A note in another collection the person reaches stays shut."""
+    c, alice = custody_client, people["alice"]
+    _armed(c, alice, reach=("K",))
+    for col in ("K", "L"):
+        _root(c, alice, col)
+        af.ok(af.store_share(c, f"ck:{col}", alice[1]))
+    af.ok(af.submit(c, alice[1], af.edge("K", "note-1"), batch="e-n1"))
+    af.ok(af.submit(c, alice[1], af.edge("L", "other-1"), batch="e-o1"))
+    tok = _job_delegation(alice[0], reach=("K",))
+    r = af.release(c, "ck:K", tok, collection="K", artifact="note-1")
+    assert r.status_code == 200, r.text
+    assert af.release(c, "ck:L", tok, collection="L", artifact="other-1").status_code == 403
+    assert af.release(c, "ck:K", tok, collection="K", artifact="other-1").status_code == 403
+
+
+def test_a_note_two_levels_down_opens_only_its_own_collection_s_key(custody_client, people):
+    """Held under a listed collection A, inside its sub-collection B: the note opens `ck:B`, the
+    key it is written under, and never `ck:A`."""
+    c, alice = custody_client, people["alice"]
+    _armed(c, alice, reach=("A",))
+    _root(c, alice, "A")
+    af.ok(af.submit(c, alice[1], af.edge("A", "B"), batch="e-ab"))
+    for col in ("A", "B"):
+        af.ok(af.store_share(c, f"ck:{col}", alice[1]))
+    af.ok(af.submit(c, alice[1], af.edge("B", "note-2"), batch="e-bn"))
+    tok = _job_delegation(alice[0], reach=("A",))
+    r = af.release(c, "ck:B", tok, collection="B", artifact="note-2")
+    assert r.status_code == 200, r.text
+    assert af.release(c, "ck:A", tok, collection="A", artifact="note-2").status_code == 403

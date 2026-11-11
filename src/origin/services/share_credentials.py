@@ -443,16 +443,32 @@ def verify_job_credential(db: Session, token: str) -> VerifiedCredential:
                               reach=tuple(sorted({str(r) for r in granted})))
 
 
+def _held_in_reach(artifact_id: str, reach, rc) -> bool:
+    """Is `artifact_id` listed, or under a listed artifact along edges that conduct a read? The
+    walk is `Reach.chain`, Mantle's `origin_chain`, so both decide a job's reach alike. No reach
+    client means only a listed id; a walk that fails opens nothing."""
+    ids = {str(r) for r in reach}
+    if artifact_id in ids:
+        return True
+    if rc is None:
+        return False
+    try:
+        return any(str(r) in ids for r in rc.chain(artifact_id, "read"))
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def bind_to_job_reach(cred: VerifiedCredential, principal_id: str, artifact_id: Optional[str],
                       rc=None) -> None:
-    """A job's delegation opens a key only for an artifact its grant lists, named by id, and only
-    the key that artifact is keyed under: its own collection's, by its creation edge, or the
-    person's own master key."""
+    """A job's delegation opens a key only for an artifact its grant lists, or one held under a
+    listed artifact along its origin edges (John, 2026-11-11, BUG-052: a run that links a
+    collection reads the notes in it), and only the key that artifact is keyed under: its own
+    collection's, by its creation edge, or the person's own master key."""
     if cred.kind != "job":
         return
-    if not artifact_id or artifact_id not in cred.reach:
+    if not artifact_id or not _held_in_reach(str(artifact_id), cred.reach, rc):
         raise CredentialRefused("a job's delegation opens a key only for an artifact its job "
-                                "grant lists")
+                                "grant lists, or one held in it")
     from origin.services.authority_reach import collection_key_collection
     collection = collection_key_collection(principal_id)
     if collection is None:

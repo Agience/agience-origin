@@ -1247,6 +1247,7 @@ def _render_local_login(
     providers: list[tuple[str, str]],
     password: bool,
     otp: bool,
+    login_hint: str = "",
 ) -> str:
     """The account chooser: whichever of password, OTP and federated sign-in this node actually has.
 
@@ -1277,6 +1278,14 @@ def _render_local_login(
         block = _PASSWORD_BLOCK.replace("__OTPTOGGLE__", _OTP_TOGGLE if otp else "").replace(
             "__REGTOGGLE__", _REGISTER_TOGGLE
         )
+        if login_hint:
+            # The account is known (a step-up names it): filled in, and the password asked for.
+            block = block.replace(
+                '<input id="identifier" type="text" autocomplete="username" required>',
+                '<input id="identifier" type="text" autocomplete="username" required value="'
+                + _html.escape(login_hint, quote=True) + '">').replace(
+                '<input id="password" type="password" autocomplete="current-password" required>',
+                '<input id="password" type="password" autocomplete="current-password" required autofocus>')
         otp_block = _OTP_BLOCK.replace("__OTPHIDDEN__", ' class="hidden"').replace(
             "__OTPBACK__", _OTP_BACK
         ) if otp else ""
@@ -1956,6 +1965,7 @@ async def authorize(
     setup_operator_token: Optional[str] = None,
     prompt: Optional[str] = None,
     max_age: Optional[int] = None,
+    login_hint: Optional[str] = None,
     db: Session = Depends(get_db),
 ):
     """OAuth2 authorization endpoint. Redirects to the upstream OIDC provider.
@@ -2117,6 +2127,9 @@ async def authorize(
                 ],
                 password=password_ok,
                 otp=otp_ok,
+                # OIDC `login_hint`: the account the client already knows, filled in. Only a hint;
+                # the sign-in proves whoever signs in.
+                login_hint=(login_hint or "").strip()[:254],
             ),
             status_code=200,
             headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"},

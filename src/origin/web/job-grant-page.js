@@ -21,6 +21,14 @@
   function answer(message) {
     if (window.opener && back) window.opener.postMessage(message, back);
   }
+  /* Origin refused the grant: the same request is refused again, so Approve is not offered again
+   * (BUG-060, 2026-11-11: each Approve took another sign-in and the same refusal). */
+  function refused(detail) {
+    sessionStorage.removeItem(KEY);
+    show(detail || "Refused.", "err");
+    $("#approveBtn").classList.add("hidden");
+    $("#cancelBtn").textContent = "Close";
+  }
   function done(message) {
     answer(message);
     setTimeout(function () { window.close(); }, 600);
@@ -82,14 +90,14 @@
       const out = await revokeJobGrant(revoke, true);
       if (!out) return;
       if (out.ok) { show("Stopped.", "ok"); done({ type: "agience.job-grant-revoked", grant_id: revoke }); }
-      else show(out.detail || "Refused.", "err");
+      else refused(out.detail);
       return;
     }
     const body = bodyFor();
     const step = provenTicket("POST", PATH) || await stepUpWithBody("POST", PATH, body, true);
     if (step === null) return;
     const out = await authed("POST", PATH, body, { "X-Step-Up": step });
-    if (!out.ok) { show(out.detail || "Refused.", "err"); return; }
+    if (!out.ok) { refused(out.detail); return; }
     sessionStorage.removeItem(KEY);
     show("Approved.", "ok");
     done({ type: "agience.job-grant", job: job, grant_id: out.data && out.data.grant_id });

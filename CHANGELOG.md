@@ -5,10 +5,19 @@ All notable changes to `agience-origin` are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.2.19] - 2026-11-11
+
+### Fixed
+- A step-up's sign-in asks only for the password or passkey (BUG-055): it names the person as OIDC `login_hint`, and Origin's sign-in page fills in the account and puts the cursor in the password. The hint fills in the account and proves nothing; whoever signs in is still checked against the step-up's person.
+- A job's key release covers an artifact held in one its grant lists (John, 2026-11-11, BUG-052): `bind_to_job_reach` walks the read chain, as Mantle does, and still opens only the key that artifact is keyed under.
+- A refused job grant shows why and offers only Close (BUG-060): Approve stayed on the page, so each click took another sign-in and met the same refusal.
+
 ## [0.2.18] - 2026-11-10
 
 ### Changed
 - Approving a timer or a run, or stopping its grant, asks once (John, 2026-11-10, BUG-055: "Don't duplicate or re-ask"). Origin's job-grant page is the confirmation: its Approve goes straight into the step-up (the passkey prompt with no second confirm, or the sign-in with no start page asking again), and the approval finishes and the window closes on return, with no "Approve again". A stop starts its step-up as the page opens, the app having asked for exactly that. A change to how one signs in keeps its start page.
+
+### Fixed
 
 ## [0.2.17] - 2026-11-10
 

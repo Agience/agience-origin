@@ -350,3 +350,24 @@ def test_a_job_grant_s_step_up_goes_straight_to_sign_in(custody_client):
                          "body_sha256": hashlib.sha256(b"").hexdigest()},
                    headers={"Authorization": f"Bearer {alice_token}"})
     assert other.status_code == 200 and "/auth/reauth/start?" in other.json()["url"]
+
+
+def test_a_step_up_s_sign_in_asks_only_for_the_password(custody_client):
+    """BUG-055 follow-up (2026-11-10): the step-up's sign-in asked for the email again. It names
+    the person (OIDC `login_hint`), and Origin's page fills it in and asks for the password."""
+    from urllib.parse import parse_qs, urlsplit
+    c = custody_client
+    alice, alice_token = af.person("Alice")
+    oc.origin_page_session(c, alice)
+    body = json.dumps({"job": "lumen.timer.t-1", "expires_at": "2099-01-01T00:00:00Z", "reach": ["t-1"]}).encode()
+    r = c.post("/auth/me/step-up-options",
+               json={"method": "POST", "path": "/auth/me/job-grants", "body": body.decode(),
+                     "body_sha256": hashlib.sha256(body).hexdigest()},
+               headers={"Authorization": f"Bearer {alice_token}"})
+    url = r.json()["url"]
+    q = parse_qs(urlsplit(url).query)
+    email = q.get("login_hint", [""])[0]
+    assert email and "@" in email, url
+    page = c.get(urlsplit(url).path + "?" + urlsplit(url).query)
+    assert page.status_code == 200 and 'id="identifier"' in page.text, page.status_code
+    assert f'value="{email}"' in page.text and "autofocus" in page.text, page.text[:400]

@@ -324,6 +324,15 @@ def start_location(db: Session, ticket: str) -> str:
          "code_challenge": _s256(row.verifier), "code_challenge_method": "S256",
          # A sign-in, never a session read: the provider is asked for a fresh one.
          "prompt": "login", "max_age": "0"}
+    # Who is signing in is known: the page fills it in, so the person is asked only for the
+    # password. A person who can't be looked up gets no hint; the sign-in still works.
+    from origin.services import person_service
+    try:
+        person = person_service.get_user_by_id(db, row.person_id)
+    except (ValueError, LookupError):
+        person = None
+    if person is not None and getattr(person, "email", None):
+        q["login_hint"] = str(person.email)
     return f"{_base()}/auth/authorize?{urlencode(q)}"
 
 
