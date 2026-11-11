@@ -329,3 +329,24 @@ def test_a_new_identity_does_not_join_an_account_by_email(custody_client):
                 name="A", email_verified=True)
         db.rollback()
     assert _resolves_to("google", "someone", "alice@team.test") is None
+
+
+def test_a_job_grant_s_step_up_goes_straight_to_sign_in(custody_client):
+    """BUG-055 (John, 2026-11-10: one ask per decision). A job grant is approved on Origin's own
+    page, which names it; its re-authentication goes straight to the sign-in, already confirmed, and
+    no start page asks again. A change to how one signs in still shows its start page."""
+    c = custody_client
+    alice, alice_token = af.person("Alice")
+    oc.origin_page_session(c, alice)
+    body = json.dumps({"job": "lumen.timer.t-1", "expires_at": "2099-01-01T00:00:00Z", "reach": ["t-1"]}).encode()
+    r = c.post("/auth/me/step-up-options",
+               json={"method": "POST", "path": "/auth/me/job-grants", "body": body.decode(),
+                     "body_sha256": hashlib.sha256(body).hexdigest()},
+               headers={"Authorization": f"Bearer {alice_token}"})
+    assert r.status_code == 200 and r.json()["kind"] == "reauth", r.text
+    assert "/auth/authorize?" in r.json()["url"] and "reauth/start" not in r.json()["url"]
+    other = c.post("/auth/me/step-up-options",
+                   json={"method": "DELETE", "path": f"{LINK}/google", "body": "",
+                         "body_sha256": hashlib.sha256(b"").hexdigest()},
+                   headers={"Authorization": f"Bearer {alice_token}"})
+    assert other.status_code == 200 and "/auth/reauth/start?" in other.json()["url"]

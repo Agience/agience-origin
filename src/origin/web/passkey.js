@@ -72,7 +72,7 @@ async function passkeySignIn(email) {
 
 /* A fresh step-up for exactly this request: a passkey assertion, or, with no passkey, a
  * re-authentication at Origin's own sign-in (a ticket, proven there, then sent back). */
-async function stepUp(method, path, bodyText) {
+async function stepUp(method, path, bodyText, asked) {
   const o = await authed("POST", "/auth/me/step-up-options", JSON.stringify(
     { method: method, path: path, body_sha256: await sha256Hex(bodyText) }));
   if (!o.ok) throw new Error(o.detail || "step-up refused");
@@ -83,8 +83,10 @@ async function stepUp(method, path, bodyText) {
     location.href = o.data.url;               // Origin's own sign-in; comes back proven
     return null;
   }
-  if (!window.confirm("Origin is asking for your passkey to: " + (o.data.action || path) +
-                      ". Continue?")) return null;
+  /* `asked`: the page already asked for exactly this (its own Approve), so the passkey prompt is
+   * the only one (John, 2026-11-10, BUG-055: one ask per decision). */
+  if (!asked && !window.confirm("Origin is asking for your passkey to: " + (o.data.action || path) +
+                                ". Continue?")) return null;
   const cred = await navigator.credentials.get(requestOptions(o.data.options));
   return strToB64u(JSON.stringify({ challenge: o.data.options.challenge,
                                     credential: assertionJSON(cred) }));
@@ -167,7 +169,7 @@ async function linkFinish(code, state) {
   return authed("POST", path, body, { "X-Step-Up": step });
 }
 /* As stepUp, with the body shown to Origin so its page can name exactly what is being linked. */
-async function stepUpWithBody(method, path, bodyText) {
+async function stepUpWithBody(method, path, bodyText, asked) {
   const o = await authed("POST", "/auth/me/step-up-options", JSON.stringify(
     { method: method, path: path, body_sha256: await sha256Hex(bodyText), body: bodyText }));
   if (!o.ok) throw new Error(o.detail || "step-up refused");
@@ -179,8 +181,8 @@ async function stepUpWithBody(method, path, bodyText) {
     location.href = o.data.url;
     return null;
   }
-  if (!window.confirm("Origin is asking for your passkey to: " + (o.data.action || path) +
-                      ". Continue?")) return null;
+  if (!asked && !window.confirm("Origin is asking for your passkey to: " + (o.data.action || path) +
+                                ". Continue?")) return null;
   const cred = await navigator.credentials.get(requestOptions(o.data.options));
   return strToB64u(JSON.stringify({ challenge: o.data.options.challenge,
                                     credential: assertionJSON(cred) }));
@@ -190,9 +192,9 @@ async function stepUpWithBody(method, path, bodyText) {
 async function jobGrants() { return authed("GET", "/auth/me/job-grants"); }
 /* Revoking a grant needs a fresh step-up too (review 11, M7): a click stolen in a framed page
  * proves nothing, and Origin's pages are never framed anyway. */
-async function revokeJobGrant(id) {
+async function revokeJobGrant(id, asked) {
   const path = "/auth/me/job-grants/" + encodeURIComponent(id) + "/revoke";
-  const step = provenTicket("POST", path) || await stepUp("POST", path, "");
+  const step = provenTicket("POST", path) || await stepUp("POST", path, "", asked);
   if (step === null) return null;
   return authed("POST", path, undefined, { "X-Step-Up": step });
 }

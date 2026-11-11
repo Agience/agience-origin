@@ -251,6 +251,14 @@ def options(db: Session, person_id: str, method: str, path: str, body_sha256: st
                         verifier=secrets.token_urlsafe(48), csrf=secrets.token_urlsafe(24),
                         describe=_describe(method, path, body, str(person_id)), session_sha256=session_sha256))
     db.commit()
+    if path.startswith("/auth/me/job-grants"):
+        # Asked on Origin's own job-grant page, in this Origin session, which names the grant: that
+        # page's Approve is the confirmation, so the sign-in follows it at once (John, 2026-11-10,
+        # BUG-055: one ask per decision; the start page asked a second time).
+        row = _live(db, ticket)
+        row.confirmed_time = _now()
+        db.commit()
+        return {"kind": "reauth", "ticket": ticket, "url": start_location(db, ticket)}
     return {"kind": "reauth", "ticket": ticket,
             "url": f"{_base()}/auth/reauth/start?{urlencode({'ticket': ticket})}"}
 

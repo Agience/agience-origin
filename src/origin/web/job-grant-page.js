@@ -79,14 +79,14 @@
 
   async function approve() {
     if (revoke) {
-      const out = await revokeJobGrant(revoke);
+      const out = await revokeJobGrant(revoke, true);
       if (!out) return;
       if (out.ok) { show("Stopped.", "ok"); done({ type: "agience.job-grant-revoked", grant_id: revoke }); }
       else show(out.detail || "Refused.", "err");
       return;
     }
     const body = bodyFor();
-    const step = provenTicket("POST", PATH) || await stepUpWithBody("POST", PATH, body);
+    const step = provenTicket("POST", PATH) || await stepUpWithBody("POST", PATH, body, true);
     if (step === null) return;
     const out = await authed("POST", PATH, body, { "X-Step-Up": step });
     if (!out.ok) { show(out.detail || "Refused.", "err"); return; }
@@ -103,7 +103,20 @@
     $("#signin").classList.remove("hidden");
   } else {
     render();
-    if (sessionStorage.getItem("pending_step_up")) show("Confirmed. Approve again to finish it.");
+    /* Back from the sign-in that proved this approval: it finishes on its own (John, 2026-11-10,
+     * BUG-055: the person approved once; asking "Approve again" was a second ask). */
+    try {
+      const p = JSON.parse(sessionStorage.getItem("pending_step_up") || "null");
+      const forPath = revoke ? "/auth/me/job-grants/" + encodeURIComponent(revoke) + "/revoke" : PATH;
+      if (p && p.method === "POST" && p.path === forPath) {
+        show("Signed in. Finishing…");
+        approve().catch(function (e) { show("Cancelled: " + e.message, "err"); });
+      } else if (revoke) {
+        /* Stopping a grant only takes authority away, and the app already asked for exactly this
+         * ("Stop it at Origin"): the step-up starts at once, the one ask left (BUG-055). */
+        approve().catch(function (e) { show("Cancelled: " + e.message, "err"); });
+      }
+    } catch (e) { /* nothing pending */ }
   }
   /* A passkey sign-in that stays on this page (`passkeySignIn` goes on to the account page). */
   $("#signinBtn").addEventListener("click", async function () {

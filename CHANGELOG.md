@@ -5,6 +5,11 @@ All notable changes to `agience-origin` are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.2.18] - 2026-11-10
+
+### Changed
+- Approving a timer or a run, or stopping its grant, asks once (John, 2026-11-10, BUG-055: "Don't duplicate or re-ask"). Origin's job-grant page is the confirmation: its Approve goes straight into the step-up (the passkey prompt with no second confirm, or the sign-in with no start page asking again), and the approval finishes and the window closes on return, with no "Approve again". A stop starts its step-up as the page opens, the app having asked for exactly that. A change to how one signs in keeps its start page.
+
 ## [0.2.17] - 2026-11-10
 
 ### Added
