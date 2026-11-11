@@ -301,7 +301,8 @@ for (const rd of ["https://mantle.agience.ai/", "https://user-content.agience.ai
     const ctx = handoff(at(rd));
     await run(ctx, 'finishLogin("FULL")');
     assert.ok(!ctx.navigations.some(([, u]) => u.includes("access_token=")), JSON.stringify(ctx.navigations));
-    assert.deepEqual(ctx.navigations, [["href", "/account"]]);
+    // The account page names the app it was not sent back to (2026-11-11).
+    assert.deepEqual(ctx.navigations, [["href", "/account?unlisted=" + encodeURIComponent(new URL(rd).origin)]]);
   });
 }
 
@@ -320,4 +321,25 @@ test("another listed SP Origin issues no delegation for is handed nothing", asyn
     { status: 400, body: { detail: "audience is not a narrow audience" } } });
   await run(ctx, 'finishLogin("FULL")');
   assert.deepEqual(ctx.navigations, [["href", "/account"]]);
+});
+
+// ── an app this sign-in service doesn't list is named on the account page ─────────────────────
+// 2026-11-11, the home test node: a sign-in for an app Origin didn't list ended on /account with no
+// reason given, and the app's sign-in loop started again.
+test("a sign-in for an unlisted app lands on the account page naming that app", async () => {
+  const ctx = page("https://origin.agience.ai/login?redirect_uri=" + encodeURIComponent("https://workspace.home.agience.ai/") + "&state=s",
+                   { routes: { "/auth/providers": { status: 200, body: { sso_return_uris: [], app_uri: "" } } } });
+  await run(ctx, 'finishLogin("ACCESS")');
+  assert.deepEqual(ctx.navigations.slice(-1)[0],
+                   ["href", "/account?unlisted=" + encodeURIComponent("https://workspace.home.agience.ai")]);
+});
+
+test("a sign-in for a listed app is still handed back, and nothing is said on the account page", async () => {
+  const ctx = page("https://origin.agience.ai/login?redirect_uri=" + encodeURIComponent("https://my.agience.ai/"),
+                   { routes: { "/auth/providers": { status: 200, body: { sso_return_uris: ["https://my.agience.ai/"],
+                                                                        app_uri: "https://my.agience.ai" } } } });
+  await run(ctx, 'finishLogin("ACCESS")');
+  const last = ctx.navigations.slice(-1)[0];
+  assert.equal(last[0], "replace");
+  assert.ok(last[1].startsWith("https://my.agience.ai/#access_token="), last[1]);
 });

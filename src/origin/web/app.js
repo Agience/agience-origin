@@ -108,6 +108,15 @@ async function finishLogin(token) {
       location.replace(rd + sep + "access_token=" + encodeURIComponent(handed) + (st ? "&state=" + encodeURIComponent(st) : ""));
       return;
     }
+    // An app this sign-in service doesn't list: say so on the account page, naming its origin,
+    // rather than leaving the person there with no reason (2026-11-11, the home test node).
+    // A listed app that is simply handed nothing (no delegation issued) is not called unregistered.
+    let origin = "";
+    try { origin = new URL(rd).origin; } catch (e) { origin = ""; }
+    if (origin && !isListedReturn(rd, listed)) {
+      location.href = "/account?unlisted=" + encodeURIComponent(origin);
+      return;
+    }
   }
   location.href = "/account";
 }

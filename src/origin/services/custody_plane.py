@@ -3,7 +3,9 @@
 Threshold custody is a claim that no single process on the box can open a person's key alone.
 The claim holds only where the services are hard-isolated from each other (each its own user,
 hardened units, its own 0700 keys folder). The home and development planes run every service as
-one user with one keys folder, so the claim would be false there, and custody is refused.
+one user with one keys folder, so the claim would be false there, and custody is refused. The
+home node, while it is the test gate, holds test custody instead (`home_test_refusal`): its own
+keys, an issuer production never trusts, and none once it peers.
 
 The signal is two things, both needed, because either alone can be wrong:
 
@@ -66,6 +68,40 @@ def evidence() -> dict:
     return out
 
 
+#: The home node's own domain. Test custody is held only by a node whose issuer is under it, so
+#: nothing it signs or keys can be taken for production's.
+HOME_DOMAIN = "home.agience.ai"
+
+
+def home_test_refusal() -> Optional[str]:
+    """Why the home node may not hold test custody, or None when it may (John, 2026-11-11).
+
+    While the home node is the test gate, it holds test custody over its own keys, so a run, a
+    timer and their approvals can be accepted there before promote. Test custody claims no
+    separation: one user runs every service there. What keeps it apart from production is that its
+    issuer is a `*.home.agience.ai` host, which production never trusts, and that it has no peers.
+    It is given up when peering starts (`EMBER_PEERS`). Mantle decides by the same rule."""
+    from urllib.parse import urlsplit
+
+    from origin import config
+
+    # Every source of the issuer must name a home host, the one Origin signs with above all
+    # (`config.AUTHORITY_ISSUER`, settled at startup from `ORIGIN_URI` or the stored facet URI):
+    # a node that passed on `AUTHORITY_ISSUER` alone could still sign as production (review,
+    # 2026-11-11).
+    sources = [os.getenv("AUTHORITY_ISSUER"), os.getenv("ORIGIN_URI"),
+               getattr(config, "AUTHORITY_ISSUER", None)]
+    hosts = [(urlsplit(s.strip()).hostname or "").lower() for s in sources if s and s.strip()]
+    if not hosts or not all(h == HOME_DOMAIN or h.endswith("." + HOME_DOMAIN) for h in hosts):
+        return (f"test custody is held only by a home node, whose every issuer is under "
+                f"{HOME_DOMAIN}; this one's are {sorted(set(hosts)) or 'unset'}")
+    if (os.getenv("EMBER_PEERS") or "").strip():
+        return "test custody is given up once the home node peers (EMBER_PEERS is set)"
+    if not (os.getenv("KEYS_DIR") or "").strip():
+        return "test custody needs this node's own keys folder (KEYS_DIR)"
+    return None
+
+
 def custody_refusal(evidence: Optional[dict] = None) -> Optional[str]:
     """Why this node may not hold custody, or None when it may."""
     if TEST_OVERRIDE is True:
@@ -73,6 +109,8 @@ def custody_refusal(evidence: Optional[dict] = None) -> Optional[str]:
     if TEST_OVERRIDE is False:
         return "custody is refused here (test override)"
     plane = (os.getenv("AGIENCE_PLANE") or "").strip().lower()
+    if plane == "home":
+        return home_test_refusal()
     if plane != "production":
         return (f"custody is held only on isolated production; AGIENCE_PLANE is "
                 f"{plane or 'unset'!r}")

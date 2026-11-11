@@ -5,6 +5,14 @@ All notable changes to `agience-origin` are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.2.20] - 2026-11-11
+
+### Fixed
+- A sign-in for an app this sign-in service doesn't list says so: the account page names the app it wasn't sent back to, instead of showing the account with no reason. A listed app that is handed nothing still lands on the account page as before. The sign-up form's password field is labelled "New password", so it is no longer a second "Password" beside the sign-in one.
+
+### Changed
+- The home node holds test custody while it is the test gate (John, 2026-11-11): with `AGIENCE_PLANE=home`, an issuer under `home.agience.ai`, no peers (`EMBER_PEERS`) and its own keys folder (`custody_plane.home_test_refusal`), so runs, timers and their approvals can be accepted there before promote. Production never trusts the home issuer. Every other plane but production is still refused, and production's own rule is unchanged.
+
 ## [0.2.19] - 2026-11-11
 
 ### Fixed

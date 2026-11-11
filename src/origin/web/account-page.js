@@ -2,6 +2,14 @@ if (!isAuthed()) location.replace("/");
 const $=(s)=>document.querySelector(s), msg=$("#msg");
 function show(t,cls){ msg.className="msg "+(cls||"muted"); msg.textContent=t||""; }
 
+// Sent here from a sign-in whose app this service doesn't list (`finishLogin`): name the app.
+// Text only, so the origin can never be markup.
+(function(){
+  const unlisted = new URLSearchParams(location.search).get("unlisted");
+  if (unlisted) show("You're signed in, but " + unlisted + " isn't registered with this sign-in " +
+                     "service, so you weren't sent back to it.", "err");
+})();
+
 const claims = decodeJwt(getToken()) || {};
 const rows = [
   ["Name", claims.name || "—"],
