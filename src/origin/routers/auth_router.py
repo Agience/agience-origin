@@ -4194,7 +4194,7 @@ async def make_my_job_grant(request: Request, body: dict = Body(...),
     from origin.services import authority_ledger as _ledger, person_step_up
 
     who = _interactive(auth)
-    await person_step_up.require(request, db, who)
+    await person_step_up.require_for_job_grant(request, db, who)
     job, until = body.get("job"), body.get("expires_at")
     cols = body.get("collections") or []
     reach = body.get("reach") or []
@@ -4223,7 +4223,7 @@ async def revoke_my_job_grant(grant_id: str, request: Request,
     from origin.services import authority_ledger as _ledger, person_step_up
 
     who = _interactive(auth)
-    await person_step_up.require(request, db, who)
+    await person_step_up.require_for_job_grant(request, db, who)
     try:
         out = _ledger.page_revoke_job_grant(db, who, grant_id)
     except _ledger.EntryRefused as exc:

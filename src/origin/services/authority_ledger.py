@@ -1081,7 +1081,7 @@ def _decide_job_grant(rc: Reach, ctx: Context, b: dict) -> Optional[str]:
                            "person's Origin session (POST /auth/me/job-grants), never on a token "
                            "Mantle holds")
     if ctx.kind == ORIGIN_SESSION and b["kind"] == "job_grant":
-        raise EntryRefused("a job grant is made with a step-up at POST /auth/me/job-grants")
+        raise EntryRefused("a job grant is made on Origin's own page at POST /auth/me/job-grants")
     if ctx.bootstrap or ctx.kind not in (ORIGIN_PAGE,):
         raise EntryRefused("a job grant is made on a person's own credential")
     prior = getattr(rc.r, "job_grant", lambda _g: None)(b["grant_id"])
@@ -1089,7 +1089,7 @@ def _decide_job_grant(rc: Reach, ctx: Context, b: dict) -> Optional[str]:
         # Mantle holds every person's access token, and a delegation is Mantle's too: neither
         # alone may hand a background job weeks of the person's key.
         raise EntryRefused("a job grant is made at Origin's own page, in the person's Origin "
-                           "session with a fresh step-up (POST /auth/me/job-grants)")
+                           "session (POST /auth/me/job-grants)")
     if prior is not None:
         same = {k: prior[k] for k in ("job", "principal", "collections", "expires_at")}
         if (same != {k: b[k] for k in same}
@@ -1482,7 +1482,7 @@ def session_entry(db: Session, person_id: str, entry: dict,
     carries an invite claim's token (`{"invite_id", "token"}`)."""
     b = normalise(entry)
     if b["kind"] == "job_grant":
-        raise EntryRefused("a job grant is made with a step-up at POST /auth/me/job-grants")
+        raise EntryRefused("a job grant is made on Origin's own page at POST /auth/me/job-grants")
     if b["kind"] not in ("grant", "edge.add", "edge.remove"):
         raise EntryRefused("the session makes grants, invites, denies and edge changes", 400)
     return append(db, b, actor=Actor(person_id, ORIGIN_SESSION, f"session:{person_id}"),

@@ -66,7 +66,10 @@ def test_a_held_access_token_alone_makes_no_job_grant(custody_client):
     assert _mint(c, alice[0], "platform.reindex").status_code == 403
 
 
-def test_the_page_route_needs_the_session_and_a_step_up(custody_client):
+def test_the_page_route_needs_the_session_and_one_click_does_it(custody_client, monkeypatch):
+    # John, 2026-11-12: "if you're logged in, don't ask to log in again". The session approves; a
+    # Mantle-held token alone never does; a local policy may still ask for a step-up.
+    from origin.services import person_step_up
     c = custody_client
     alice = af.person("alice", email="alice@team.test")
     _root(c, alice, alice[0])
@@ -74,8 +77,12 @@ def test_the_page_route_needs_the_session_and_a_step_up(custody_client):
     bare = c.post(PATH, json=body, headers={"Authorization": f"Bearer {alice[1]}"})
     assert bare.status_code == 403                                  # no session
     oc.origin_page_session(c, alice[0])
-    no_step = c.post(PATH, json=body, headers={"Authorization": f"Bearer {alice[1]}"})
-    assert no_step.status_code == 403                               # no step-up
+    monkeypatch.setattr(person_step_up, "job_grant_needs_step_up", lambda db, pid: True)
+    tight = c.post(PATH, json=body, headers={"Authorization": f"Bearer {alice[1]}"})
+    assert tight.status_code == 403                                 # policy asks for one
+    monkeypatch.setattr(person_step_up, "job_grant_needs_step_up", lambda db, pid: False)
+    one_click = c.post(PATH, json=body, headers={"Authorization": f"Bearer {alice[1]}"})
+    assert one_click.status_code == 200, one_click.text
 
 
 def test_a_job_grant_made_at_origin_s_page_works_and_alerts(custody_client):

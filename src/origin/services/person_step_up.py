@@ -428,3 +428,26 @@ async def require(request: Request, db: Session, person_id: str) -> None:
     db.commit()
     if who is None or str(who) != str(person_id):
         raise HTTPException(status_code=403, detail="the step-up failed")
+
+
+def job_grant_needs_step_up(db: Session, person_id: str) -> bool:
+    """Whether approving or stopping a job grant needs a step-up beyond the person's Origin session.
+    The one place a local policy tightens it. John, 2026-11-12: a valid signed-in session is
+    enough ("if you're logged in, don't ask to log in again"); a passkey is optional and, when the
+    person uses one, adds strength."""
+    return False
+
+
+async def require_for_job_grant(request: Request, db: Session, person_id: str) -> None:
+    """A job grant is made or revoked in `person_id`'s own Origin session (first-party cookie,
+    SameSite=Strict, on Origin's own page, which refuses framing). A step-up the request carries
+    is verified and spent as for any other change; without one, the session suffices unless
+    `job_grant_needs_step_up` says otherwise."""
+    from origin.services import origin_session
+    origin_session.require(request, db, person_id)
+    if request.headers.get(HEADER, "").strip():
+        await require(request, db, person_id)
+        return
+    if job_grant_needs_step_up(db, person_id):
+        raise HTTPException(status_code=403, detail=f"a fresh step-up is required ({HEADER}): "
+                            "ask POST /auth/me/step-up-options")

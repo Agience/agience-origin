@@ -194,7 +194,6 @@ async function jobGrants() { return authed("GET", "/auth/me/job-grants"); }
  * proves nothing, and Origin's pages are never framed anyway. */
 async function revokeJobGrant(id, asked) {
   const path = "/auth/me/job-grants/" + encodeURIComponent(id) + "/revoke";
-  const step = provenTicket("POST", path) || await stepUp("POST", path, "", asked);
-  if (step === null) return null;
-  return authed("POST", path, undefined, { "X-Step-Up": step });
+  // Stopping takes access away: the session and the person's confirm are enough.
+  return authed("POST", path, undefined, {});
 }

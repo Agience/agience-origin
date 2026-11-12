@@ -94,9 +94,8 @@
       return;
     }
     const body = bodyFor();
-    const step = provenTicket("POST", PATH) || await stepUpWithBody("POST", PATH, body, true);
-    if (step === null) return;
-    const out = await authed("POST", PATH, body, { "X-Step-Up": step });
+    // One click in a signed-in Origin session (John, 2026-11-12): no re-sign-in.
+    const out = await authed("POST", PATH, body, {});
     if (!out.ok) { refused(out.detail); return; }
     sessionStorage.removeItem(KEY);
     show("Approved.", "ok");
