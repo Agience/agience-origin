@@ -410,3 +410,18 @@ test("the waiting tab flips only for its own address, and hands nothing off", as
   assert.equal(p.navigations.length, 0);
   assert.equal(local.getItem("access_token"), null);
 });
+
+// One button per accessible name on the sign-in page (2026-11-11, staging acceptance of
+// 2026.11.25): the one-time-code form and the sign-up form each had a second and third "Sign in",
+// and a second "Password", hidden or not, so a script or a screen reader asking for "Sign in" got
+// three answers.
+test("the sign-in page names each button and field once", () => {
+  const html = fs.readFileSync(path.join(__dirname, "..", "..", "web", "index.html"), "utf8");
+  const buttons = [...html.matchAll(/<button[^>]*>([^<]+)<\/button>/g)].map((m) => m[1].trim());
+  const labels = [...html.matchAll(/<label[^>]*>([^<]+)<\/label>/g)].map((m) => m[1].trim());
+  for (const names of [buttons, labels]) {
+    const dupes = names.filter((n, i) => names.indexOf(n) !== i);
+    assert.deepEqual(dupes, [], "named twice: " + dupes.join(", "));
+  }
+  assert.ok(buttons.includes("Sign in"), "the sign-in button keeps its name");
+});

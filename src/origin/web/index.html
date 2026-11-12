@@ -60,7 +60,7 @@
     <h1>Sign in with a code</h1>
     <div id="otpStep1">
       <form id="otpSendForm">
-        <label for="otpEmail">Email</label>
+        <label for="otpEmail">Email to send the code to</label>
         <input id="otpEmail" type="email" autocomplete="email" required placeholder="you@example.com">
         <button class="primary" type="submit" id="otpSend">Send code</button>
       </form>
@@ -69,7 +69,7 @@
       <form id="otpCodeForm">
         <label for="otpCode">Code</label>
         <input id="otpCode" inputmode="numeric" autocomplete="one-time-code" required placeholder="6 digits">
-        <button class="primary" type="submit" id="otpVerify">Sign in</button>
+        <button class="primary" type="submit" id="otpVerify">Sign in with this code</button>
       </form>
     </div>
     <div class="row"><button class="link" type="button" id="otpBack">Use a password instead</button></div>
@@ -87,7 +87,7 @@
       <div class="hint" id="pwHint"></div>
       <button class="primary" type="submit" id="registerBtn">Create account</button>
     </form>
-    <div class="row"><button class="link" id="toLogin">Already have an account? Sign in</button></div>
+    <div class="row"><button class="link" type="button" id="toLogin">Already have an account? Go to sign-in</button></div>
   </div>
 
   <div class="msg" id="msg"></div>
