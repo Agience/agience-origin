@@ -240,20 +240,23 @@ def test_no_origin_page_carries_inline_script_or_handlers():
     assert bad == []
 
 
-def test_revoking_a_job_grant_needs_a_step_up(custody_client):
+def test_stopping_a_job_grant_is_one_click_in_a_signed_in_session(custody_client):
+    """John, 2026-11-12: stop is one click with a valid session, no step-up (origin `4f2c2cd`). It
+    stays the person's own: no session, or another person's grant, is refused."""
     from origin.tests.test_background_work_runs_on_a_job_grant import _root
     from origin.tests.test_the_ninth_review_s_job_grant_cases import PATH, _days, _page_grant
 
     c = custody_client
     alice = af.person("alice", email="alice@team.test")
+    bob = af.person("bob", email="bob@team.test")
     _root(c, alice, alice[0])
     gid = _page_grant(c, alice, {"job": "platform.reindex", "expires_at": _days(7)}).json()[
         "grant_id"]
-    bare = c.post(f"{PATH}/{gid}/revoke", headers={"Authorization": f"Bearer {alice[1]}"})
-    assert bare.status_code == 403, bare.text
-    step = oc.person_reauth(c, alice[1], alice[0], "POST", f"{PATH}/{gid}/revoke", b"")
-    ok = c.post(f"{PATH}/{gid}/revoke", headers={"Authorization": f"Bearer {alice[1]}",
-                                                 "X-Step-Up": step})
+    nobody = c.post(f"{PATH}/{gid}/revoke")
+    assert nobody.status_code in (401, 403), nobody.text
+    other = c.post(f"{PATH}/{gid}/revoke", headers={"Authorization": f"Bearer {bob[1]}"})
+    assert other.status_code in (403, 404), other.text
+    ok = c.post(f"{PATH}/{gid}/revoke", headers={"Authorization": f"Bearer {alice[1]}"})
     assert ok.status_code == 200, ok.text
 
 
