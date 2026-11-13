@@ -5,6 +5,17 @@ All notable changes to `agience-origin` are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.2.22] - 2026-11-13
+
+### Added
+- `GET /auth/me/authority/invites/incoming` lists the live invites that name the signed-in person, by account id or verified email address. Each entry gives the sender, the resource, the actions and the expiry. A sender with no display name is shown by their verified address.
+- `POST /auth/me/authority/invites/{invite_id}/accept` lets the person an invite names accept it in the app, with no mailed token. It creates the same grant as the mailed claim link, limited to the actions and expiry the invite carries.
+- `POST /auth/me/authority/invites/{invite_id}/decline` lets the person an invite names retire it. The sender's sharing dialog shows it as retired.
+
+### Changed
+- The ledger's invite-claim rule in `authority_ledger` accepts a second proof, `{"invite_id", "session": "targeted"}`, in place of the claim token. It is accepted only in the person's own Origin session and only for invites to an account id or an exact email address. Domain invites still require the mailed token, and an unverified address cannot claim an email invite.
+- The ledger lets the person an invite names retire it from their own Origin session. Other invite closures still need share or admin on the resource.
+
 ## [0.2.21] - 2026-11-12
 
 ### Fixed
