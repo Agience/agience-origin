@@ -9,6 +9,7 @@ All notable changes to `agience-origin` are recorded here. The format follows
 
 ### Fixed
 - The sign-in page names each button and field once (BUG-064). The one-time-code form's button reads "Sign in with this code" and its field "Email to send the code to", and the sign-up form's link reads "Already have an account? Go to sign-in". Before this, a screen reader or a script asking for "Sign in" got three buttons.
+- Origin's tests hold stopping a job grant to one click in a signed-in session, as approving one already is (no step-up); no session, or another person's grant, is still refused. Tests only; nothing Origin runs changed.
 
 ## [0.2.20] - 2026-11-11
 
