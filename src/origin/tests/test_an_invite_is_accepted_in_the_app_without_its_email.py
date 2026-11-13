@@ -188,3 +188,22 @@ def test_the_tokenless_claim_takes_no_more_than_the_invite(custody_client):
     r = af.session_submit(c, bob, wider, {"invite_id": "inv-r", "session": "targeted"})
     assert r.status_code == 403 and "no more than" in r.json()["detail"]
     assert not _reaches(bob)
+
+
+def test_an_inviter_with_no_display_name_is_named_by_their_verified_address(custody_client, mailed):
+    """2026-11-13, the Tester: the Accept toast and "… invited you" were blank for an inviter with
+    no display name. The invite names them as its mail does, by their verified address."""
+    c = custody_client
+    pid, tok = af.person("", email="noname@team.test", verified=True)
+    from origin.db.session import SessionLocal
+    from origin.models.person import Person
+    import uuid as _uuid
+    with SessionLocal() as db:
+        db.get(Person, _uuid.UUID(pid)).name = ""
+        db.commit()
+    af.ok(af.submit(c, tok, af.root("W"), batch="own", via_session=False))
+    af.ok(af.submit(c, tok, af.grant("g-W-own", pid, "W", ALL), batch="own", via_session=False))
+    bob, _ = af.person("Bob", email="bob@team.test", verified=True)
+    _invite(c, pid)
+    (row,) = _incoming(c, bob)
+    assert row["from"] == "noname@team.test"

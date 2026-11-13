@@ -525,6 +525,17 @@ def _live_invite(db: Session, invite_id: str):
     return inv
 
 
+def _inviter(db: Session, person_id: str) -> str:
+    """Who sent an invite, for its recipient: their display name, else their verified address, as
+    the invite mail names them (an invite is sent only from a verified address); "" if neither."""
+    from origin.services import authority_ledger
+    name = _display_name(db, person_id)
+    if name:
+        return name
+    email, verified = authority_ledger.reach(db).r.identity(str(person_id)) or ("", False)
+    return email if verified and "@" in email else ""
+
+
 @authority_session_router.get("/invites/incoming")
 def incoming_invites(request: Request, db: Session = Depends(get_db)):
     """The live invites that name the signed-in person (their id, or their verified address), so
@@ -554,7 +565,7 @@ def incoming_invites(request: Request, db: Session = Depends(get_db)):
             v = _grant_view(inv)
             out.append({"invite_id": inv.grant_id, "resource_id": inv.resource_id,
                         "actions": v["actions"], "expires_at": v["expires_at"],
-                        "from": _display_name(db, inv.created_by)})
+                        "from": _inviter(db, inv.created_by)})
     return {"invites": out}
 
 
