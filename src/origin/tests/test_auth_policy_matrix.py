@@ -80,6 +80,13 @@ PUBLIC = {
                                             "owner's Origin session; the token is in the mail alone",
     ("POST", "/auth/me/authority/invite-context"): "what an invite is, shown in the opener's Origin "
                                                    "session; carries nothing that claims it",
+    # FR-004: invites that name the person arrive in the app; the same Origin session as above.
+    ("GET", "/auth/me/authority/invites/incoming"): "the live invites naming the person (their id or verified "
+                                                    "address), listed in their Origin session",
+    ("POST", "/auth/me/authority/invites/{invite_id}/accept"): "the invite's target claims it in their Origin "
+                                                               "session, by the ledger's claim rule",
+    ("POST", "/auth/me/authority/invites/{invite_id}/decline"): "the invite's target retires it in their "
+                                                                "Origin session",
     ("GET", "/auth/not-before"): "the signed not-before list peers enforce: person ids and times only, "
                                  "public like the JWKS (review 11, M2)",
     ("GET", "/"): _SHELL,

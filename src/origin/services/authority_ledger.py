@@ -578,31 +578,60 @@ def _reached_actions(rc: Reach, actor: str, node: str) -> frozenset:
     return frozenset(a for a in ACTIONS if rc.reaches(actor, node, a))
 
 
+#: The proof an invite's target gives in their own Origin session when they accept it in the app
+#: (FR-004): `{"invite_id": <id>, "session": SESSION_TARGETED}`, with no claim token.
+SESSION_TARGETED = "targeted"
+
+
+def is_invite_target(rc: Reach, actor: str, inv: Grant) -> bool:
+    """Does the invite name `actor`: their id, or their verified address (or its domain)?
+    Raises when an email or domain invite meets an unverified address."""
+    if inv.target_kind == "user_id":
+        return target_digest("user_id", actor) == inv.target_digest
+    email, verified = rc.r.identity(actor) or ("", False)
+    if not verified or "@" not in email:
+        raise EntryRefused("an email or domain invite needs the claimant's verified address")
+    value = email if inv.target_kind == "email" else email.split("@", 1)[1]
+    return target_digest(inv.target_kind, value) == inv.target_digest
+
+
+def _target_or_none(rc: Reach, actor: str, inv: Grant) -> bool:
+    """`is_invite_target`, False where an unverified address cannot be matched."""
+    try:
+        return is_invite_target(rc, actor, inv)
+    except EntryRefused:
+        return False
+
+
 def _claim(rc: Reach, ctx: Context, new: Grant) -> Optional[str]:
-    """The invite-claim rule, or None when this is not a claim it accepts."""
+    """The invite-claim rule, or None when this is not a claim it accepts.
+
+    Two proofs are taken. The mailed claim token (`{"invite_id", "token"}`) proves the mailbox.
+    In the app (FR-004), the invite's target accepts it in their own Origin session
+    (`{"invite_id", "session": "targeted"}`): their id, or their verified address, already proves
+    what the token would, so no token is needed. That proof takes an invite to an id or an exact
+    address only. A domain invite names everyone at the domain, so it still needs its mailed
+    token: without it, anyone at the domain could claim an invite that was never sent to them."""
     proof = ctx.proof or {}
     invite_id, token = proof.get("invite_id"), proof.get("token")
-    if not isinstance(invite_id, str) or not isinstance(token, str) or not token:
+    in_session = proof.get("session") == SESSION_TARGETED
+    if not isinstance(invite_id, str) or not (in_session or (isinstance(token, str) and token)):
         return None
     inv = rc.r.grant(invite_id)
     if (inv is None or inv.grantee_type != "invite" or inv.resource_id != new.resource_id
             or inv.state != _ACTIVE or inv.effect != "allow" or not unexpired(inv.expires_at)):
         raise EntryRefused("the invite is not a live invite on this resource")
-    if hashlib.sha256(token.encode()).hexdigest() != inv.grantee_id:
+    if in_session:
+        if ctx.kind != ORIGIN_SESSION:
+            raise EntryRefused("an invite is accepted without its token only in the person's "
+                               "own Origin session")
+        if inv.target_kind not in ("user_id", "email"):
+            raise EntryRefused("an invite to a domain, or to no one, is claimed with its "
+                               "mailed token")
+    elif hashlib.sha256(token.encode()).hexdigest() != inv.grantee_id:
         raise EntryRefused("the claim token does not match the invite")
-    if inv.target_kind:
-        ident = rc.r.identity(ctx.actor)
-        if inv.target_kind == "user_id":
-            ok = target_digest("user_id", ctx.actor) == inv.target_digest
-        else:
-            email, verified = ident or ("", False)
-            if not verified or "@" not in email:
-                raise EntryRefused("an email or domain invite needs the claimant's verified "
-                                   "address")
-            value = email if inv.target_kind == "email" else email.split("@", 1)[1]
-            ok = target_digest(inv.target_kind, value) == inv.target_digest
-        if not ok:
-            raise EntryRefused("the claimant is not the invite's target")
+    if inv.target_kind and not is_invite_target(rc, ctx.actor, inv):
+        raise EntryRefused("the claimant is not the invite's target")
     if inv.max_claims is not None and rc.r.claims_of(inv.id) >= inv.max_claims:
         raise EntryRefused("the invite has reached its claim limit")
     if not new.actions <= inv.actions or new.expires_at != inv.expires_at:
@@ -764,6 +793,10 @@ def _decide_grant(rc: Reach, ctx: Context, b: dict) -> Optional[str]:
                     return "share or admin on the resource closes an invite"
                 if prior.max_claims is not None and rc.r.claims_of(prior.id) >= prior.max_claims:
                     return "records that the invite is spent, as Origin counted"
+                # FR-004: the person an invite names declines it, in their own Origin session.
+                if (ctx.kind == ORIGIN_SESSION and prior.target_kind in ("user_id", "email")
+                        and new.state == "retired" and _target_or_none(rc, actor, prior)):
+                    return "the invite's target declines it"
                 raise EntryRefused("an invite is closed by share or admin on the resource")
     created = _creation_grant(rc, ctx, new)
     if created:

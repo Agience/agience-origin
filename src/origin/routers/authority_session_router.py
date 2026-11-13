@@ -510,6 +510,88 @@ def _verified(db: Session, person: str) -> bool:
     return bool(ident and ident[1])
 
 
+def _for_me(db: Session, person: str, inv) -> bool:
+    """Can the person accept this invite in the app (FR-004)? It names their id or their verified
+    address exactly. A domain invite still needs its mailed token."""
+    return inv.target_kind in ("user_id", "email") and _for(db, person, inv)
+
+
+def _live_invite(db: Session, invite_id: str):
+    from origin.services.authority_ledger import unexpired
+    inv = _held(db, invite_id)
+    if (inv.grantee_type != "invite" or inv.state != "active" or inv.effect != "allow"
+            or not unexpired(inv.expires_at)):
+        raise HTTPException(status_code=404, detail="no live invite with this id")
+    return inv
+
+
+@authority_session_router.get("/invites/incoming")
+def incoming_invites(request: Request, db: Session = Depends(get_db)):
+    """The live invites that name the signed-in person (their id, or their verified address), so
+    the app shows them in their Inbox with Accept and Decline, and no email is needed (FR-004).
+    Each says who sent it and with which actions. Origin keeps no name for what is shared (the
+    name is only in the mail), so none is given here."""
+    from origin.models.authority_ledger import AuthorityGrant
+    from origin.services import authority_ledger
+    from origin.services.authority_ledger import target_digest, unexpired
+    person = _person(request, db)
+    targets = [("user_id", target_digest("user_id", person))]
+    email, verified = authority_ledger.reach(db).r.identity(person) or ("", False)
+    if verified and "@" in email:
+        targets.append(("email", target_digest("email", email)))
+    out = []
+    for kind, digest in targets:
+        rows = (db.query(AuthorityGrant)
+                .filter(AuthorityGrant.grantee_type == "invite", AuthorityGrant.state == "active",
+                        AuthorityGrant.effect == "allow", AuthorityGrant.target_kind == kind,
+                        AuthorityGrant.target_digest == digest).all())
+        for inv in rows:
+            if not unexpired(inv.expires_at):
+                continue
+            if inv.max_claims is not None and (db.query(AuthorityGrant).filter(
+                    AuthorityGrant.claimed_from == inv.grant_id).count() >= inv.max_claims):
+                continue
+            v = _grant_view(inv)
+            out.append({"invite_id": inv.grant_id, "resource_id": inv.resource_id,
+                        "actions": v["actions"], "expires_at": v["expires_at"],
+                        "from": _display_name(db, inv.created_by)})
+    return {"invites": out}
+
+
+@authority_session_router.post("/invites/{invite_id}/accept")
+def accept_invite(invite_id: str, request: Request, db: Session = Depends(get_db)):
+    """The invite's target accepts it in the app (FR-004). It is the same claim as `/claim` (their
+    own grant, no more than the invite carries, keeping its expiry), proven by their Origin
+    session and the invite naming them rather than by the mailed token. It takes the same ledger
+    path, so Mantle's feed applies it like any claim."""
+    import uuid as _uuid
+
+    from origin.services import authority_ledger
+    person = _person(request, db)
+    inv = _live_invite(db, invite_id)
+    if not _for_me(db, person, inv):
+        raise HTTPException(status_code=403, detail="this invite does not name you; an invite to "
+                            "a domain is accepted from the link in its email")
+    entry = {"kind": "grant", "grant_id": f"claim-{_uuid.uuid4()}", "grantee_id": str(person),
+             "grantee_type": "user", "resource_id": inv.resource_id,
+             "actions": [a for a in (inv.actions or "").split(",") if a], "effect": "allow",
+             "state": "active", "expires_at": inv.expires_at, "target": None, "max_claims": None}
+    receipt = _append(db, str(person), entry,
+                      {"invite_id": inv.grant_id, "session": authority_ledger.SESSION_TARGETED})
+    return {**receipt, "resource_id": inv.resource_id, "grant_id": entry["grant_id"]}
+
+
+@authority_session_router.post("/invites/{invite_id}/decline")
+def decline_invite(invite_id: str, request: Request, db: Session = Depends(get_db)):
+    """The invite's target declines it (FR-004). The invite is retired, so no one can claim it, and
+    its sender's sharing dialog shows it as declined."""
+    person = _person(request, db)
+    inv = _live_invite(db, invite_id)
+    if not _for_me(db, person, inv):
+        raise HTTPException(status_code=403, detail="this invite does not name you")
+    return _append(db, str(person), _entry_from(inv, state="retired"))
+
+
 @authority_session_router.post("/claim")
 def session_claim(request: Request, body: dict = Body(...), db: Session = Depends(get_db)):
     """An invite claimed in the claimant's own Origin session from its token alone, as the web
