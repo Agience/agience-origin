@@ -1445,6 +1445,41 @@ def entries_by_credential(db: Session, credential_ref: Optional[str], since, unt
     return [_entry_view(r) for r in q.order_by(AuthorityEntry.seq)]
 
 
+def _last_creation_parent(db: Session, node: str) -> Optional[str]:
+    """The `src` of the last creation edge (`edge.add`, origin) the ledger added into `node`."""
+    for row in (db.query(AuthorityEntry).filter(AuthorityEntry.kind == "edge.add")
+                .order_by(AuthorityEntry.seq.desc())):
+        b = json.loads(row.body)
+        if b.get("dst") == node and b.get("origin"):
+            return b.get("src")
+    return None
+
+
+def restore_creation_edge(db: Session, seq: int, operator_id: str, ref: str) -> dict:
+    """The operator undoes entry `seq`, an `edge.remove` that took a member's creation edge while
+    another container still held it (2026-11-14: a drag-move did, and Origin read the member as
+    deleted). The creation edge comes back as it was, mask included; nothing else changes.
+    Refused unless the member is still held elsewhere and has no creation edge now."""
+    row = db.get(AuthorityEntry, int(seq))
+    if row is None or row.kind != "edge.remove":
+        raise EntryRefused(f"entry {seq} is not an edge removal", 400)
+    b = json.loads(row.body)
+    prior = None
+    for prev in (db.query(AuthorityEntry).filter(AuthorityEntry.seq < row.seq,
+                                                 AuthorityEntry.kind == "edge.add")
+                 .order_by(AuthorityEntry.seq.desc())):
+        pb = json.loads(prev.body)
+        if pb.get("src") == b["src"] and pb.get("dst") == b["dst"]:
+            prior = pb
+            break
+    if prior is None or not prior.get("origin"):
+        raise EntryRefused(f"entry {seq} did not remove a creation edge", 400)
+    body = {"kind": "edge.add", "src": b["src"], "dst": b["dst"], "origin": True,
+            "propagate": prior.get("propagate")}
+    return append(db, body, actor=Actor(operator_id, "operator", ref),
+                  submitted_jti=f"console:{ref}")
+
+
 def revoke_entry(db: Session, seq: int, operator_id: str, ref: str) -> Optional[dict]:
     """The operator's narrowing undoing entry `seq`: a grant it made is revoked, an edge it
     added is removed. Appended to the ledger as the operator's entry. None if nothing is left
@@ -2322,6 +2357,15 @@ def _decide_operator(rc: Reach, ctx: "Context", b: dict) -> Optional[str]:
         # One minted before the ledger is unknown here and is revoked by id alone: a revocation
         # only narrows, and Mantle applies it to the key it holds under that id.
         return "the operator revokes a key"
+    if b["kind"] == "edge.add":
+        # The one widening the operator makes (John to approve, 2026-11-14): restoring the creation
+        # edge a removal took from a member still held elsewhere, which Origin read as deleting it.
+        src, dst = b["src"], b["dst"]
+        if (b["origin"] and rc.origin_parent(dst) is None and rc.r.has_edges(dst)
+                and ctx.db is not None and _last_creation_parent(ctx.db, dst) == src):
+            return "the operator restores a creation edge a removal took from a held member"
+        raise EntryRefused("the operator adds an edge only to restore the creation edge a removal "
+                           "took from a member still held elsewhere", 403)
     if b["kind"] == "edge.remove":
         return None if rc.r.edge(b["src"], b["dst"]) is None else "the operator removes an edge"
     if b["kind"] == "grant":

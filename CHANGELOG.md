@@ -5,6 +5,23 @@ All notable changes to `agience-origin` are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.2.24] - 2026-11-14
+
+### Security
+- Sign-up mails only for a form a person filled in (FR-027). `POST /auth/password/register` and `POST /auth/authorize/register` create an account and mail it only when the request carries a `form_token` from `GET /auth/signup-form` that is at least 3 seconds and at most 2 hours old, and the hidden `website` field is empty. Any other request gets the same `verification_required` answer, and nothing is created or mailed.
+- An address SMTP cannot carry (RFC 5321: a leading, trailing or doubled dot, a label over 63 octets, and so on) is refused on both registration endpoints and is never mailed by any unauthenticated path.
+- A node with `AGIENCE_PLANE=home` mails only its outbox, whatever `email.provider` or `EMAIL_PROVIDER` names.
+
+### Added
+- `GET /auth/signup-form`: a signed, timestamped `form_token` (`Cache-Control: no-store`). It is public and grants nothing.
+- A hidden `website` field on the sign-up forms of the sign-in page and the authorize page, which fetch the form token when they open and send it with the form.
+- The `auth.signup.mails_per_hour` setting (default 60): a ceiling on confirmation mails for new accounts across all addresses and clients. Past it, the account is created without a mail, and a later resend reaches it.
+
+## [0.2.23] - 2026-11-14
+
+### Added
+- `authority_ledger.restore_creation_edge`: the operator undoes an `edge.remove` that took a member's creation edge while another container still held it. The edge returns as it was, mask included, and nothing else changes. It is refused unless that entry removed a creation edge, the member has none now, and another container holds it. Any other operator `edge.add` is refused (403).
+
 ## [0.2.22] - 2026-11-13
 
 ### Added

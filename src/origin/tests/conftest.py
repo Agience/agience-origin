@@ -209,3 +209,19 @@ def origin_app(monkeypatch, jwt_keypair):
 def client(origin_app):
     with TestClient(origin_app) as c:
         yield c
+
+
+def pytest_configure(config):
+    config.addinivalue_line("markers", "real_signup_form: run the FR-027 sign-up form check as "
+                                       "production does, instead of the suite's stand-in")
+
+
+@pytest.fixture(autouse=True)
+def _signup_form_stand_in(request, monkeypatch):
+    """FR-027: a sign-up is mailed only for a form a person filled in. Tests that register are not
+    about that check, so here a form passes when its hidden field is empty; the check's own tests
+    (`real_signup_form`) run it as production does. The hourly ceiling starts fresh in every test."""
+    from origin.services import signup_guard
+    signup_guard._reset_for_tests()
+    if request.node.get_closest_marker("real_signup_form") is None:
+        monkeypatch.setattr(signup_guard, "form_is_real", lambda token, honeypot, now=None: not honeypot)

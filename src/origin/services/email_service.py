@@ -35,7 +35,13 @@ _GMAIL_SEND_URL = "https://gmail.googleapis.com/gmail/v1/users/me/messages/send"
 
 def _provider() -> str:
     """Active email provider. DB-backed setting wins; ``EMAIL_PROVIDER`` env is
-    the first-boot fallback (same precedence the rest of the platform uses)."""
+    the first-boot fallback (same precedence the rest of the platform uses).
+
+    A test node (``AGIENCE_PLANE=home``) mails only its outbox, whatever a setting or the
+    environment it inherited names (2026-11-14: 71/test inherited the user environment's Gmail
+    sender and could have mailed real addresses). It never reaches a real provider."""
+    if (os.getenv("AGIENCE_PLANE") or "").strip().lower() == "home":
+        return "outbox"
     return (settings.get("email.provider") or os.getenv("EMAIL_PROVIDER", "") or "").strip().lower()
 
 

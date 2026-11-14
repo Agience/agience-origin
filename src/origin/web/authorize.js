@@ -63,13 +63,19 @@ if (regBack) regBack.onclick = () => {
   $("#reg").classList.add("hidden");
   $("#local").classList.remove("hidden"); say("");
 };
+// FR-027: the sign-up form's token, fetched when the page opens; the server mails only a form a
+// person filled in (this token, a few seconds old, and the hidden field left empty).
+let FORM_TOKEN = "";
+fetch("/auth/signup-form", {cache: "no-store"}).then((r) => r.json())
+  .then((d) => { FORM_TOKEN = (d && d.form_token) || ""; }).catch(() => {});
 const regForm = $("#regForm");
 if (regForm) regForm.onsubmit = async (e) => {
   e.preventDefault();
   const btn = $("#regBtn"); btn.disabled = true; say("Creating your account…");
   try {
     const d = await post("/auth/authorize/register", {oauth_state: S,
-      email: $("#remail").value.trim(), password: $("#rpassword").value});
+      email: $("#remail").value.trim(), password: $("#rpassword").value,
+      form_token: FORM_TOKEN, website: ($("#rwebsite") || {}).value || ""});
     if (d.verification_required) {
       $("#reg").classList.add("hidden");
       say("Account created. Check " + d.email + " for a link to confirm it, then sign in.", "ok");
