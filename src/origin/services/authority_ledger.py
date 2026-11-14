@@ -1650,6 +1650,15 @@ def page_mint_key(db: Session, person_id: str, *, name: str, expires_at: str, me
     for m in members:
         if not isinstance(m, dict) or set(m) - {"resource_id", "actions"}:
             raise EntryRefused("a member is {resource_id, actions}", 400)
+    # What would refuse a member for what it names is refused before the key is written, so a
+    # refused mint leaves nothing behind (2026-11-14, 71/test: one left a live key with no member).
+    rc = reach(db)
+    for m in members:
+        res = m.get("resource_id")
+        if not isinstance(res, str) or not res or not _seen(rc, res):
+            raise EntryRefused(f"{res!r} is unknown to Origin; a key carries only what exists", 400)
+        if rc.gone(res):
+            raise EntryRefused(f"{res} was deleted at Origin; nothing is granted on it", 409)
     token = f"{KEY_PREFIX}{secrets.token_urlsafe(32)}"
     key_id = str(uuid.uuid4())
     actor = Actor(person_id, ORIGIN_PAGE, f"page:{person_id}")
@@ -1667,8 +1676,11 @@ def page_mint_key(db: Session, person_id: str, *, name: str, expires_at: str, me
                             "expires_at": normalise(body)["expires_at"], "target": None,
                             "max_claims": None}, actor=actor, batch=batch)
             batch = r.get("batch", batch)
-    except EntryRefused:
-        append(db, _key_body(key_view(_key_row(db, key_id)), "revoked"), actor=actor)
+    except Exception:
+        # Any member refused, for any reason: the key goes with it, so none is left live.
+        row = _key_row(db, key_id)
+        if row is not None and row.state == _ACTIVE:
+            append(db, _key_body(key_view(row), "revoked"), actor=actor)
         raise
     return {"grant_id": key_id, "token": token, "receipt": receipt}
 

@@ -138,3 +138,27 @@ def test_the_key_page_answers_only_the_app_that_opened_it(custody_client, monkey
     assert r.status_code == 200 and "key-page.js" in r.text
     assert r.headers["cache-control"] == "no-store"
     assert "frame-ancestors 'none'" in r.headers["content-security-policy"]
+
+
+def test_a_refused_mint_leaves_no_live_key_for_any_refusal(custody_client):
+    """2026-11-14, 71/test: a mint refused on a member deleted at Origin left an active key with
+    no members. Whatever refuses a member, no key is left live."""
+    c = custody_client
+    alice, _ = _people(c)
+    for bad in ("never-seen-node", ""):
+        r = _mint(c, alice, members=[{"resource_id": bad, "actions": ["read"]}])
+        assert r.status_code >= 400, r.text
+    assert all(k["state"] == "revoked" for k in _keys(c, alice)), _keys(c, alice)
+
+
+def test_a_mint_on_a_member_deleted_at_origin_leaves_no_live_key(custody_client):
+    c = custody_client
+    alice, _ = _people(c)
+    child = "child-of-" + alice[0][:8]
+    af.ok(af.submit(c, alice[1], af.edge(alice[0], child), batch="mk"))
+    af.ok(af.submit(c, alice[1], af.grant("g-" + child, alice[0], child, ("read", "admin")),
+                    batch="mk"))
+    af.ok(af.submit(c, alice[1], af.unedge(alice[0], child), batch=None))   # deleted at Origin
+    r = _mint(c, alice, members=[{"resource_id": child, "actions": ["read"]}])
+    assert r.status_code >= 400 and "deleted" in r.text, r.text
+    assert all(k["state"] == "revoked" for k in _keys(c, alice)), _keys(c, alice)
