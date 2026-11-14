@@ -99,6 +99,8 @@ PUBLIC = {
     ("GET", "/passkey"): _SHELL,
     ("GET", "/job-grant"): _SHELL,
     ("GET", "/key"): _SHELL,
+    ("GET", "/auth/signup-form"): "the sign-up form's time-stamped token (FR-027); it grants nothing "
+                                  "and only lets a later sign-up show the form was really filled in",
 
     ("GET", "/.well-known/agience"): _DISCOVERY,
     ("GET", "/.well-known/jwks.json"): _DISCOVERY + " — public keys, published on purpose",
