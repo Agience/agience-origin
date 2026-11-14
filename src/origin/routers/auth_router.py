@@ -43,6 +43,7 @@ from origin.models.password_reset import PasswordReset
 from origin.models.person import Person as PersonModel
 from origin.services import email_service
 from origin.services import guess_budget
+from origin.services import signup_guard
 from origin.services import otp_service
 from origin.services import person_service
 from origin.services.email_address import require_canonical_email
@@ -962,6 +963,9 @@ class PasswordRegisterRequest(BaseModel):
     name: str = ""
     email: _Identifier = ""
     verify_nonce: _VerifyNonce = ""
+    #: FR-027: the token the form fetched when it opened, and the field a person never sees.
+    form_token: str = ""
+    website: str = ""
 
 
 class PasswordResetRequestBody(BaseModel):
@@ -1204,6 +1208,7 @@ _REGISTER_TOGGLE = """    <div class="row"><button class="link" type="button" id
 #: and returns them to the flow they started.
 _REGISTER_BLOCK = """  <div id="reg" class="hidden">
     <form id="regForm">
+      <div aria-hidden="true" style="position:absolute;left:-10000px;top:auto;width:1px;height:1px;overflow:hidden"><label for="rwebsite">Website</label><input id="rwebsite" name="website" type="text" tabindex="-1" autocomplete="off"></div>
       <label for="remail">Email</label>
       <input id="remail" type="email" autocomplete="email" required placeholder="you@example.com">
       <label for="rpassword">Password</label>
@@ -1703,6 +1708,9 @@ class _LocalRegister(BaseModel):
     oauth_state: str
     email: _Identifier
     password: str
+    #: FR-027: the token the form fetched when it opened, and the field a person never sees.
+    form_token: str = ""
+    website: str = ""
 
 
 #: What both registration endpoints answer when account creation is refused.
@@ -1750,8 +1758,12 @@ async def authorize_local_register(
 
     email = (body.email or "").strip().lower()
     password = body.password or ""
-    if not email or "@" not in email:
+    if not email or not signup_guard.mailable_address(email):
         raise HTTPException(status_code=400, detail="Enter a valid email address")
+    if not signup_guard.form_is_real(body.form_token, body.website):
+        # FR-027: answered as a real sign-up is, and nothing is created or mailed.
+        logger.warning("sign-up form failed the bot check (authorize); nothing created or mailed")
+        return {"verification_required": True, "email": email}
     min_len = platform_settings.get_int("auth.password.min_length", 12)
     if len(password) < min_len:
         raise HTTPException(
@@ -1786,6 +1798,11 @@ async def authorize_local_register(
     # here rather than minting a code. `_pop_local_auth_request` reads without popping, so the
     # pending request survives and the person can sign in on this same page after confirming.
     if verify_required:
+        if not signup_guard.signup_mail_admitted():
+            # FR-027: past the hourly ceiling the account waits; a resend later reaches it.
+            logger.warning("sign-up mail ceiling reached; confirmation for a new account held")
+            _release_db(db)
+            return {"verification_required": True, "email": person.email}
         queued = _queue_verification_email(background_tasks, person, db=db, request=request)
         return {"verification_required": True, "email": queued}
 
@@ -3261,6 +3278,14 @@ async def password_login(
     })
 
 
+@auth_router.get("/signup-form", dependencies=None)
+async def signup_form():
+    """The token a sign-up form fetches when it opens (FR-027): sent back with the form, it shows
+    the form was filled in by someone who opened it a few seconds before. It grants nothing."""
+    return JSONResponse({"form_token": signup_guard.form_token()},
+                        headers={"Cache-Control": "no-store"})
+
+
 @auth_router.post("/password/register", dependencies=_KDF_ADMISSION)
 async def password_register(
     request: Request,
@@ -3283,11 +3308,15 @@ async def password_register(
     # account with no address has nothing to confirm, so it would be live the moment it exists.
     if not email:
         raise HTTPException(status_code=400, detail="An email address is required")
-    if "@" not in email:
+    if not signup_guard.mailable_address(email):
         raise HTTPException(status_code=400, detail="Invalid email address")
     min_len = platform_settings.get_int("auth.password.min_length", 12)
     if len(password) < min_len:
         raise HTTPException(status_code=400, detail=f"Password must be at least {min_len} characters")
+    if not signup_guard.form_is_real(payload.form_token, payload.website):
+        # FR-027: answered as a real sign-up is, and nothing is created or mailed.
+        logger.warning("sign-up form failed the bot check (password); nothing created or mailed")
+        return {"verification_required": True, "email": email}
 
     verify_required = email_verification_required(email)
     password_hash = await run_kdf(hash_password, password)
@@ -3315,6 +3344,11 @@ async def password_register(
     # Verification required: don't auto-login — send the link and tell the client
     # to prompt for confirmation. The user signs in after verifying.
     if verify_required:
+        if not signup_guard.signup_mail_admitted():
+            # FR-027: past the hourly ceiling the account waits; a resend later reaches it.
+            logger.warning("sign-up mail ceiling reached; confirmation for a new account held")
+            _release_db(db)
+            return {"verification_required": True, "email": user.email}
         queued = _queue_verification_email(
             background_tasks, user, payload.verify_nonce, db=db, request=request
         )
@@ -3404,6 +3438,10 @@ def _mail_send_admitted(request: Request, email: str, what: str) -> Optional[str
     """
     local, _, domain = email.partition("@")
     if not local or not domain or "@" in domain:
+        return None
+    if not signup_guard.mailable_address(email):
+        # FR-027: an address SMTP cannot carry is never mailed (it bounces back to us).
+        logger.warning("%s dropped: %s is not a mailable address", what, _log_tag(email))
         return None
     client = (request.client.host if request.client else "") or "unknown"
     tag = _log_tag(email)

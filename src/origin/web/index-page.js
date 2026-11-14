@@ -239,6 +239,12 @@ $("#loginForm").addEventListener("submit", async (e) => {
   b.disabled=false;
 });
 
+// FR-027: the sign-up form's token, fetched when the page opens; the server mails only a form a
+// person filled in (this token, a few seconds old, and the hidden field left empty).
+let FORM_TOKEN = "";
+fetch("/auth/signup-form", {cache: "no-store"}).then((r) => r.json())
+  .then((d) => { FORM_TOKEN = (d && d.form_token) || ""; }).catch(() => {});
+
 // REGISTER submit — email IS the username (single field, required)
 $("#registerForm").addEventListener("submit", async (e) => {
   e.preventDefault(); beginSignIn();
@@ -250,6 +256,7 @@ $("#registerForm").addEventListener("submit", async (e) => {
   const r = await post("/auth/password/register", {
     username: email, name: "",
     password: $("#rpassword").value, email: email, verify_nonce: nonce,
+    form_token: FORM_TOKEN, website: ($("#rwebsite") || {}).value || "",
   });
   if (r.ok && r.data.verification_required) { stashVerification(nonce, email); location.href="/verify-email?sent=1"; return; }
   if (r.ok && r.data.access_token) { show("Account created ✓","ok"); finishLogin(r.data.access_token); return; }
