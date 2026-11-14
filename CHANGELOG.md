@@ -5,6 +5,11 @@ All notable changes to `agience-origin` are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.2.23] - 2026-11-14
+
+### Added
+- `authority_ledger.restore_creation_edge`: the operator undoes an `edge.remove` that took a member's creation edge while another container still held it. The edge returns as it was, mask included, and nothing else changes. It is refused unless that entry removed a creation edge, the member has none now, and another container holds it. Any other operator `edge.add` is refused (403).
+
 ## [0.2.22] - 2026-11-13
 
 ### Added
