@@ -5,6 +5,20 @@ All notable changes to `agience-origin` are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.2.25] - 2026-11-14
+
+### Added
+- Grant keys are minted and revoked on Origin's own page, `GET /key`. It opens only for a known app origin passed as `back`; the minted token is shown once on that page and posted nowhere, and only the key's id goes back to the app.
+- `GET /auth/me/keys` lists the keys a person minted, with each key's name, agent, expiry, state, the token's last four characters and its member grants. The token itself is never returned again.
+- `POST /auth/me/keys` mints a grant key (`name`, `expires_at`, `members`, optional `agent`) and returns the `agk_` token once (`201`, `Cache-Control: no-store`). It takes the person's Origin session and a step-up; each member needs Admin on its resource, and a key ends within 90 days.
+- `POST /auth/me/keys/{key_id}/revoke` revokes a key its minter owns, in their Origin session with a step-up. The operator can revoke any key.
+- The authority ledger's `key` entry kind holds the token's sha256 and last four characters, never the token. Keys are kept in the `authority_keys` table (migration `0032_authority_keys`); a key's members are `grant` entries whose grantee type is `grant`.
+- A mint that any member refuses, including a resource unknown to Origin or deleted there, leaves no live key behind.
+- The step-up page names the key being minted or revoked.
+
+### Fixed
+- BUG-072: confirming a new account's address on Origin's own page, in the browser that signed up, starts the Origin session as a sign-in there does, so the web app opens signed in. A confirmation from any other page, or without that browser's verification nonce, starts no session.
+
 ## [0.2.24] - 2026-11-14
 
 ### Security
