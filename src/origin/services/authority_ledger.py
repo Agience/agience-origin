@@ -382,6 +382,12 @@ class SqlReplica:
                 .order_by(AuthorityEdge.src).all())
         return [(r.src, _prop_load(r.propagate)) for r in rows]
 
+    def parents(self, node_id):
+        """Every edge into `node_id`, the creation edge or any other: `(src, propagate)`."""
+        rows = (self.db.query(AuthorityEdge).filter(AuthorityEdge.dst == node_id)
+                .order_by(AuthorityEdge.src).all())
+        return [(r.src, _prop_load(r.propagate)) for r in rows]
+
     def origin_children(self, node_id):
         rows = (self.db.query(AuthorityEdge.dst)
                 .filter(AuthorityEdge.src == node_id, AuthorityEdge.origin.is_(True))
