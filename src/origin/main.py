@@ -816,6 +816,21 @@ def job_grant_page(back: str = "") -> Response:
     return out
 
 
+@app.get("/key", include_in_schema=False)
+def key_page(back: str = "") -> Response:
+    """Where a person mints, or revokes, a grant key (John, 2026-11-14): the app opens it with the
+    key to make (`name`, `members`, `days`, `agent`) or the one to revoke (`revoke`), and `back`,
+    the app's origin. The key is minted here, in the person's Origin session; its token is shown on
+    this page once and goes nowhere else, and only its id is posted back to `back`."""
+    if back.rstrip("/").lower() not in _app_origins():
+        return Response(status_code=400, content="unknown app origin", media_type="text/plain")
+    out = _page("key.html")
+    out.headers["Content-Security-Policy"] = PASSKEY_PAGE_CSP
+    out.headers["Cache-Control"] = "no-store"
+    out.headers["Referrer-Policy"] = "no-referrer"
+    return out
+
+
 # The assets those pages reference, mounted under a prefix rather than at `/` — so a future
 # route can never be shadowed by a filename, and nothing outside `web/` is reachable. Every HTML
 # file under `web/` references its assets at this `/web/...` prefix accordingly.

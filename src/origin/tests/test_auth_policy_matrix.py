@@ -98,6 +98,7 @@ PUBLIC = {
     ("GET", "/verify-email"): _SHELL,
     ("GET", "/passkey"): _SHELL,
     ("GET", "/job-grant"): _SHELL,
+    ("GET", "/key"): _SHELL,
 
     ("GET", "/.well-known/agience"): _DISCOVERY,
     ("GET", "/.well-known/jwks.json"): _DISCOVERY + " — public keys, published on purpose",

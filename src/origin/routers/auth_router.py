@@ -4233,6 +4233,62 @@ async def revoke_my_job_grant(grant_id: str, request: Request,
     return {"grant_id": grant_id, "revoked": True}
 
 
+# -- the person's own grant keys, at Origin's own page (John, 2026-11-14) -------------------------
+
+@auth_router.get("/me/keys")
+async def my_keys(request: Request, auth: AuthContext = Depends(get_auth),
+                  db: Session = Depends(get_db)):
+    """The grant keys the person minted, with what each carries: in their Origin session. No
+    token is ever shown again; only its last four characters."""
+    from origin.services import authority_ledger as _ledger, origin_session
+
+    who = _interactive(auth)
+    origin_session.require(request, db, who)
+    return {"keys": _ledger.person_keys(db, who)}
+
+
+@auth_router.post("/me/keys")
+async def mint_my_key(request: Request, body: dict = Body(...),
+                      auth: AuthContext = Depends(get_auth), db: Session = Depends(get_db)):
+    """Mint a grant key (`{name, expires_at, members: [{resource_id, actions}], agent?}`): only in
+    the person's Origin session, as for a job grant. Each member needs Admin on its resource and
+    carries nothing the person does not hold; the key ends within 90 days. The token is returned
+    here once, and is stored nowhere."""
+    from origin.services import authority_ledger as _ledger, person_step_up
+
+    who = _interactive(auth)
+    await person_step_up.require_for_job_grant(request, db, who)
+    name, until, members = body.get("name"), body.get("expires_at"), body.get("members")
+    agent = body.get("agent")
+    if (not isinstance(name, str) or not isinstance(until, str) or not isinstance(members, list)
+            or (agent is not None and not isinstance(agent, str))):
+        raise HTTPException(status_code=400, detail="name, expires_at and members are required; "
+                            "agent, when given, is a string")
+    try:
+        out = _ledger.page_mint_key(db, who, name=name, expires_at=until, members=members,
+                                    agent=agent or None)
+    except _ledger.EntryRefused as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc))
+    return JSONResponse(out, status_code=201, headers={"Cache-Control": "no-store"})
+
+
+@auth_router.post("/me/keys/{key_id}/revoke")
+async def revoke_my_key(key_id: str, request: Request, auth: AuthContext = Depends(get_auth),
+                        db: Session = Depends(get_db)):
+    """Revoke one of the person's own keys, in their Origin session as for a job grant."""
+    from origin.services import authority_ledger as _ledger, person_step_up
+
+    who = _interactive(auth)
+    await person_step_up.require_for_job_grant(request, db, who)
+    try:
+        out = _ledger.page_revoke_key(db, who, key_id)
+    except _ledger.EntryRefused as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc))
+    if out is None:
+        raise HTTPException(status_code=404, detail="no such key of yours")
+    return {"grant_id": key_id, "revoked": True}
+
+
 @auth_router.get("/reauth/start", dependencies=None)
 async def person_reauth_start(ticket: str, db: Session = Depends(get_db)):
     """Origin's own page for a re-authentication: the exact action, and a confirm. Nothing goes

@@ -61,7 +61,7 @@ _CHALLENGE_TTL_SECONDS = 120
 TICKET_MINUTES = 10
 PROVEN_MINUTES = 5
 #: The requests a person's step-up is asked for.
-PATHS = ("/auth/me/link-provider", "/auth/passkey/", "/auth/me/job-grants")
+PATHS = ("/auth/me/link-provider", "/auth/passkey/", "/auth/me/job-grants", "/auth/me/keys")
 
 
 def _b64(data: bytes) -> str:
@@ -117,6 +117,21 @@ def _describe(method: str, path: str, body: Optional[str] = None,
                 f"account")[:250]
     if path.startswith("/auth/passkey/credentials"):
         return "remove a passkey"
+    if path.startswith("/auth/me/keys/"):
+        return "revoke a key"
+    if path.startswith("/auth/me/keys"):
+        try:
+            want = json.loads(body or "")
+        except (ValueError, TypeError):
+            want = None
+        if (not isinstance(want, dict) or not isinstance(want.get("name"), str)
+                or not isinstance(want.get("expires_at"), str)
+                or not isinstance(want.get("members"), list)):
+            raise HTTPException(status_code=400, detail="a key's step-up carries the key's body "
+                                "(name, expires_at, members), so Origin's page can show it")
+        n = len(want["members"])
+        return (f"mint the key {want['name']!r} until {want['expires_at']}, carrying {n} "
+                f"item{'s' if n != 1 else ''}")[:DESCRIBE_MAX]
     if path.startswith("/auth/me/job-grants/"):
         return _describe_job_grant_revoke(path, person_id)
     if path.startswith("/auth/me/job-grants"):
@@ -238,8 +253,8 @@ def options(db: Session, person_id: str, method: str, path: str, body_sha256: st
         try:
             action = _describe(method.upper(), path, body, str(person_id))
         except HTTPException:
-            # A job grant is always named (its body, or the person's own grant it stops).
-            if path.startswith("/auth/me/job-grants"):
+            # A job grant or a key is always named (its body, or the person's own it stops).
+            if path.startswith(("/auth/me/job-grants", "/auth/me/keys")):
                 raise
             action = "change how you sign in"
         return {"kind": "passkey", "options": encoded, "action": action}
@@ -251,8 +266,8 @@ def options(db: Session, person_id: str, method: str, path: str, body_sha256: st
                         verifier=secrets.token_urlsafe(48), csrf=secrets.token_urlsafe(24),
                         describe=_describe(method, path, body, str(person_id)), session_sha256=session_sha256))
     db.commit()
-    if path.startswith("/auth/me/job-grants"):
-        # Asked on Origin's own job-grant page, in this Origin session, which names the grant: that
+    if path.startswith(("/auth/me/job-grants", "/auth/me/keys")):
+        # Asked on Origin's own job-grant (or key) page, in this Origin session, which names the grant: that
         # page's Approve is the confirmation, so the sign-in follows it at once (John, 2026-11-10,
         # BUG-055: one ask per decision; the start page asked a second time).
         row = _live(db, ticket)

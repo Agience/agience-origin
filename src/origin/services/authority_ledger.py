@@ -133,6 +133,11 @@ _FIELDS = {
     "root.retire": {"principal_id"},
     # A named background job's own narrow authority (John, 2026-11-02): see `_decide_job_grant`.
     "job_grant": {"grant_id", "job", "principal", "collections", "expires_at", "state"},
+    # A grant key (John, 2026-11-14): a bearer credential the person mints at Origin's own page.
+    # `token_hash` is sha256 of the `agk_` token, shown once and stored nowhere; `hint` its
+    # non-secret tail. What it reaches is its members: `grant` entries whose grantee (type
+    # `grant`) is this key's `grant_id`. `agent` names the agent it is for (FR-028).
+    "key": {"grant_id", "token_hash", "hint", "name", "expires_at", "state"},
     # Retired (John, 2026-11-08: rotate a charged root's key, do not confirm it): no new one is
     # taken; one already in the chain still verifies and replays, and opens nothing.
     "root.confirm_empty": {"principal_id"},
@@ -141,7 +146,7 @@ KINDS = frozenset(_FIELDS)
 #: Fields an entry may carry beyond `_FIELDS`, kept in its body only when given, so an entry made
 #: before the field existed hashes as it did. A job grant's `reach` (John, 2026-11-10): the ids a
 #: timer's delegation may touch, and nothing outside them.
-_OPTIONAL: Dict[str, frozenset] = {"job_grant": frozenset({"reach"})}
+_OPTIONAL: Dict[str, frozenset] = {"job_grant": frozenset({"reach"}), "key": frozenset({"agent"})}
 TARGET_KINDS = frozenset({"user_id", "email", "domain"})
 
 
@@ -245,6 +250,31 @@ def normalise(body: Any, *, canonical_times: bool = True) -> dict:
         out["public"] = base64.b64encode(raw).decode("ascii")
     elif kind in ("root.retire", "root.confirm_empty"):
         out["principal_id"] = _id(body, "principal_id")
+    elif kind == "key":
+        out["grant_id"] = _id(body, "grant_id")
+        th = body["token_hash"]
+        if not isinstance(th, str) or not re.fullmatch(r"[0-9a-f]{64}", th):
+            raise EntryRefused("token_hash is a sha256 hex digest", 400)
+        out["token_hash"] = th
+        for k, most in (("hint", 16), ("name", 200)):
+            v = body[k]
+            if not isinstance(v, str) or not v.strip() or len(v) > most:
+                raise EntryRefused(f"{k} is a non-empty string of at most {most}", 400)
+            out[k] = v.strip()
+        exp = body["expires_at"]
+        try:
+            parse_time(exp) if isinstance(exp, str) else (_ for _ in ()).throw(ValueError())
+        except ValueError:
+            raise EntryRefused("expires_at is an ISO-8601 time", 400) from None
+        out["expires_at"] = _canonical_time(exp) if canonical_times else exp
+        if body["state"] not in (_ACTIVE, "revoked"):
+            raise EntryRefused("a key's state is active or revoked", 400)
+        out["state"] = body["state"]
+        agent = body.get("agent")
+        if agent is not None:
+            if not isinstance(agent, str) or not agent.strip() or len(agent) > 200:
+                raise EntryRefused("agent is a non-empty string of at most 200", 400)
+            out["agent"] = agent.strip()
     elif kind == "job_grant":
         out["grant_id"], out["principal"] = _id(body, "grant_id"), _id(body, "principal")
         job = body["job"]
@@ -281,6 +311,8 @@ def normalise(body: Any, *, canonical_times: bool = True) -> dict:
 _JOB_NAME = re.compile(r"[A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+){0,7}")
 #: How long a job grant may run before it is granted again.
 JOB_GRANT_MAX_DAYS = 30
+#: How long a grant key may live (John, 2026-11-14).
+KEY_MAX_DAYS = 90
 #: A timer's job: `lumen.timer.<timer id>`. Its grant names a `reach`, the person's own key and no
 #: collection; the delegations minted under it are narrowed to Lumen or Crystal and carry the reach
 #: (`job_reach`), and it never releases a key share (John, 2026-11-10, BUG-024/BUG-035).
@@ -415,6 +447,16 @@ class SqlReplica:
     def claims_of(self, invite_id):
         return (self.db.query(AuthorityGrant)
                 .filter(AuthorityGrant.claimed_from == invite_id).count())
+
+    def key(self, grant_id):
+        from origin.models.authority_ledger import AuthorityKey
+        row = self.db.get(AuthorityKey, grant_id)
+        return None if row is None else key_view(row)
+
+    def key_by_hash(self, token_hash):
+        from origin.models.authority_ledger import AuthorityKey
+        row = self.db.query(AuthorityKey).filter(AuthorityKey.token_hash == token_hash).first()
+        return None if row is None else key_view(row)
 
 
 def _node_view(created_by, member, part_removed_seq=None, confirmed_empty_seq=None) -> dict:
@@ -727,6 +769,18 @@ def _decide_grant(rc: Reach, ctx: Context, b: dict) -> Optional[str]:
     actor = ctx.actor
     new = _grant_from_body(b)
     prior = rc.r.grant(new.id)
+    if new.grantee_type == "grant" and not ctx.bootstrap:
+        # A key's member: made with the key, on Origin's own page, by the person who minted it,
+        # on an active key. Who may grant it on the resource is decided below, as for any grant.
+        key = getattr(rc.r, "key", lambda _k: None)(str(new.grantee_id))
+        if ctx.kind != ORIGIN_PAGE:
+            raise EntryRefused("a key and what it carries are made at Origin's own page "
+                               "(POST /auth/me/keys)")
+        if key is None or key["created_by"] != actor:
+            raise EntryRefused("a key's members are added by the person who minted it")
+        if key["state"] != _ACTIVE and new.state == _ACTIVE and (
+                prior is None or prior.state != _ACTIVE):
+            raise EntryRefused("a revoked key carries nothing new", 409)
     if not ctx.bootstrap and _seen(rc, new.resource_id) and rc.gone(new.resource_id):
         # Deleted at Origin (review 15): nothing is granted on it again. A grant on it may be
         # retired as bookkeeping, except a deny on a token Mantle holds: that is answered as
@@ -1158,11 +1212,41 @@ def _decide_job_grant(rc: Reach, ctx: Context, b: dict) -> Optional[str]:
     return "a job grant within the actor's own authority"
 
 
+def _decide_key(rc: Reach, ctx: Context, b: dict) -> Optional[str]:
+    """A grant key: minted on Origin's own page in the person's session (never on a token Mantle
+    holds, nor by a key), ending within `KEY_MAX_DAYS`; it does not change after, and is revoked
+    by the person who minted it (the operator revokes any, `_decide_operator`)."""
+    if ctx.kind != ORIGIN_PAGE or ctx.bootstrap:
+        raise EntryRefused("a key is made and revoked at Origin's own page, in the person's "
+                           "Origin session (POST /auth/me/keys)")
+    prior = getattr(rc.r, "key", lambda _k: None)(b["grant_id"])
+    if prior is not None:
+        same = {k: prior.get(k) for k in ("token_hash", "hint", "name", "expires_at", "agent")}
+        if same != {k: b.get(k) for k in same}:
+            raise EntryRefused("a key does not change; mint a new one", 409)
+        if prior["state"] == b["state"]:
+            return None
+        if b["state"] != "revoked":
+            raise EntryRefused("a revoked key stays revoked", 409)
+        if prior["created_by"] != ctx.actor:
+            raise EntryRefused("a key is revoked by the person who minted it")
+        return "the key is revoked"
+    if b["state"] != _ACTIVE:
+        raise EntryRefused("a new key is active", 400)
+    if getattr(rc.r, "key_by_hash", lambda _h: None)(b["token_hash"]) is not None:
+        raise EntryRefused("that token is already a key", 409)
+    until = parse_time(b["expires_at"])
+    now = datetime.now(timezone.utc)
+    if until <= now or until > now + timedelta(days=KEY_MAX_DAYS):
+        raise EntryRefused(f"a key ends in the future, within {KEY_MAX_DAYS} days", 400)
+    return "a key the person mints for themselves"
+
+
 _DECIDE = {"grant": _decide_grant, "edge.add": _decide_edge_add,
            "edge.remove": _decide_edge_remove, "root": _decide_root,
            "root.confirm_empty": lambda rc, ctx, b: _operator_only(),
            "drop_key": _decide_retired_drop_key, "root.retire": _decide_root_retire,
-           "job_grant": _decide_job_grant}
+           "job_grant": _decide_job_grant, "key": _decide_key}
 
 
 def _decide_compensation(db: Session, ctx: Context, b: dict) -> str:
@@ -1264,6 +1348,8 @@ def _restores_wider(db: Session, row: AuthorityEntry, restored: dict) -> bool:
 def _row_key(kind: str, b: dict) -> tuple:
     if kind == "grant":
         return ("grant", b["grant_id"])
+    if kind == "key":
+        return ("key", b["grant_id"])
     return ("edge", b["src"], b["dst"])
 
 
@@ -1377,6 +1463,13 @@ def revoke_entry(db: Session, seq: int, operator_id: str, ref: str) -> Optional[
         raise EntryRefused("only a grant or an added edge is revoked here", 400)
     return append(db, inverse, actor=Actor(operator_id, "operator", ref),
                   submitted_jti=f"console:{ref}")
+
+
+def key_view(row) -> dict:
+    """A key as Origin holds it: never its token, which Origin never stored."""
+    return {"grant_id": row.grant_id, "hint": row.hint, "name": row.name, "agent": row.agent,
+            "expires_at": row.expires_at, "state": row.state, "created_by": row.created_by,
+            "token_hash": row.token_hash}
 
 
 def job_grant_view(row) -> dict:
@@ -1533,6 +1626,83 @@ def page_revoke_job_grant(db: Session, person_id: str, grant_id: str) -> Optiona
     if v["state"] != _ACTIVE:
         return {"grant_id": grant_id, "state": v["state"]}
     return append(db, _job_grant_body(v, "revoked"),
+                  actor=Actor(person_id, ORIGIN_PAGE, f"page:{person_id}"))
+
+
+KEY_PREFIX = "agk_"          # Mantle's `grant_key_service.KEY_PREFIX`: the form it authenticates
+
+
+def _key_body(v: dict, state: str) -> dict:
+    return {"kind": "key", "grant_id": v["grant_id"], "token_hash": v["token_hash"],
+            "hint": v["hint"], "name": v["name"], "expires_at": v["expires_at"], "state": state,
+            **({"agent": v["agent"]} if v.get("agent") else {})}
+
+
+def page_mint_key(db: Session, person_id: str, *, name: str, expires_at: str, members: list,
+                  agent: Optional[str] = None) -> dict:
+    """A grant key the person mints at Origin's own page (their session and a step-up, checked by
+    the route): the key, then one grant per member (`{resource_id, actions}`), each decided as any
+    grant of theirs (Admin on the resource, nothing they do not hold). A member refused revokes
+    the key before the refusal is raised, so no half-made key is left live. Returns the receipt
+    and the raw token, which is shown once and stored nowhere."""
+    if not isinstance(members, list) or not members or len(members) > 64:
+        raise EntryRefused("a key carries 1 to 64 members", 400)
+    for m in members:
+        if not isinstance(m, dict) or set(m) - {"resource_id", "actions"}:
+            raise EntryRefused("a member is {resource_id, actions}", 400)
+    token = f"{KEY_PREFIX}{secrets.token_urlsafe(32)}"
+    key_id = str(uuid.uuid4())
+    actor = Actor(person_id, ORIGIN_PAGE, f"page:{person_id}")
+    body = {"kind": "key", "grant_id": key_id,
+            "token_hash": hashlib.sha256(token.encode()).hexdigest(), "hint": token[-4:],
+            "name": name, "expires_at": expires_at, "state": _ACTIVE,
+            **({"agent": agent} if agent else {})}
+    receipt = append(db, body, actor=actor)
+    batch = receipt.get("batch")
+    try:
+        for m in members:
+            r = append(db, {"kind": "grant", "grant_id": str(uuid.uuid4()), "grantee_id": key_id,
+                            "grantee_type": "grant", "resource_id": m.get("resource_id"),
+                            "actions": m.get("actions"), "effect": "allow", "state": _ACTIVE,
+                            "expires_at": normalise(body)["expires_at"], "target": None,
+                            "max_claims": None}, actor=actor, batch=batch)
+            batch = r.get("batch", batch)
+    except EntryRefused:
+        append(db, _key_body(key_view(_key_row(db, key_id)), "revoked"), actor=actor)
+        raise
+    return {"grant_id": key_id, "token": token, "receipt": receipt}
+
+
+def _key_row(db: Session, key_id: str):
+    from origin.models.authority_ledger import AuthorityKey
+    return db.get(AuthorityKey, key_id)
+
+
+def person_keys(db: Session, person_id: str) -> list:
+    """The keys the person minted, with what each carries; no token, no hash."""
+    from origin.models.authority_ledger import AuthorityKey
+    out = []
+    for row in (db.query(AuthorityKey).filter(AuthorityKey.created_by == person_id)
+                .order_by(AuthorityKey.seq)):
+        v = key_view(row)
+        v.pop("token_hash")
+        v["members"] = [{"resource_id": g.resource_id, "actions": g.actions.split(",")
+                         if g.actions else [], "state": g.state}
+                        for g in db.query(AuthorityGrant).filter(
+                            AuthorityGrant.grantee_id == row.grant_id,
+                            AuthorityGrant.grantee_type == "grant")]
+        out.append(v)
+    return out
+
+
+def page_revoke_key(db: Session, person_id: str, key_id: str) -> Optional[dict]:
+    """The person revokes a key they minted: None if it is not one of theirs."""
+    row = _key_row(db, key_id)
+    if row is None or row.created_by != person_id:
+        return None
+    if row.state != _ACTIVE:
+        return {"grant_id": key_id, "state": row.state}
+    return append(db, _key_body(key_view(row), "revoked"),
                   actor=Actor(person_id, ORIGIN_PAGE, f"page:{person_id}"))
 
 
@@ -2125,6 +2295,15 @@ def _decide_operator(rc: Reach, ctx: "Context", b: dict) -> Optional[str]:
                                "operator's job grants cover only the platform's own collections",
                                403)
         return "the operator grants a job for the platform's own principal"
+    if b["kind"] == "key":
+        if b["state"] != "revoked":
+            raise EntryRefused("the operator only revokes a key", 403)
+        prior = getattr(rc.r, "key", lambda _k: None)(b["grant_id"])
+        if prior is not None and prior["state"] == "revoked":
+            return None
+        # One minted before the ledger is unknown here and is revoked by id alone: a revocation
+        # only narrows, and Mantle applies it to the key it holds under that id.
+        return "the operator revokes a key"
     if b["kind"] == "edge.remove":
         return None if rc.r.edge(b["src"], b["dst"]) is None else "the operator removes an edge"
     if b["kind"] == "grant":
@@ -2398,6 +2577,15 @@ def _apply(db: Session, b: dict, seq: int, ctx: Context) -> None:
         row.job, row.principal = b["job"], b["principal"]
         row.collections, row.expires_at = json.dumps(b["collections"]), b["expires_at"]
         row.reach = json.dumps(b["reach"]) if b.get("reach") else None
+        row.state, row.seq = b["state"], seq
+    elif kind == "key":
+        from origin.models.authority_ledger import AuthorityKey
+        row = db.get(AuthorityKey, b["grant_id"])
+        if row is None:
+            row = AuthorityKey(grant_id=b["grant_id"], created_by=creator)
+            db.add(row)
+        row.token_hash, row.hint, row.name = b["token_hash"], b["hint"], b["name"]
+        row.agent, row.expires_at = b.get("agent"), b["expires_at"]
         row.state, row.seq = b["state"], seq
     elif kind == "root.retire":
         for model in (AuthorityRoot, AuthorityNode):

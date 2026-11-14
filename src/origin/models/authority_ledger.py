@@ -169,6 +169,24 @@ class OperatorAlert(Base):
     acknowledged_at = Column(DateTime(timezone=True), nullable=True)
 
 
+class AuthorityKey(Base):
+    """A grant key the person minted at Origin's own page (John, 2026-11-14), as the ledger
+    applied it: the token's sha256 and non-secret tail (never the token), its name, the agent it
+    is for (FR-028), until when, and whether it is live. What it carries is its member grants."""
+
+    __tablename__ = "authority_keys"
+
+    grant_id = Column(String(128), primary_key=True)
+    token_hash = Column(String(64), nullable=False, unique=True, index=True)
+    hint = Column(String(16), nullable=False)
+    name = Column(String(200), nullable=False)
+    agent = Column(String(200), nullable=True)
+    expires_at = Column(String(64), nullable=False)
+    state = Column(String(32), nullable=False)
+    created_by = Column(String(128), nullable=False, index=True)
+    seq = Column(Integer, nullable=False)
+
+
 class AuthorityJobGrant(Base):
     """A named background job's own narrow authority (John, 2026-11-02), as the ledger applied
     it: which job, over which key principal and collections, until when. Granted by the person
