@@ -117,3 +117,51 @@ def test_on_https_the_session_is_the_host_cookie(c, monkeypatch):
     cookies = [h for h in r.headers.get_list("set-cookie")
                if h.startswith("__Host-origin_session=")]
     assert len(cookies) == 1 and "secure" in cookies[0].lower()
+
+
+def _registered_link(c, name, nonce):
+    """A sign-up that must confirm its address; returns the mailed link's token."""
+    from unittest.mock import MagicMock, patch
+    from urllib.parse import parse_qs, urlparse
+    sent = MagicMock()
+    with patch("origin.routers.auth_router.email_verification_required", return_value=True), \
+            patch("origin.routers.auth_router.email_service.send_email_verification", sent):
+        r = c.post("/auth/password/register", headers=ORIGIN_PAGE, json={
+            "username": name, "name": name, "email": f"{name}@example.test",
+            "password": PASSWORD, "verify_nonce": nonce})
+    assert r.status_code == 200 and r.json().get("verification_required"), r.text
+    return parse_qs(urlparse(sent.call_args.args[1]).query)["token"][0]
+
+
+def _confirm(c, token, nonce, headers):
+    return c.post("/auth/email/verify-confirm", headers=headers,
+                  json={"token": token, "verify_nonce": nonce, "password": PASSWORD})
+
+
+def test_confirming_the_address_on_origin_s_page_starts_the_session(c):
+    """The link opens Origin's verify page in the browser that signed up; confirming there signs
+    the person in, and the web app it continues to gets its token for Mantle (71/test, 2026-11-14:
+    the page held a token but no session, and the web app asked the person to sign in again)."""
+    token = _registered_link(c, "fay", "fay-browser-nonce")
+    c.cookies.clear()
+    r = _confirm(c, token, "fay-browser-nonce", ORIGIN_PAGE)
+    assert r.status_code == 200 and r.json().get("access_token"), r.text
+    assert _session_cookie(r)
+    assert _mantle_token(c).status_code == 200
+
+
+def test_confirming_from_another_page_starts_no_session(c):
+    token = _registered_link(c, "gus", "gus-browser-nonce")
+    c.cookies.clear()
+    r = _confirm(c, token, "gus-browser-nonce", APP_PAGE)
+    assert r.status_code == 200 and r.json().get("access_token"), r.text
+    assert not _session_cookie(r)
+    assert _mantle_token(c).status_code == 401
+
+
+def test_confirming_without_the_nonce_starts_no_session(c):
+    token = _registered_link(c, "hal", "hal-browser-nonce")
+    c.cookies.clear()
+    r = _confirm(c, token, "", ORIGIN_PAGE)
+    assert r.status_code == 200 and "access_token" not in r.json(), r.text
+    assert not _session_cookie(r)

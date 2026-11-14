@@ -3454,6 +3454,7 @@ def _mail_send_admitted(request: Request, email: str, what: str) -> Optional[str
 
 @auth_router.post("/email/verify-confirm", dependencies=_KDF_ADMISSION)
 async def email_verify_confirm(
+    request: Request,
     background_tasks: BackgroundTasks,
     payload: EmailVerifyConfirmBody,
     db: Session = Depends(get_db),
@@ -3565,8 +3566,10 @@ async def email_verify_confirm(
     refresh_token = _refresh_tokens.issue(db, user_data)
 
     # `email` lets a tab of this browser waiting on the same registration tell that it was this
-    # address that was verified. Only the browser that started the verification is told.
-    return {
+    # address that was verified. Only the browser that started the verification is told. On
+    # Origin's own page this is a sign-in like `/password/login`, and starts the Origin session the
+    # web app's token for Mantle is made in.
+    return _signed_in_on_page(request, db, str(user.id), {
         "verified": True,
         "email": user.email,
         "access_token": access_token,
@@ -3574,7 +3577,7 @@ async def email_verify_confirm(
         "expires_in": access_token_expires_in_seconds(),
         "refresh_token": refresh_token,
         "scope": "read write",
-    }
+    })
 
 
 # ---------------------------------------------------------------------------
