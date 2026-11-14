@@ -270,6 +270,8 @@ async def send_invite(
     from_email: str,
 ) -> bool:
     """An invite to `resource_name`, from `from_name` at `from_email` (their verified address).
+    The sender is named as the in-app invite names them: their display name with their address,
+    else their address alone (BUG-070: a mail that began "Someone (address)").
 
     The sender's name and the resource's name are text the inviter chose, so both are defanged
     (`origin.services.defang`) in every part, subject included, and escaped in the HTML: the only
@@ -278,20 +280,22 @@ async def send_invite(
     from origin.services.defang import defang
 
     platform = _platform()
-    sender = defang(" ".join(str(from_name or "").split()) or "Someone")
     address = defang(from_email)
+    named = " ".join(str(from_name or "").split())
+    sender = defang(named) if named else address
+    who = f"{sender} ({address})" if named else address
     what = defang(" ".join(str(resource_name or "").split()) or "a shared item")
     subject = f"{sender} invited you to collaborate on {platform}"
     inner = (
         '<h2 style="margin:0 0 12px;">You&rsquo;ve been invited</h2>'
         f'<p style="color:#555;font-size:14px;"><strong>{html.escape(sender)}</strong> '
-        f"({html.escape(address)}) invited you to "
+        + (f"({html.escape(address)}) " if named else "") + "invited you to "
         f"<strong>{html.escape(what)}</strong> on {html.escape(platform)}.</p>"
         + _button(claim_url, f"View in {platform}")
         + '<p style="color:#777;font-size:13px;">If you do not have an account yet, one is created when '
         "you sign in.</p>"
     )
-    text = (f"{sender} ({address}) invited you to {what} on {platform}.\n"
+    text = (f"{who} invited you to {what} on {platform}.\n"
             f"\nOpen this link to accept:\n{claim_url}\n\n"
             "If you do not have an account yet, one is created when you sign in.\n")
     return await send_email(to_email, subject,

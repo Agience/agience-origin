@@ -471,7 +471,7 @@ async def make_invite(request: Request, body: dict = Body(...), db: Session = De
              "max_claims": 1}
     _append(db, person, entry)
     link = f"{(config.APP_URI or config.ORIGIN_URI).rstrip('/')}/invite/{token}"
-    sent = await email_service.send_invite(email, owner.name or "Someone", name, link,
+    sent = await email_service.send_invite(email, _display_name(db, person), name, link,
                                            from_email=owner.email)
     if not sent:
         # Never left live unmailed: the owner sees the failure and the invite is withdrawn.
