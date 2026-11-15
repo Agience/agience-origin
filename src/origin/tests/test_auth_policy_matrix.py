@@ -131,6 +131,13 @@ PUBLIC = {
     ("POST", "/auth/password/reset-confirm"): _PREAUTH,
     # Names the account a reset link resets; the link's signed, single-use token is the credential.
     ("POST", "/auth/password/reset-check"): _PREAUTH,
+    # Feedback from the Help panel, from anyone, signed in or not: a person who cannot sign in is
+    # the one most likely to need it. It files only into the Feedback collection, as the feedback
+    # account, after the sign-up form's FR-027 tests and hourly ceilings (`feedback_intake.admit`).
+    ("GET", "/feedback/form"): "the feedback form's FR-027 token, fetched before anything is "
+                               "sent, as the sign-up form's is",
+    ("POST", "/feedback"): "feedback from anyone; admitted by FR-027's tests and ceilings, filed "
+                           "only into the Feedback collection, the same thank-you either way",
     ("POST", "/auth/otp/request"): _PREAUTH,
     ("POST", "/auth/otp/verify"): _PREAUTH,
     ("POST", "/auth/passkey/login-options"): _PREAUTH,
