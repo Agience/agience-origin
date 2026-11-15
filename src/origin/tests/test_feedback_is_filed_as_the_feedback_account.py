@@ -88,3 +88,20 @@ def test_unconfigured_or_refused_is_unavailable_so_the_app_offers_mail(feedback,
     monkeypatch.delenv("FEEDBACK_COLLECTION_ID")
     assert client.get("/feedback/form").status_code == 503
     assert client.post("/feedback", json={"text": "x"}).status_code == 503
+
+
+def test_a_body_past_the_cap_is_not_read_and_files_nothing(feedback):
+    """A public route reads at most `MAX_BODY_BYTES` of a body: one larger, declared or not,
+    and one that is not the form's, files nothing and hears the same thank-you."""
+    client, _bot, mantle = feedback
+    token = client.get("/feedback/form").json()["form_token"]
+    big = json.dumps({"text": "x" * (R.MAX_BODY_BYTES + 1), "website": "", "form_token": token})
+    r = client.post("/feedback", content=big, headers={"Content-Type": "application/json"})
+    assert r.status_code == 200 and r.json() == R.THANKS
+    r = client.post("/feedback", content=iter([big.encode()]),
+                    headers={"Content-Type": "application/json"})   # streamed: no length declared
+    assert r.status_code == 200 and r.json() == R.THANKS
+    r = client.post("/feedback", content=b"{not json", headers={"Content-Type": "application/json"})
+    assert r.status_code == 200 and r.json() == R.THANKS
+    assert mantle.calls == [], "nothing filed"
+    assert _send(client).json() == R.THANKS and len(mantle.calls) == 1, "a real request still files"

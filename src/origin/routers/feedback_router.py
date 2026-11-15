@@ -107,12 +107,44 @@ async def feedback_form():
                         headers={"Cache-Control": "no-store"})
 
 
+#: The most of a request's body read. Well above the longest feedback filed
+#: (`feedback_intake.MAX_CHARS`, at most four bytes a character, plus the form's other fields), so a
+#: real request always fits, and a body past it is not read further.
+MAX_BODY_BYTES = 32 * 1024
+
+
+async def _capped_body(request: Request) -> Optional[bytes]:
+    """The request's body, or None when it declares or turns out larger than `MAX_BODY_BYTES`."""
+    declared = request.headers.get("content-length")
+    if declared is not None:
+        try:
+            if int(declared) > MAX_BODY_BYTES:
+                return None
+        except ValueError:
+            return None
+    buf = bytearray()
+    async for chunk in request.stream():
+        buf += chunk
+        if len(buf) > MAX_BODY_BYTES:
+            return None
+    return bytes(buf)
+
+
 @feedback_router.post("/feedback")
-async def feedback(body: FeedbackIn, request: Request, db: Session = Depends(get_db)):
+async def feedback(request: Request, db: Session = Depends(get_db)):
     """File the feedback if the request is real; the same thank-you either way. 503 only when no
-    feedback account is configured or Mantle did not take it, so the app can offer mail."""
+    feedback account is configured or Mantle did not take it, so the app can offer mail. The body
+    is read only up to `MAX_BODY_BYTES`; one past it, or one that is not the form's, files
+    nothing."""
     if not all(configured()):
         return JSONResponse({"available": False}, status_code=503)
+    raw = await _capped_body(request)
+    if raw is None:
+        return THANKS
+    try:
+        body = FeedbackIn.model_validate_json(raw)
+    except ValueError:
+        return THANKS
     address = (request.client.host if request.client else "") or "-"
     text = feedback_intake.admit(body.text, body.website, body.form_token, address)
     if text is None:
