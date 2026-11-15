@@ -24,10 +24,13 @@
   function answer(message) {
     if (window.opener && back) window.opener.postMessage(message, back);
   }
+  /* A refusal is told to the app at once, with its reason, so the app stops waiting
+     (2026-11-15, the Tester: a key over a collection they could not grant stayed "Generating"). */
   function refused(detail) {
     show(detail || "Refused.", "err");
     $("#approveBtn").classList.add("hidden");
     $("#cancelBtn").textContent = "Close";
+    answer({ type: revoke ? "agience.key-revoke-refused" : "agience.key-refused", detail: detail || "Refused." });
   }
 
   /* An hour inside the term, so a clock running a little fast still asks for one Origin takes. */
