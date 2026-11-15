@@ -150,3 +150,30 @@ def test_the_operator_sets_the_policy_on_a_collection_they_made(platform):
 ])
 def test_the_policy_is_refused_beyond_what_the_rules_allow(platform, rows, status):
     assert _put_policy(platform[0], rows).status_code == status
+
+
+def test_a_seeded_collection_is_granted_itself_and_not_its_members(platform):
+    """`on: "itself"`: a seeded collection such as Start Here, read, on the collection alone."""
+    import origin.services.authority_ledger as L
+    from origin.db.session import SessionLocal
+    _c, _coll, other, policy = platform
+    policy["value"] = json.dumps([{"collection_id": other, "actions": ["read"], "on": "itself"}])
+    alice, _ = af.person("alice")
+    with SessionLocal() as db:
+        L.grant_new_person(db, alice, "t1")
+    assert _grants(alice) == [(other, "read")]
+    with SessionLocal() as db:
+        with pytest.raises(L.EntryRefused):
+            _operator_grant(db, _body(alice, "d-1", ("read",)))      # its member is not named
+
+
+def test_both_forms_together(platform):
+    import origin.services.authority_ledger as L
+    from origin.db.session import SessionLocal
+    _c, coll, other, policy = platform
+    policy["value"] = json.dumps([{"collection_id": coll, "actions": ["read", "invoke"]},
+                                  {"collection_id": other, "actions": ["read"], "on": "itself"}])
+    alice, _ = af.person("alice")
+    with SessionLocal() as db:
+        L.grant_new_person(db, alice, "t1")
+    assert _grants(alice) == [(other, "read"), ("op-1", "invoke,read"), ("op-2", "invoke,read")]
