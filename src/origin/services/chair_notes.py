@@ -52,8 +52,21 @@ class NoteRefused(Exception):
         self.detail = detail
 
 
-def chair_person_id() -> Optional[str]:
-    return (os.getenv("CHAIR_PERSON_ID") or "").strip() or None
+def chair_email() -> Optional[str]:
+    """`CHAIR_EMAIL`: the chair's address. The chair is the account holding it, verified."""
+    return (os.getenv("CHAIR_EMAIL") or "").strip().lower() or None
+
+
+def chair_person_id(db: Session) -> Optional[str]:
+    """The account that holds `CHAIR_EMAIL`, verified; None when unset or no such account."""
+    email = chair_email()
+    if email is None:
+        return None
+    from origin.services import person_service
+    person = person_service.get_user_by_email(db, email)
+    if person is None or not getattr(person, "email_verified", False):
+        return None
+    return str(person.id)
 
 
 def _now() -> datetime:

@@ -9,7 +9,7 @@ the note it gets.
 - `POST /notes/spend`: whoever holds a note spends it once per action. The note is the only
   credential the route reads.
 
-`CHAIR_PERSON_ID` names the chair; without it every route here answers 503.
+`CHAIR_EMAIL` names the chair by a verified address; without it every route here answers 503.
 """
 from __future__ import annotations
 
@@ -33,10 +33,12 @@ notes_router = APIRouter(prefix="/notes", tags=["Approvals"])
 STRONG_AMR = frozenset({"pop", "otp"})
 
 
-def _chair() -> str:
-    chair = notes.chair_person_id()
-    if chair is None:
+def _chair(db: Session) -> str:
+    if notes.chair_email() is None:
         raise HTTPException(status_code=503, detail="approvals are not set up on this node")
+    chair = notes.chair_person_id(db)
+    if chair is None:
+        raise HTTPException(status_code=503, detail="the chair has no verified account on this node")
     return chair
 
 
@@ -56,7 +58,7 @@ def _account(auth: AuthContext) -> str:
 @notes_router.post("/requests", status_code=201)
 async def file_request(request: Request, auth: AuthContext = Depends(get_auth),
                        db: Session = Depends(get_db)):
-    _chair()
+    _chair(db)
     account = _account(auth)
     try:
         body = await request.json()
@@ -80,7 +82,7 @@ async def file_request(request: Request, auth: AuthContext = Depends(get_auth),
 @notes_router.get("/requests/{req_id}")
 def read_request(req_id: str, auth: AuthContext = Depends(get_auth),
                  db: Session = Depends(get_db)):
-    chair = _chair()
+    chair = _chair(db)
     account = _account(auth)
     req = notes.get_request(db, req_id)
     if req is None or account not in (req.filed_by_account, chair):
@@ -102,7 +104,7 @@ def _form_token(session_digest: str, subject: str) -> str:
 def _chair_session(request: Request, db: Session):
     """The chair's live Origin session on Origin's own page, or a refusal."""
     from origin.routers.auth_router import on_origin_s_own_page
-    chair = _chair()
+    chair = _chair(db)
     if not on_origin_s_own_page(request):
         raise HTTPException(status_code=403, detail="approvals are made on Origin's own page")
     row = origin_session.session_of(request, db)
@@ -239,7 +241,7 @@ class Spend(BaseModel):
 
 @notes_router.post("/spend")
 def spend(body: Spend, db: Session = Depends(get_db)):
-    _chair()
+    _chair(db)
     try:
         return JSONResponse(notes.spend(db, body.note, body.action),
                             headers={"Cache-Control": "no-store"})

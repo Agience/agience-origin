@@ -44,7 +44,7 @@ def _session(c, pid, amr=("pop",)):
 @pytest.fixture
 def chair(custody_client, monkeypatch):
     who = af.person("chair", email="chair@team.test")
-    monkeypatch.setenv("CHAIR_PERSON_ID", who[0])
+    monkeypatch.setenv("CHAIR_EMAIL", "Chair@team.test")
     return who
 
 
@@ -299,3 +299,15 @@ def test_the_page_runs_no_inline_script_and_sends_its_referer():
     assert 'referrerPolicy: "same-origin"' in js and 'credentials: "same-origin"' in js
     assert "Nothing waiting for you" in js and "Revoke this note" in js
     assert "innerHTML" not in js
+
+
+def test_without_a_verified_chair_the_routes_answer_503(custody_client, agent, monkeypatch):
+    c = custody_client
+    monkeypatch.delenv("CHAIR_EMAIL", raising=False)
+    r = c.post("/notes/spend", json={"note": "x", "action": "y"})
+    assert r.status_code == 503 and r.json()["detail"] == "approvals are not set up on this node"
+    af.person("unverified", email="nobody@team.test", verified=False)
+    monkeypatch.setenv("CHAIR_EMAIL", "nobody@team.test")
+    r = _file(c, agent, {"kind": "question", "aud": AUD, "summary": "?", "options": ["a", "b"]})
+    assert r.status_code == 503
+    assert r.json()["detail"] == "the chair has no verified account on this node"
