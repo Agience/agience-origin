@@ -187,6 +187,20 @@ class AuthorityKey(Base):
     seq = Column(Integer, nullable=False)
 
 
+class InviteAddress(Base):
+    """The address an email invite was sent to, and when (BUG-069; John, 2026-11-14: stored at
+    Origin, owner-only). The ledger keeps only the address's digest; this row lets the people who
+    may share the item see whom a pending invite went to. It is Origin's own, never a ledger entry,
+    so Mantle's feed never carries it, and it is deleted once the invite is no longer pending."""
+
+    __tablename__ = "invite_addresses"
+
+    grant_id = Column(String(128), primary_key=True)
+    email = Column(String(254), nullable=False)
+    sent_at = Column(DateTime(timezone=True), nullable=False,
+                     default=lambda: datetime.now(timezone.utc))
+
+
 class AuthorityJobGrant(Base):
     """A named background job's own narrow authority (John, 2026-11-02), as the ledger applied
     it: which job, over which key principal and collections, until when. Granted by the person

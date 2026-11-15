@@ -29,6 +29,7 @@ from origin.models.key_custody import (
 from origin.models.authority_ledger import (
     AuthorityBootstrapWindow, AuthorityEdge, AuthorityEntry, AuthorityGrant, AuthorityNode,
     AuthorityRoot, AuthoritySigningKey, OperatorAlert, AuthorityJobGrant, AuthorityKey,
+    InviteAddress,
 )
 
 __all__ = [
@@ -67,6 +68,7 @@ __all__ = [
     "OperatorAlert",
     "AuthorityJobGrant",
     "AuthorityKey",
+    "InviteAddress",
     "DelegationRecord",
     "SeedCredential",
 ]

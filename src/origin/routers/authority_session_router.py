@@ -200,13 +200,57 @@ def _listed(db: Session, g) -> dict:
     how many times it was claimed, so a spent one is shown as spent."""
     v = _grant_view(g)
     if g.grantee_type == "user":
-        v["grantee_name"] = _display_name(db, g.grantee_id)
+        # By display name, else verified address, as an invite names its sender (BUG-078).
+        v["grantee_name"] = _inviter(db, g.grantee_id)
     if g.grantee_type == "invite":
-        from origin.models.authority_ledger import AuthorityGrant
+        from origin.models.authority_ledger import AuthorityGrant, InviteAddress
         v["max_claims"] = g.max_claims
         v["claims"] = (db.query(AuthorityGrant)
                        .filter(AuthorityGrant.claimed_from == g.grant_id).count())
+        # Whom a pending email invite went to, and when (BUG-069): only while it is pending.
+        sent = db.get(InviteAddress, g.grant_id) if _pending(g, v["claims"]) else None
+        if sent is not None:
+            v["invited_address"] = sent.email
+            v["sent_at"] = sent.sent_at.isoformat() if sent.sent_at else None
     return v
+
+
+def _pending(g, claims: int) -> bool:
+    """Is this invite still waiting to be claimed: live, unexpired and not spent?"""
+    from datetime import datetime, timezone
+    if g.state != "active" or g.effect != "allow":
+        return False
+    if g.max_claims is not None and claims >= g.max_claims:
+        return False
+    if g.expires_at:
+        try:
+            when = datetime.fromisoformat(str(g.expires_at).replace("Z", "+00:00"))
+            if when.tzinfo is None:
+                when = when.replace(tzinfo=timezone.utc)
+            if when <= datetime.now(timezone.utc):
+                return False
+        except ValueError:
+            pass
+    return True
+
+
+def _forget_addresses(db: Session, *grant_ids: str) -> None:
+    """Delete the stored address of each named invite that is no longer pending (BUG-069): an
+    address is kept only while its invite waits to be claimed."""
+    from origin.models.authority_ledger import AuthorityGrant, InviteAddress
+    gone = False
+    for gid in grant_ids:
+        row = db.get(InviteAddress, gid)
+        if row is None:
+            continue
+        g = db.get(AuthorityGrant, gid)
+        claims = (db.query(AuthorityGrant).filter(AuthorityGrant.claimed_from == gid).count()
+                  if g is not None else 0)
+        if g is None or not _pending(g, claims):
+            db.delete(row)
+            gone = True
+    if gone:
+        db.commit()
 
 
 def _may_share(db: Session, person: str, resource_id: str) -> bool:
@@ -337,7 +381,8 @@ def list_grants(request: Request, resource_id: str, db: Session = Depends(get_db
     person = _person(request, db)
     if not _may_share(db, person, resource_id):
         raise HTTPException(status_code=403, detail="you hold neither Share nor Admin on this")
-    rows = db.query(AuthorityGrant).filter(AuthorityGrant.resource_id == resource_id)
+    rows = list(db.query(AuthorityGrant).filter(AuthorityGrant.resource_id == resource_id))
+    _forget_addresses(db, *[g.grant_id for g in rows if g.grantee_type == "invite"])
     return {"resource_id": resource_id, "grants": [_listed(db, g) for g in rows]}
 
 
@@ -381,7 +426,9 @@ def change_grant(grant_id: str, request: Request, body: dict = Body(...),
 def revoke_grant(grant_id: str, request: Request, db: Session = Depends(get_db)):
     """A grant or invite Origin holds, revoked, built from Origin's own row."""
     person = _person(request, db)
-    return _append(db, person, _entry_from(_held(db, grant_id), state="revoked"))
+    receipt = _append(db, person, _entry_from(_held(db, grant_id), state="revoked"))
+    _forget_addresses(db, grant_id)
+    return receipt
 
 
 def _invite_by_token(db: Session, token):
@@ -471,12 +518,15 @@ async def make_invite(request: Request, body: dict = Body(...), db: Session = De
              "max_claims": 1}
     _append(db, person, entry)
     link = f"{(config.APP_URI or config.ORIGIN_URI).rstrip('/')}/invite/{token}"
-    sent = await email_service.send_invite(email, owner.name or "Someone", name, link,
+    sent = await email_service.send_invite(email, _display_name(db, person), name, link,
                                            from_email=owner.email)
     if not sent:
         # Never left live unmailed: the owner sees the failure and the invite is withdrawn.
         _append(db, person, {**entry, "state": "revoked"})
         raise HTTPException(status_code=502, detail="the invite could not be mailed")
+    from origin.models.authority_ledger import InviteAddress
+    db.add(InviteAddress(grant_id=entry["grant_id"], email=email))
+    db.commit()
     return {"invite_id": entry["grant_id"], "resource_id": resource_id, "resource_name": name,
             "actions": actions, "expires_at": entry["expires_at"], "email": email}
 
@@ -589,6 +639,7 @@ def accept_invite(invite_id: str, request: Request, db: Session = Depends(get_db
              "state": "active", "expires_at": inv.expires_at, "target": None, "max_claims": None}
     receipt = _append(db, str(person), entry,
                       {"invite_id": inv.grant_id, "session": authority_ledger.SESSION_TARGETED})
+    _forget_addresses(db, inv.grant_id)
     return {**receipt, "resource_id": inv.resource_id, "grant_id": entry["grant_id"]}
 
 
@@ -600,7 +651,9 @@ def decline_invite(invite_id: str, request: Request, db: Session = Depends(get_d
     inv = _live_invite(db, invite_id)
     if not _for_me(db, person, inv):
         raise HTTPException(status_code=403, detail="this invite does not name you")
-    return _append(db, str(person), _entry_from(inv, state="retired"))
+    receipt = _append(db, str(person), _entry_from(inv, state="retired"))
+    _forget_addresses(db, inv.grant_id)
+    return receipt
 
 
 @authority_session_router.post("/claim")
@@ -630,6 +683,7 @@ def session_claim(request: Request, body: dict = Body(...), db: Session = Depend
     try:
         receipt = authority_ledger.session_entry(db, str(person), entry,
                                                  {"invite_id": inv.grant_id, "token": token})
+        _forget_addresses(db, inv.grant_id)
         return {**receipt, "resource_id": inv.resource_id, "grant_id": entry["grant_id"]}
     except authority_ledger.EntryRefused as exc:
         logger.warning("invite claim refused for %s: %s", person, exc)

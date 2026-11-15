@@ -1474,6 +1474,11 @@ def restore_creation_edge(db: Session, seq: int, operator_id: str, ref: str) -> 
             break
     if prior is None or not prior.get("origin"):
         raise EntryRefused(f"entry {seq} did not remove a creation edge", 400)
+    holders = db.query(AuthorityEdge).filter(AuthorityEdge.dst == b["dst"])
+    if holders.filter(AuthorityEdge.origin.is_(True)).count():
+        raise EntryRefused(f"{b['dst']} has a creation edge now", 409)
+    if not holders.count():
+        raise EntryRefused(f"no container holds {b['dst']}: it was deleted, not orphaned", 409)
     body = {"kind": "edge.add", "src": b["src"], "dst": b["dst"], "origin": True,
             "propagate": prior.get("propagate")}
     return append(db, body, actor=Actor(operator_id, "operator", ref),

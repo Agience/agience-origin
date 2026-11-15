@@ -103,6 +103,16 @@ def test_the_mail_names_the_sender_and_their_address(sent):
     assert "Ann Lee" in body and "ann@team[.]test" in body
 
 
+
+def test_a_sender_with_no_display_name_is_named_by_their_address(sent):
+    # BUG-070: the mail began "Someone (address)"; it names the sender as the in-app invite does.
+    asyncio.run(E.send_invite("bob@example.com", "", "Notes", _CLAIM, from_email="ann@team.test"))
+    (_, subject, body, text), = sent
+    assert text.startswith("ann@team[.]test invited you to Notes")
+    assert subject.startswith("ann@team[.]test invited you")
+    assert "Someone" not in subject + body + text
+    assert "(ann@team[.]test)" not in text
+
 # -- the route ------------------------------------------------------------------------------------
 
 def _hdr():
