@@ -2450,10 +2450,9 @@ NEW_PERSON_GRANT_CEILING = frozenset({"read", "invoke"})
 
 
 def new_person_grants_policy() -> list:
-    """`platform.new_person_grants`: `[{"collection_id", "actions", "on"}]`, set by the operator.
-    Each entry gives every person the named actions on that collection itself (`on: "itself"`: a
-    seeded collection such as Start Here) or on every member made in it (`on: "members"`, the
-    default: the platform operators). Empty when unset or malformed."""
+    """`platform.new_person_grants`: `[{"collection_id", "actions"}]`, set by the operator. Each
+    entry gives every person the named actions on every member made in that collection (the
+    platform operators' collection, read and invoke, is the first). Empty when unset or malformed."""
     import json as _json
     from origin.services.platform_settings_service import settings as _ps
     try:
@@ -2464,9 +2463,8 @@ def new_person_grants_policy() -> list:
     out = []
     for r in rows if isinstance(rows, list) else []:
         cid, acts = (r or {}).get("collection_id"), (r or {}).get("actions")
-        on = (r or {}).get("on", "members")
-        if isinstance(cid, str) and cid and isinstance(acts, list) and acts and on in ("itself", "members"):
-            out.append({"collection_id": cid, "actions": frozenset(str(a) for a in acts), "on": on})
+        if isinstance(cid, str) and cid and isinstance(acts, list) and acts:
+            out.append({"collection_id": cid, "actions": frozenset(str(a) for a in acts)})
     return out
 
 
@@ -2479,12 +2477,12 @@ def _new_person_grant(rc: Reach, operator: str, b: dict) -> Optional[str]:
         return None
     if b.get("expires_at") or b.get("target") or b.get("max_claims") is not None:
         return None
-    resource = str(b.get("resource_id"))
-    parent = rc.origin_parent(resource)
+    parent = rc.origin_parent(str(b.get("resource_id")))
+    if parent is None:
+        return None
     actions = frozenset(b.get("actions") or ())
     for entry in new_person_grants_policy():
-        named = resource if entry["on"] == "itself" else (str(parent[0]) if parent else None)
-        if named != entry["collection_id"]:
+        if str(parent[0]) != entry["collection_id"]:
             continue
         made = rc.r.node(entry["collection_id"]) or {}
         if made.get("created_by") != operator:
@@ -2503,8 +2501,7 @@ def new_person_grant_bodies(db: Session, person_id: str) -> list:
     for entry in new_person_grants_policy():
         cid = entry["collection_id"]
         actions = sorted(entry["actions"] & NEW_PERSON_GRANT_CEILING)
-        targets = [cid] if entry["on"] == "itself" else rc.r.origin_children(cid)
-        for member in targets:
+        for member in rc.r.origin_children(cid):
             gid = str(_uuid.uuid5(_uuid.NAMESPACE_URL, f"agience://new-person-grant/{cid}/{member}/{person_id}"))
             prior = rc.r.grant(gid)
             if prior is not None and prior.state == _ACTIVE:

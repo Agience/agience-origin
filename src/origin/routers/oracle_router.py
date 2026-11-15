@@ -281,8 +281,6 @@ def _check_new_person_grants(db: Session, value: str, operator: str) -> None:
         cid, acts = (r or {}).get("collection_id"), (r or {}).get("actions")
         if not isinstance(cid, str) or not isinstance(acts, list) or not acts:
             raise HTTPException(status_code=400, detail="each entry is {collection_id, actions}")
-        if (r or {}).get("on", "members") not in ("itself", "members"):
-            raise HTTPException(status_code=400, detail='"on" is "itself" or "members"')
         if not set(acts) <= authority_ledger.NEW_PERSON_GRANT_CEILING:
             raise HTTPException(status_code=400, detail="actions beyond read and invoke are not "
                                 "given to every new person")
