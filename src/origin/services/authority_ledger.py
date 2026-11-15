@@ -2376,6 +2376,10 @@ def _decide_operator(rc: Reach, ctx: "Context", b: dict) -> Optional[str]:
     if b["kind"] == "grant":
         prior = rc.r.grant(b["grant_id"])
         new = _grant_from_body(b)
+        if prior is None and new.state == _ACTIVE:
+            why = _new_person_grant(rc, ctx.actor, b)
+            if why:
+                return why
         if (prior is not None and ctx.retiring and prior.resource_id == ctx.retiring
                 and prior.effect == "deny" and new.state != _ACTIVE
                 and _structure_key(prior) == _structure_key(new)):
@@ -2384,6 +2388,86 @@ def _decide_operator(rc: Reach, ctx: "Context", b: dict) -> Optional[str]:
             raise EntryRefused("the operator only revokes a grant here", 403)
         return "the operator revokes a grant"
     raise EntryRefused("the operator only revokes grants and removes edges here", 403)
+
+
+#: The most a grant every new person receives may carry, whatever the policy names, until John
+#: widens it (2026-11-15).
+NEW_PERSON_GRANT_CEILING = frozenset({"read", "invoke"})
+
+
+def new_person_grants_policy() -> list:
+    """`platform.new_person_grants`: `[{"collection_id", "actions"}]`, set by the operator. Each
+    entry gives every person the named actions on every member made in that collection (the
+    platform operators' collection, read and invoke, is the first). Empty when unset or malformed."""
+    import json as _json
+    from origin.services.platform_settings_service import settings as _ps
+    try:
+        raw = _ps.get("platform.new_person_grants") or "[]"
+        rows = _json.loads(raw) if isinstance(raw, str) else raw
+    except Exception:  # noqa: BLE001 — unset or malformed: no policy
+        return []
+    out = []
+    for r in rows if isinstance(rows, list) else []:
+        cid, acts = (r or {}).get("collection_id"), (r or {}).get("actions")
+        if isinstance(cid, str) and cid and isinstance(acts, list) and acts:
+            out.append({"collection_id": cid, "actions": frozenset(str(a) for a in acts)})
+    return out
+
+
+def _new_person_grant(rc: Reach, operator: str, b: dict) -> Optional[str]:
+    """Why the operator's grant `b` is one every new person receives, or None. All of: the policy
+    names the collection the resource was made in; that collection was made by the operator; the
+    grantee is a person; allow, with actions within both the policy's and the ceiling; no expiry,
+    target or claim limit."""
+    if b.get("grantee_type") != "user" or b.get("effect") != "allow" or not rc.r.is_person(str(b.get("grantee_id"))):
+        return None
+    if b.get("expires_at") or b.get("target") or b.get("max_claims") is not None:
+        return None
+    parent = rc.origin_parent(str(b.get("resource_id")))
+    if parent is None:
+        return None
+    actions = frozenset(b.get("actions") or ())
+    for entry in new_person_grants_policy():
+        if str(parent[0]) != entry["collection_id"]:
+            continue
+        made = rc.r.node(entry["collection_id"]) or {}
+        if made.get("created_by") != operator:
+            continue
+        if actions and actions <= entry["actions"] & NEW_PERSON_GRANT_CEILING:
+            return "a grant every new person receives (platform.new_person_grants)"
+    return None
+
+
+def new_person_grant_bodies(db: Session, person_id: str) -> list:
+    """The grant bodies the policy gives `person_id` that Origin does not hold yet: one per member
+    made in each policy collection, with a stable id, so asking twice grants once."""
+    import uuid as _uuid
+    rc = reach(db)
+    out = []
+    for entry in new_person_grants_policy():
+        cid = entry["collection_id"]
+        actions = sorted(entry["actions"] & NEW_PERSON_GRANT_CEILING)
+        for member in rc.r.origin_children(cid):
+            gid = str(_uuid.uuid5(_uuid.NAMESPACE_URL, f"agience://new-person-grant/{cid}/{member}/{person_id}"))
+            prior = rc.r.grant(gid)
+            if prior is not None and prior.state == _ACTIVE:
+                continue
+            out.append({"kind": "grant", "grant_id": gid, "grantee_id": str(person_id),
+                        "grantee_type": "user", "resource_id": str(member), "actions": actions,
+                        "effect": "allow", "state": _ACTIVE, "expires_at": None, "target": None,
+                        "max_claims": None})
+    return out
+
+
+def grant_new_person(db: Session, person_id: str, ref: str) -> list:
+    """Append, as the operator's own entries, the grants the policy gives `person_id`. Returns the
+    receipts; none when the policy is empty, there is no operator, or all are already held."""
+    from origin.services.platform_settings_service import settings as _ps
+    operator = _ps.get("platform.operator_id")
+    if not operator:
+        return []
+    return [append(db, body, actor=Actor(str(operator), "operator", ref), submitted_jti=f"policy:{ref}")
+            for body in new_person_grant_bodies(db, person_id)]
 
 
 def _structure_key(g) -> tuple:
