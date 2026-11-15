@@ -34,6 +34,7 @@ from origin.routers.auth_router import internal_router as auth_internal_router
 from origin.routers.auth_router import root_router as auth_root_router
 from origin.routers.otp_router import otp_router
 from origin.routers.passkey_router import passkey_router
+from origin.routers.feedback_router import feedback_router
 from origin.routers.system_router import system_router
 from origin.routers.server_credentials_router import router as server_credentials_router
 from origin.routers.setup_router import setup_router
@@ -619,6 +620,7 @@ app.include_router(oracle_router)
 app.include_router(key_share_router)
 app.include_router(delegation_router)
 app.include_router(authority_router)
+app.include_router(feedback_router)
 from origin.routers.authority_session_router import authority_session_router  # noqa: E402 (review 12)
 app.include_router(authority_session_router)
 
