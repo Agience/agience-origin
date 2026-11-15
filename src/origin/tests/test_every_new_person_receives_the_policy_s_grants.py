@@ -129,3 +129,24 @@ def test_the_route_answers_only_mantle(platform):
                headers={"Authorization": f"Bearer {token}"})
     assert r.status_code in (401, 403)
     assert _grants(alice) == []
+
+
+def _put_policy(c, rows):
+    from origin.tests import operator_console_fixtures as oc
+    return oc.call(c, "PUT", "/oracle/settings/platform.new_person_grants",
+                   json={"value": json.dumps(rows)})
+
+
+def test_the_operator_sets_the_policy_on_a_collection_they_made(platform):
+    c, coll, _other, _policy = platform
+    r = _put_policy(c, [{"collection_id": coll, "actions": ["read", "invoke"]}])
+    assert r.status_code == 200, r.text
+
+
+@pytest.mark.parametrize("rows, status", [
+    ([{"collection_id": "C-ops", "actions": ["read", "admin"]}], 400),   # beyond the ceiling
+    ([{"collection_id": "not-known-here", "actions": ["read"]}], 409),   # not in Origin's replica
+    ([], 400),
+])
+def test_the_policy_is_refused_beyond_what_the_rules_allow(platform, rows, status):
+    assert _put_policy(platform[0], rows).status_code == status

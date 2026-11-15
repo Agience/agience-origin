@@ -265,6 +265,31 @@ def revoke_job_grant(grant_id: str, db: Session = Depends(get_db),
     return {"grant_id": grant_id, "revoked": True, "receipt": receipt}
 
 
+def _check_new_person_grants(db: Session, value: str, operator: str) -> None:
+    """`platform.new_person_grants` names only collections Origin's own replica knows and the
+    operator made, each with actions within the ceiling (`NEW_PERSON_GRANT_CEILING`)."""
+    import json as _json
+    from origin.services import authority_ledger
+    try:
+        rows = _json.loads(value)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="a JSON list of {collection_id, actions}")
+    if not isinstance(rows, list) or not rows:
+        raise HTTPException(status_code=400, detail="a non-empty JSON list of {collection_id, actions}")
+    rc = authority_ledger.reach(db)
+    for r in rows:
+        cid, acts = (r or {}).get("collection_id"), (r or {}).get("actions")
+        if not isinstance(cid, str) or not isinstance(acts, list) or not acts:
+            raise HTTPException(status_code=400, detail="each entry is {collection_id, actions}")
+        if not set(acts) <= authority_ledger.NEW_PERSON_GRANT_CEILING:
+            raise HTTPException(status_code=400, detail="actions beyond read and invoke are not "
+                                "given to every new person")
+        made = rc.r.node(cid) or {}
+        if made.get("created_by") != operator:
+            raise HTTPException(status_code=409, detail=f"{cid} is not a collection Origin's "
+                                "replica knows the operator made")
+
+
 @oracle_router.put("/settings/{key}")
 def put_console_setting(key: str, body: dict = Body(...), db: Session = Depends(get_db),
                         auth: AuthContext = Depends(_require_operator)):
@@ -285,6 +310,8 @@ def put_console_setting(key: str, body: dict = Body(...), db: Session = Depends(
         if authority_ledger.collection_view(db, value) is None:
             raise HTTPException(status_code=409, detail="Origin's replica does not know this "
                                 "collection; pin only one its root or creation edge brought in")
+    if key.lower() == "platform.new_person_grants":
+        _check_new_person_grants(db, value, str(auth.user_id))
     platform_settings.set_many(db, [{"key": key, "value": value,
                                      "category": key.split(".")[0]}], updated_by=str(auth.user_id))
     logger.warning("oracle console setting changed: %s by %s", key, auth.user_id)
