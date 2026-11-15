@@ -2449,7 +2449,7 @@ def _decide_operator(rc: Reach, ctx: "Context", b: dict) -> Optional[str]:
 NEW_PERSON_GRANT_CEILING = frozenset({"read", "invoke"})
 
 
-def new_person_grants_policy(db: Optional[Session] = None) -> list:
+def new_person_grants_policy() -> list:
     """`platform.new_person_grants`: `[{"collection_id", "actions", "on"}]`, set by the operator.
     Each entry gives every person the named actions on that collection itself (`on: "itself"`: a
     seeded collection such as Start Here) or on every member made in it (`on: "members"`, the
@@ -2457,13 +2457,7 @@ def new_person_grants_policy(db: Optional[Session] = None) -> list:
     import json as _json
     from origin.services.platform_settings_service import settings as _ps
     try:
-        # Read from the table when a session is at hand, so a policy the operator set takes
-        # effect at once in every process, not at the next start (2026-11-15).
-        row = None
-        if db is not None:
-            from origin.db import platform_settings as _db_settings
-            row = _db_settings.get(db, "platform.new_person_grants")
-        raw = (row.value if row is not None and row.value else None) or _ps.get("platform.new_person_grants") or "[]"
+        raw = _ps.get("platform.new_person_grants") or "[]"
         rows = _json.loads(raw) if isinstance(raw, str) else raw
     except Exception:  # noqa: BLE001 — unset or malformed: no policy
         return []
@@ -2488,7 +2482,7 @@ def _new_person_grant(rc: Reach, operator: str, b: dict) -> Optional[str]:
     resource = str(b.get("resource_id"))
     parent = rc.origin_parent(resource)
     actions = frozenset(b.get("actions") or ())
-    for entry in new_person_grants_policy(getattr(rc.r, "db", None)):
+    for entry in new_person_grants_policy():
         named = resource if entry["on"] == "itself" else (str(parent[0]) if parent else None)
         if named != entry["collection_id"]:
             continue
@@ -2506,7 +2500,7 @@ def new_person_grant_bodies(db: Session, person_id: str) -> list:
     import uuid as _uuid
     rc = reach(db)
     out = []
-    for entry in new_person_grants_policy(db):
+    for entry in new_person_grants_policy():
         cid = entry["collection_id"]
         actions = sorted(entry["actions"] & NEW_PERSON_GRANT_CEILING)
         targets = [cid] if entry["on"] == "itself" else rc.r.origin_children(cid)

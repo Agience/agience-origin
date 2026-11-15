@@ -177,21 +177,3 @@ def test_both_forms_together(platform):
     with SessionLocal() as db:
         L.grant_new_person(db, alice, "t1")
     assert _grants(alice) == [(other, "read"), ("op-1", "invoke,read"), ("op-2", "invoke,read")]
-
-
-def test_a_policy_written_to_the_table_takes_effect_at_once(platform):
-    """Set outside this process's cache (a script on the node, or another worker): read from the
-    table where grants are decided, so it holds at once, not at the next start."""
-    import origin.services.authority_ledger as L
-    from origin.db import platform_settings as db_settings
-    from origin.db.session import SessionLocal
-    _c, coll, _other, policy = platform
-    policy["value"] = ""                                   # the cache knows nothing
-    with SessionLocal() as db:
-        db_settings.set_value(db, "platform.new_person_grants",
-                              value=json.dumps([{"collection_id": coll, "actions": ["read"]}]))
-        db.commit()
-    alice, _ = af.person("alice")
-    with SessionLocal() as db:
-        L.grant_new_person(db, alice, "t1")
-    assert _grants(alice) == [("op-1", "read"), ("op-2", "read")]
