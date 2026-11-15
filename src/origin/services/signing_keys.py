@@ -68,10 +68,11 @@ def _jwk(public_pem: bytes, kid: str) -> dict:
 
 def retired_key_lifetime() -> timedelta:
     """How long a retired key stays published: the longest life of any token it signed. An access
-    token's life, or a delegation's (ten minutes at most), whichever is longer, and a margin;
-    refresh tokens all end at a rollover, so they need none."""
+    token's life, a delegation's (ten minutes at most), or a chair note's (seven days at most),
+    whichever is longest, and a margin; refresh tokens all end at a rollover, so they need none."""
     from origin.services.auth_service import access_token_expires_in_seconds
-    return timedelta(seconds=max(access_token_expires_in_seconds(), 600)) + timedelta(minutes=5)
+    from origin.services.chair_notes import MAX_NOTE_LIFE
+    return max(timedelta(seconds=max(access_token_expires_in_seconds(), 600)), MAX_NOTE_LIFE)         + timedelta(minutes=5)
 
 
 def _retired_at_file(folder: Path, kid: str) -> Path:

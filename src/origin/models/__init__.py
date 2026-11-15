@@ -31,6 +31,7 @@ from origin.models.authority_ledger import (
     AuthorityRoot, AuthoritySigningKey, OperatorAlert, AuthorityJobGrant, AuthorityKey,
     InviteAddress,
 )
+from origin.models.chair_note import ChairNote, ChairRequest, ChairSpend
 
 __all__ = [
     "UseNonce",
@@ -71,4 +72,7 @@ __all__ = [
     "InviteAddress",
     "DelegationRecord",
     "SeedCredential",
+    "ChairRequest",
+    "ChairNote",
+    "ChairSpend",
 ]

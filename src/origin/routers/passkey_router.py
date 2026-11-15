@@ -240,7 +240,7 @@ async def complete_login(
     from origin.services import origin_session
     response = JSONResponse(LoginCompleteResponse(access_token=access_token,
                                                   refresh_token=refresh_token).model_dump())
-    origin_session.start(db, response, str(person.id))
+    origin_session.start(db, response, str(person.id), ["pop"])
     return response
 
 

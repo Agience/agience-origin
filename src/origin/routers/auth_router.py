@@ -1446,11 +1446,12 @@ async def authorize_local_otp_verify(body: _LocalOTPVerify, db: Session = Depend
     #
     # Writing it here is the natural place: a verified OTP is Origin establishing a local identity
     # for this person. Idempotent — a second sign-in finds the row and adds nothing.
-    return _complete_local_signin(db, body.oauth_state, auth_request, person)
+    return _complete_local_signin(db, body.oauth_state, auth_request, person, ["otp"])
 
 
 def _complete_local_signin(
-    db: Session, oauth_state: str, auth_request: dict, person: PersonModel
+    db: Session, oauth_state: str, auth_request: dict, person: PersonModel,
+    amr: Optional[list] = None,
 ) -> dict:
     """Write the local identity row and mint the authorization code. Both local legs end here.
 
@@ -1508,7 +1509,7 @@ def _complete_local_signin(
     from origin.services import origin_session
     response = JSONResponse({"redirect": _with_query(auth_request['redirect_uri'], params)})
     if _starts_origin_session(auth_request, db):
-        origin_session.start(db, response, str(person.id))
+        origin_session.start(db, response, str(person.id), amr)
     return response
 
 
@@ -1700,7 +1701,7 @@ async def authorize_local_password(
     if not is_person_allowed(None, person.email or ""):
         raise HTTPException(status_code=403, detail="User not allowed")
 
-    return _complete_local_signin(db, body.oauth_state, auth_request, person)
+    return _complete_local_signin(db, body.oauth_state, auth_request, person, ["pwd"])
 
 
 class _LocalRegister(BaseModel):
@@ -1818,7 +1819,7 @@ async def authorize_local_register(
         {"sub": str(person.id), "email": person.email, "name": person.name},
         "password_register",
     )
-    return _complete_local_signin(db, body.oauth_state, auth_request, person)
+    return _complete_local_signin(db, body.oauth_state, auth_request, person, ["pwd"])
 
 
 def federation_kwargs(auth_request: dict) -> dict:
@@ -2271,7 +2272,7 @@ async def auth_callback(request: Request):
             known = person_service.get_user_by_oidc_identity(sdb, provider, str(user_info["sub"]))
             if _starts_origin_session(auth_request, sdb):
                 origin_session.start(sdb, response,
-                                     str(known.id) if known is not None else None)
+                                     str(known.id) if known is not None else None, ["fed"])
         return response
 
     except HTTPException:
@@ -3275,7 +3276,7 @@ async def password_login(
         "expires_in": access_token_expires_in_seconds(),
         "refresh_token": refresh_token,
         "scope": "read write",
-    })
+    }, ["pwd"])
 
 
 @auth_router.get("/signup-form", dependencies=None)
@@ -3368,7 +3369,7 @@ async def password_register(
         "expires_in": access_token_expires_in_seconds(),
         "refresh_token": refresh_token,
         "scope": "read write",
-    })
+    }, ["pwd"])
 
 
 # ---------------------------------------------------------------------------
@@ -3577,7 +3578,7 @@ async def email_verify_confirm(
         "expires_in": access_token_expires_in_seconds(),
         "refresh_token": refresh_token,
         "scope": "read write",
-    })
+    }, ["email"])
 
 
 # ---------------------------------------------------------------------------
@@ -4056,7 +4057,8 @@ def on_origin_s_own_page(request: Request) -> bool:
     return parts is not None and parts in _own_origins()
 
 
-def _signed_in_on_page(request: Request, db: Session, person_id: str, body: dict) -> JSONResponse:
+def _signed_in_on_page(request: Request, db: Session, person_id: str, body: dict,
+                       amr: Optional[list] = None) -> JSONResponse:
     """A sign-in's answer, which on Origin's own page also starts the person's Origin session, as
     `/auth/authorize`'s local form does (`_complete_local_signin`). A sign-in posted from any other
     page, the web app's included, starts none: credentials are typed only on Origin's page, and the
@@ -4065,7 +4067,7 @@ def _signed_in_on_page(request: Request, db: Session, person_id: str, body: dict
 
     response = JSONResponse(body)
     if on_origin_s_own_page(request):
-        origin_session.start(db, response, person_id)
+        origin_session.start(db, response, person_id, amr)
     return response
 
 

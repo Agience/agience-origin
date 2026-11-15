@@ -99,6 +99,16 @@ PUBLIC = {
     ("GET", "/passkey"): _SHELL,
     ("GET", "/job-grant"): _SHELL,
     ("GET", "/key"): _SHELL,
+    ("GET", "/approvals"): _SHELL,
+    # Phone approvals: the chair's page calls answer only the chair's Origin session from Origin's
+    # own page, with a form token bound to that session; approving needs a passkey or code sign-in.
+    ("GET", "/notes/page/state"): "the chair's approvals, read in the chair's Origin session on Origin's page",
+    ("GET", "/notes/page/requests/{req_id}"): "one request, read in the chair's Origin session on Origin's page",
+    ("POST", "/notes/page/decide"): "the chair's decision in their Origin session, bound by its form token",
+    ("POST", "/notes/page/revoke"): "a note revoked in the chair's Origin session, bound by its form token",
+    ("POST", "/notes/page/revoke-all"): "every unspent note revoked in the chair's Origin session, by form token",
+    ("POST", "/notes/page/sign-out-everywhere"): "the chair's sign-ins ended in their Origin session, by form token",
+    ("POST", "/notes/spend"): "the note is the credential: signed by Origin, spent once per action it covers",
     ("GET", "/auth/signup-form"): "the sign-up form's time-stamped token (FR-027); it grants nothing "
                                   "and only lets a later sign-up show the form was really filled in",
 
