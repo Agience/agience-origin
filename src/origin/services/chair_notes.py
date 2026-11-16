@@ -121,6 +121,9 @@ def _reaches(db: Session, person_id: str, resource_id: Optional[str], action: st
     return authority_ledger.reach(db).reaches(str(person_id), str(resource_id), action)
 
 
+APPROVER_LOST_UPDATE = "the approver no longer holds update on the request's resource"
+
+
 def can_approve(db: Session, person_id: str, req: ChairRequest) -> bool:
     """Does `person_id` hold `update` on the request's resource? Nothing else decides it."""
     return _reaches(db, person_id, req.resource_id, APPROVE_ACTION)
@@ -348,6 +351,20 @@ def approve(db: Session, req: Optional[ChairRequest], *, person_id: str, digest:
     return req
 
 
+def withdraw(db: Session, req: Optional[ChairRequest], *, person_id: str) -> ChairRequest:
+    """The filer takes back a request nobody has decided yet."""
+    if req is None:
+        raise NoteRefused(404, "no such request")
+    if person_id != req.filed_by_account:
+        raise NoteRefused(403, "only the one who filed a request withdraws it")
+    if not is_open(req):
+        raise NoteRefused(409, "this request is no longer open")
+    req.state = "withdrawn"
+    req.decided_time, req.decided_by = _now(), person_id
+    db.commit()
+    return req
+
+
 def decline(db: Session, req: Optional[ChairRequest], *, person_id: str, digest: str,
             reason: str = "") -> ChairRequest:
     req = _decidable(db, req, person_id, digest)
@@ -387,7 +404,9 @@ def covers(claims: dict, action: str) -> bool:
 
 
 def spend(db: Session, token: str, action: str) -> dict:
-    """Spend the note on `action` once. Answers the receipt, or raises with 400/409/410/422."""
+    """Spend the note on `action` once. Answers the receipt, or raises with 400/403/409/410/422.
+
+    The approver must still hold update on the request's resource when the note is spent."""
     claims = _verify(token)
     note = db.get(ChairNote, claims["jti"])
     if note is None:
@@ -396,6 +415,9 @@ def spend(db: Session, token: str, action: str) -> dict:
     if note.revoked_time is not None or _aware(note.expires_time) <= now \
             or claims.get("exp", 0) <= now.timestamp():
         raise NoteRefused(410, "revoked" if note.revoked_time is not None else "expired")
+    req = db.get(ChairRequest, note.req)
+    if req is None or not can_approve(db, note.person_id, req):
+        raise NoteRefused(403, APPROVER_LOST_UPDATE)
     if not isinstance(action, str) or not covers(claims, action):
         raise NoteRefused(422, "action not covered by the note")
     row = ChairSpend(jti=note.jti, action=action, id=str(uuid.uuid4()), req=note.req,

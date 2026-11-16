@@ -120,33 +120,13 @@
     renderBottom();
   }
 
+  /* Revoking every note and signing out everywhere live on the account page, away from Approve. */
   function renderBottom() {
     const box = $("#bottom");
     box.textContent = "";
-    const live = (state.notes || []).length;
-    const revokeAll = el("button", "secondary danger",
-                         "Revoke all unspent" + (live ? " (" + live + ")" : ""));
-    revokeAll.type = "button";
-    revokeAll.disabled = !live;
-    revokeAll.addEventListener("click", async function () {
-      if (!confirm("Revoke every unspent note? Agents holding one can no longer act on it.")) return;
-      const r = await call("POST", "/notes/page/revoke-all", { form: state.revoke_all_form });
-      if (!r.ok) { show(r.detail || "Revoking failed.", "err"); return; }
-      show("Revoked " + r.data.revoked + " note" + (r.data.revoked === 1 ? "" : "s") + ".", "ok");
-      await load();
-    });
-    const signOut = el("button", "secondary danger", "Sign out everywhere");
-    signOut.type = "button";
-    signOut.addEventListener("click", async function () {
-      if (!confirm("Sign out of every device and end every job grant? Notes already approved stay " +
-                   "until you revoke them.")) return;
-      const r = await call("POST", "/notes/page/sign-out-everywhere", { form: state.sign_out_form });
-      if (!r.ok) { show(r.detail || "Signing out failed.", "err"); return; }
-      signIn("Signed out everywhere. Sign in again to see what is waiting for you.");
-      show("Signed out everywhere.", "ok");
-    });
-    box.appendChild(revokeAll);
-    box.appendChild(signOut);
+    const a = el("a", "link", "Account settings");
+    a.href = "/account";
+    box.appendChild(a);
     hide("#bottom", false);
   }
 
@@ -276,6 +256,8 @@
       box.appendChild(el("p", "ok", "Answered: " + req.answer + "."));
     } else if (req.state === "declined") {
       box.appendChild(el("p", "muted", "Declined" + (req.reason ? ": " + req.reason : "") + "."));
+    } else if (req.state === "withdrawn") {
+      box.appendChild(el("p", "muted", "Withdrawn by the one who filed it."));
     } else if (req.state === "expired") {
       box.appendChild(el("p", "muted", "This " + noun(req) + " expired " + when(req.expires) + "."));
     }
@@ -285,7 +267,9 @@
   function renderDecision(box, req) {
     box.appendChild(el("div", "spacer"));
     if (!req.can_decide) {
-      box.appendChild(el("p", "banner", CANNOT));
+      if (req.is_filer) { renderFilerOwn(box, req); return; }
+      box.appendChild(el("p", "refusal", CANNOT));
+      refusalActions(box, req.id);
       return;
     }
     if (req.kind === "question") {
@@ -354,22 +338,14 @@
     back.type = "button";
     back.addEventListener("click", function () { hide("#banner", true); load(); });
     box.appendChild(back);
-    hide("#list", true); hide("#detail", false);
-    renderBottom();
+    hide("#list", true); hide("#detail", false); hide("#bottom", true);
     window.scrollTo(0, 0);
   }
 
-  /* A request the viewer cannot see: the refusal names nothing of it, and offers a way back and a
-   * way to ask for access. Asking copies the request's link to hand to the workspace's owner. */
-  function renderRefused(id, data) {
-    current = null;
-    const box = $("#detail");
-    box.textContent = "";
-    $("#heading").textContent = "Approvals";
-    hide("#banner", true); show("");
-    box.appendChild(el("p", "refusal", CANNOT));
+  /* The way out of a refusal: back to Agience, and a link to hand to the workspace's owner. */
+  function refusalActions(box, id, appUri) {
     const back = el("a", "primary", "Back to Agience");
-    back.href = (data && data.app_uri) || (state && state.app_uri) || "/";
+    back.href = appUri || (state && state.app_uri) || "/";
     box.appendChild(back);
     box.appendChild(el("div", "spacer"));
     const ask = el("button", "secondary", "Ask for access");
@@ -381,7 +357,34 @@
            "access: " + link, "ok");
     });
     box.appendChild(ask);
+  }
+
+  /* A request the viewer cannot see: the refusal names nothing of it. */
+  function renderRefused(id, data) {
+    current = null;
+    const box = $("#detail");
+    box.textContent = "";
+    $("#heading").textContent = "Approvals";
+    hide("#banner", true); show("");
+    box.appendChild(el("p", "refusal", CANNOT));
+    refusalActions(box, id, data && data.app_uri);
     hide("#list", true); hide("#detail", false); hide("#bottom", true);
+  }
+
+  /* The filer's own open request: someone else approves it, and the filer may take it back. */
+  function renderFilerOwn(box, req) {
+    box.appendChild(el("p", "refusal", "You filed this " + noun(req) + ", so someone else approves it."));
+    if (!req.withdraw_form) return;
+    const w = el("button", "secondary danger", "Withdraw");
+    w.type = "button";
+    w.addEventListener("click", async function () {
+      if (!confirm("Withdraw this " + noun(req) + "? Nobody can approve it after that.")) return;
+      const r = await call("POST", "/notes/page/withdraw", { req: req.id, form: req.withdraw_form });
+      if (!r.ok) { show(r.detail || "Withdrawing failed.", "err"); return; }
+      show("Withdrawn.", "ok");
+      renderRequest(r.data);
+    });
+    box.appendChild(w);
   }
 
   async function openRequest(id, keepMsg, banner) {

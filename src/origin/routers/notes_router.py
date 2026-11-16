@@ -1,14 +1,15 @@
-"""Approval requests: an account files a request against a workspace or collection, an admin of it
-decides on Origin's page, and the agent spends the note it gets.
+"""Approval requests: an account files a request against a workspace or collection, whoever holds
+update on it decides on Origin's page, and the agent spends the note it gets.
 
 - `POST /notes/requests` and `GET /notes/requests/{id}`: any signed-in account (a person's or an
   agent's own, FR-028) files a request with a bearer access token against a resource it can read,
   and reads back any request it can see.
 - `/notes/page/*`: the approvals page at `/approvals`. These routes take no bearer token: only an
   Origin session, sent from Origin's own page, with a per-form token bound to that session. Whoever
-  holds update on the request's resource decides it; anyone who can read the resource sees it.
-- `POST /notes/spend`: whoever holds a note spends it once per action. The note is the only
-  credential the route reads.
+  holds update on the request's resource decides it; anyone who can read the resource sees it; the
+  filer withdraws it while it is open.
+- `POST /notes/spend`: whoever holds a note spends it once per action, while the note's approver
+  still holds update on the request's resource. The note is the only credential the route reads.
 """
 from __future__ import annotations
 
@@ -105,11 +106,14 @@ def _check_form(request: Request, row, subject: str, token: Optional[str]) -> No
 
 
 def _page_view(db: Session, row, req) -> dict:
-    """A request as the page shows it: whether the viewer can decide it, its form, and a revoke form
-    for an unspent note."""
+    """A request as the page shows it: whether the viewer can decide it, its form, a withdraw form
+    for its filer while it is open, and a revoke form for an unspent note."""
     v = notes.request_view(db, req)
     v["can_decide"] = notes.can_approve(db, row.person_id, req)
     v["form"] = _form_token(row.id_sha256, req.id)
+    v["is_filer"] = row.person_id == req.filed_by_account
+    if v["is_filer"] and v["state"] == "pending":
+        v["withdraw_form"] = _form_token(row.id_sha256, "withdraw:" + req.id)
     if v["can_decide"] and v.get("note_jti") and not v.get("revoked") and not v.get("spent"):
         v["revoke_form"] = _form_token(row.id_sha256, "revoke:" + v["note_jti"])
     return v
@@ -166,6 +170,22 @@ def decide(body: Decision, request: Request, db: Session = Depends(get_db)):
                                 reason=body.reason or "")
         else:
             raise HTTPException(status_code=422, detail="approve or decline")
+    except notes.NoteRefused as e:
+        return _refused(e)
+    return JSONResponse(_page_view(db, row, req), headers={"Cache-Control": "no-store"})
+
+
+class Withdraw(BaseModel):
+    req: str
+    form: str
+
+
+@notes_router.post("/page/withdraw")
+def withdraw(body: Withdraw, request: Request, db: Session = Depends(get_db)):
+    row = _session(request, db)
+    _check_form(request, row, "withdraw:" + body.req, body.form)
+    try:
+        req = notes.withdraw(db, notes.get_request(db, body.req), person_id=row.person_id)
     except notes.NoteRefused as e:
         return _refused(e)
     return JSONResponse(_page_view(db, row, req), headers={"Cache-Control": "no-store"})

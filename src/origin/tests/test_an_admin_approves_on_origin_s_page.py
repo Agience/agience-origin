@@ -6,9 +6,11 @@ page, the agent spends the note once.
   in their Origin session; a reader sees the request and cannot decide it; anyone else is told so
   and shown nothing of it. Nobody is named: approvers come from the ordinary grants.
 - The level and the expiry are the filer's data.
+- The filer withdraws an open request; nobody else does.
 - A request that changed after the page opened it answers 412 and mints nothing.
 - A question past its expiry takes its default.
-- A note is spent once per action; a bearer access token is not a note.
+- A note is spent once per action, and only while its approver still holds update on the
+  resource; a bearer access token is not a note.
 - An Origin session ends after 12 hours unused, and 7 days after its sign-in.
 """
 from __future__ import annotations
@@ -443,3 +445,48 @@ def test_nobody_is_named_in_the_settings():
     assert not hasattr(config, "CHAIR_EMAIL")
     for gone in ("chair_email", "chair_person_id", "LEVELS", "_OUTWARD_KINDS", "next_cut"):
         assert not hasattr(chair_notes, gone)
+
+
+def test_a_note_is_unspendable_once_its_approver_loses_update(custody_client, chair, agent):
+    from origin.services.chair_notes import APPROVER_LOST_UPDATE
+    c = custody_client
+    bea = af.person("Bea", email="bea@team.test")
+    _share(c, chair, "g-W-bea", bea, ("read", "update"))
+    filed = _release(c, agent)
+    _session(c, bea[0])
+    done = _decide(c, _open(c, filed["id"])).json()
+    af.ok(af.session_submit(c, chair[0], af.grant("g-W-bea", bea[0], "W", ("read", "update"),
+                                                  state="revoked")))
+    spent = c.post("/notes/spend", json={"note": done["note"], "action": filed["digest"]})
+    assert spent.status_code == 403 and spent.json()["detail"] == APPROVER_LOST_UPDATE
+
+
+def test_the_filer_withdraws_an_open_request_and_nobody_else_does(custody_client, chair, agent):
+    from origin.db.session import SessionLocal
+    from origin.services import chair_notes as notes
+    c = custody_client
+    filed = _release(c, agent)
+    _session(c, chair[0])
+    chair_view = _open(c, filed["id"])
+    assert chair_view["is_filer"] is False and "withdraw_form" not in chair_view
+    with SessionLocal() as db:
+        with pytest.raises(notes.NoteRefused) as no:
+            notes.withdraw(db, notes.get_request(db, filed["id"]), person_id=chair[0])
+    assert no.value.status == 403
+    _session(c, agent[0])
+    mine = _open(c, filed["id"])
+    assert mine["is_filer"] is True and mine["can_decide"] is False and mine["withdraw_form"]
+    _session(c, chair[0])
+    forged = c.post("/notes/page/withdraw", json={"req": filed["id"], "form": mine["withdraw_form"]},
+                    headers=_page_hdr())
+    assert forged.status_code == 403, "a form is bound to the session it was issued in"
+    _session(c, agent[0])
+    mine = _open(c, filed["id"])
+    r = c.post("/notes/page/withdraw", json={"req": filed["id"], "form": mine["withdraw_form"]},
+               headers=_page_hdr())
+    assert r.status_code == 200 and r.json()["state"] == "withdrawn"
+    assert "withdraw_form" not in r.json()
+    _session(c, chair[0])
+    assert c.get("/notes/page/state", headers=_page_hdr()).json()["pending"] == []
+    late = _decide(c, _open(c, filed["id"]))
+    assert late.status_code == 409

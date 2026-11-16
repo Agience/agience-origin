@@ -105,10 +105,11 @@ PUBLIC = {
     ("GET", "/key"): _SHELL,
     ("GET", "/approvals"): _SHELL,
     # Approvals: the page's calls answer only an Origin session from Origin's own page, with a form
-    # token bound to that session; admin on a request's resource decides it.
+    # token bound to that session; update on a request's resource decides it.
     ("GET", "/notes/page/state"): "the viewer's approvals, read in their Origin session on Origin's page",
     ("GET", "/notes/page/requests/{req_id}"): "one request the viewer can see, in their Origin session on Origin's page",
-    ("POST", "/notes/page/decide"): "an admin's decision in their Origin session, bound by its form token",
+    ("POST", "/notes/page/decide"): "a decision by whoever holds update, in their Origin session, bound by its form token",
+    ("POST", "/notes/page/withdraw"): "the filer's own open request withdrawn in their Origin session, by form token",
     ("POST", "/notes/page/revoke"): "a note revoked in the viewer's Origin session, bound by its form token",
     ("POST", "/notes/page/revoke-all"): "every unspent note the viewer approved revoked, by form token",
     ("POST", "/notes/page/sign-out-everywhere"): "the viewer's sign-ins ended in their Origin session, by form token",

@@ -1,6 +1,10 @@
 <!doctype html><html lang="en"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Account · Agience</title><link rel="icon" href="/web/favicon.png"><link rel="stylesheet" href="/web/app.css">
+<style>
+  #sessionActions { margin-top: 28px; padding-top: 12px; border-top: 1px solid #e5e7eb; }
+  .link.danger { color: #b91c1c; min-height: 44px; }
+</style>
 </head><body>
 <div class="bg"><div class="grad"></div><div class="blob b1"></div><div class="blob b2"></div></div>
 <div class="card">
@@ -12,6 +16,10 @@
   <a class="primary hidden" id="continue" href="/">Continue to Agience</a>
   <div class="row"><button class="link" type="button" id="changePw">Change password</button></div>
   <div class="row"><button class="link" id="signout">Sign out</button></div>
+  <div id="sessionActions" class="hidden">
+    <div class="row"><button class="link danger" type="button" id="revokeAll">Revoke all unspent approvals</button></div>
+    <div class="row"><button class="link danger" type="button" id="signOutAll">Sign out everywhere</button></div>
+  </div>
   <div class="msg" id="msg"></div>
 </div>
 

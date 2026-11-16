@@ -1,4 +1,3 @@
-if (!isAuthed()) location.replace("/");
 const $=(s)=>document.querySelector(s), msg=$("#msg");
 function show(t,cls){ msg.className="msg "+(cls||"muted"); msg.textContent=t||""; }
 
@@ -38,3 +37,44 @@ $("#changePw").addEventListener("click", async ()=>{
 });
 
 $("#signout").addEventListener("click", ()=>{ clearToken(); location.href="/logout"; });
+
+// Actions that need the Origin session (the one the approvals page signs in): shown when it
+// answers. With neither a bearer token nor a session, there is nothing to show here.
+async function sessionCall(method, path, body) {
+  try {
+    const r = await fetch(path, { method: method, credentials: "same-origin", referrerPolicy: "same-origin",
+                                  headers: body ? { "Content-Type": "application/json" } : {},
+                                  body: body ? JSON.stringify(body) : undefined, cache: "no-store" });
+    let data = {}; try { data = await r.json(); } catch (e) { /* empty body */ }
+    return { ok: r.ok, status: r.status, data: data, detail: (data && data.detail) || null };
+  } catch (e) { return { ok: false, status: 0, data: {}, detail: "Network error" }; }
+}
+(async function(){
+  const authed = isAuthed();
+  if (!authed) { $("#details").classList.add("hidden"); $("#changePw").parentNode.classList.add("hidden"); }
+  const s = await sessionCall("GET", "/notes/page/state");
+  if (!s.ok) { if (!authed) location.replace("/"); return; }
+  let state = s.data;
+  const label = function(){
+    const n = (state.notes || []).length, b = $("#revokeAll");
+    b.textContent = "Revoke all unspent approvals" + (n ? " (" + n + ")" : "");
+    b.disabled = !n;
+  };
+  label();
+  $("#sessionActions").classList.remove("hidden");
+  $("#revokeAll").addEventListener("click", async ()=>{
+    if (!confirm("Revoke every unspent approval? Agents holding one can no longer act on it.")) return;
+    const r = await sessionCall("POST", "/notes/page/revoke-all", { form: state.revoke_all_form });
+    if (!r.ok) { show(r.detail || "Revoking failed.", "err"); return; }
+    show("Revoked " + r.data.revoked + " approval" + (r.data.revoked === 1 ? "" : "s") + ".", "ok");
+    const again = await sessionCall("GET", "/notes/page/state");
+    if (again.ok) { state = again.data; label(); }
+  });
+  $("#signOutAll").addEventListener("click", async ()=>{
+    if (!confirm("Sign out of every device and end every job grant? Approvals already given stay " +
+                 "until you revoke them.")) return;
+    const r = await sessionCall("POST", "/notes/page/sign-out-everywhere", { form: state.sign_out_form });
+    if (!r.ok) { show(r.detail || "Signing out failed.", "err"); return; }
+    clearToken(); location.href = "/logout";
+  });
+})();

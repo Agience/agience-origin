@@ -41,7 +41,8 @@ class ChairRequest(Base):
     filed_by_account = Column(String(64), nullable=False, index=True)
     created_time = Column(DateTime(timezone=True), nullable=False, default=_utcnow)
     expires_time = Column(DateTime(timezone=True), nullable=False)
-    #: `pending`, `approved`, `declined` or `answered` (a question's option that needs no note).
+    #: `pending`, `approved`, `declined`, `answered` (a question's option that needs no note) or
+    #: `withdrawn` (by its filer, before anyone decided it).
     state = Column(String(16), nullable=False, default="pending", index=True)
     decided_time = Column(DateTime(timezone=True), nullable=True)
     decided_by = Column(String(64), nullable=True)
