@@ -87,6 +87,10 @@ PUBLIC = {
                                                                "session, by the ledger's claim rule",
     ("POST", "/auth/me/authority/invites/{invite_id}/decline"): "the invite's target retires it in their "
                                                                 "Origin session",
+    ("POST", "/auth/me/authority/new-accounts-receive/backfill"): "the dry run, in the Origin session of "
+        "one who reaches invoke on New accounts receive; it files an approval request and grants nothing",
+    ("POST", "/auth/me/authority/new-accounts-receive/backfill/{req_id}/run"): "the run, in the Origin "
+        "session of the one the approved note is addressed to; each grant spends the note once",
     ("GET", "/auth/not-before"): "the signed not-before list peers enforce: person ids and times only, "
                                  "public like the JWKS (review 11, M2)",
     ("GET", "/"): _SHELL,
