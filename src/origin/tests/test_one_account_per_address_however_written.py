@@ -1,10 +1,9 @@
 """One account per address, however the address is written.
 
-2026-11-09: an account was created for `john@ikailo.com.` while `john@ikailo.com` already had one.
-Mail to both reaches one mailbox, but the two strings differ, so the unique column let both in.
-Every address Origin stores or looks up now goes through one canonical form
-(`origin.services.email_address`): stripped, lower-cased, the domain without a trailing dot and in
-its IDNA ASCII form. Where a person types an address to create an account, anything else is
+`person@example.com.` and `person@example.com` reach one mailbox, but the two strings differ, so a
+unique column alone would let both in. Every address Origin stores or looks up goes through one
+canonical form (`origin.services.email_address`):
+stripped, lower-cased, the domain without a trailing dot and in its IDNA ASCII form. Where a person types an address to create an account, anything else is
 refused, not rewritten; where an address is looked up, it is canonicalised first.
 """
 
@@ -63,10 +62,10 @@ def _register(client, email: str, username: str):
 # -- registration ----------------------------------------------------------------------------------
 
 def test_a_trailing_dot_address_is_refused_when_the_dotless_one_has_an_account(db_client):
-    _seed("john@ikailo.com")
-    r = _register(db_client, "john@ikailo.com.", "john-dot")
+    _seed("person@example.com")
+    r = _register(db_client, "person@example.com.", "person-dot")
     assert r.status_code == 400, r.text
-    assert _stored_emails() == ["john@ikailo.com"]
+    assert _stored_emails() == ["person@example.com"]
 
 
 def test_a_trailing_dot_address_is_refused_when_no_one_holds_the_dotless_one(db_client):
@@ -185,24 +184,24 @@ def test_a_provider_s_trailing_dot_address_is_not_a_second_account(db_client):
 # -- the rows stored before -----------------------------------------------------------------------
 
 def test_a_stored_trailing_dot_row_is_never_what_the_canonical_address_finds(db_client):
-    real = _seed("john@ikailo.com")
-    _seed("john@ikailo.com.", username="john-dot")
+    real = _seed("person@example.com")
+    _seed("person@example.com.", username="person-dot")
     from origin.db import persons as db_persons
     from origin.db.session import SessionLocal
 
     with SessionLocal() as db:
-        assert str(db_persons.get_by_email(db, "john@ikailo.com").id) == real
-        assert str(db_persons.get_by_email(db, "john@ikailo.com.").id) == real
+        assert str(db_persons.get_by_email(db, "person@example.com").id) == real
+        assert str(db_persons.get_by_email(db, "person@example.com.").id) == real
 
 
 def test_the_report_lists_a_stored_trailing_dot_address(db_client):
-    real = _seed("john@ikailo.com")
-    dotted = _seed("john@ikailo.com.", username="john-dot")
+    real = _seed("person@example.com")
+    dotted = _seed("person@example.com.", username="person-dot")
     from origin import admin
 
     said: list[str] = []
     assert admin.run(["person", "noncanonical"], out=said.append) == 0
     text = "\n".join(said)
-    assert dotted in text and "email='john@ikailo.com.'" in text
+    assert dotted in text and "email='person@example.com.'" in text
     assert f"canonical_holder={real}" in text
     assert real not in text.replace(f"canonical_holder={real}", "")
