@@ -290,7 +290,7 @@ def request_view(db: Session, req: ChairRequest) -> dict:
 
 # --- decisions ------------------------------------------------------------------------------------
 
-CANNOT_APPROVE = "You can't approve this request. Approving needs update access to it."
+CANNOT_APPROVE = "You can't approve this request. Approving needs Editor access to it."
 
 
 def _decidable(db: Session, req: Optional[ChairRequest], person_id: str,

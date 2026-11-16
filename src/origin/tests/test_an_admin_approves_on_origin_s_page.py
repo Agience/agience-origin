@@ -430,7 +430,7 @@ def test_the_page_runs_no_inline_script_and_sends_its_referer():
     assert "<script>" not in html and 'src="/web/approvals-page.js"' in html
     assert 'referrerPolicy: "same-origin"' in js and 'credentials: "same-origin"' in js
     assert "Nothing waiting for you" in js and "Revoke this note" in js
-    assert "You can't approve this request. Approving needs update access to it." in js
+    assert "You can't approve this request. Approving needs Editor access to it." in js
     assert "Back to Agience" in js and "Ask for access" in js
     assert "innerHTML" not in js
     for gone in ("Governance", "next_cut", "Phone approval"):
