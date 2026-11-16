@@ -1,11 +1,13 @@
-"""Phone approvals: an agent files a request, the chair decides on Origin's page, the agent spends
-the note once.
+"""Approvals: an account files a request against a workspace, an admin of it decides on Origin's
+page, the agent spends the note once.
 
 - A request's digest is Origin's own, of the exact fields; the filer's is kept beside it.
-- The page answers only the chair's Origin session, sent from Origin's own page; approving needs a
-  passkey or one-time-code sign-in.
+- A request names a resource the filer can read. Whoever holds admin on it approves with one click
+  in their Origin session; a reader sees the request and cannot decide it; anyone else is told so
+  and shown nothing of it. Nobody is named: approvers come from the ordinary grants.
+- The level and the expiry are the filer's data.
 - A request that changed after the page opened it answers 412 and mints nothing.
-- Governance is shown and only declined. A question past its expiry takes its default.
+- A question past its expiry takes its default.
 - A note is spent once per action; a bearer access token is not a note.
 - An Origin session ends after 12 hours unused, and 7 days after its sign-in.
 """
@@ -20,9 +22,14 @@ from origin.tests import test_a_key_share_is_released_only_to_mantle as _shares
 
 custody_client = _shares.custody_client
 
+ALL = ["create", "read", "update", "delete", "evict", "add", "share", "admin"]
 HEADS = {"agience-origin": "a" * 40, "agience-mantle": "b" * 40}
 AUD = ["agience-deployment"]
 RELEASE = {"release": "2026.11.15", "heads": HEADS}
+
+
+def _soon(hours=6):
+    return (datetime.now(timezone.utc) + timedelta(hours=hours)).isoformat()
 
 
 def _page_hdr():
@@ -41,19 +48,30 @@ def _session(c, pid, amr=("pop",)):
     return raw
 
 
+def _share(c, owner, gid, who, actions):
+    af.ok(af.session_submit(c, owner[0], af.grant(gid, who[0], "W", actions)))
+
+
 @pytest.fixture
-def chair(custody_client, monkeypatch):
-    who = af.person("chair", email="chair@team.test")
-    monkeypatch.setenv("CHAIR_EMAIL", "Chair@team.test")
+def chair(custody_client):
+    """The owner of workspace W: admin on it through the ordinary grants, and nothing else."""
+    who = af.person("Ann", email="ann@team.test")
+    af.ok(af.submit(custody_client, who[1], af.root("W"), batch="own", via_session=False))
+    af.ok(af.submit(custody_client, who[1], af.grant("g-W-own", who[0], "W", ALL), batch="own",
+                    via_session=False))
     return who
 
 
 @pytest.fixture
-def agent(custody_client):
-    return af.person("Deployment", email="deploy@team.test")
+def agent(custody_client, chair):
+    """The agent's own account, which can read W."""
+    who = af.person("Deployment", email="deploy@team.test")
+    _share(custody_client, chair, "g-W-agent", who, ("read",))
+    return who
 
 
 def _file(c, agent, body):
+    body = {"resource": "W", "expires": _soon(), **body}
     return c.post("/notes/requests", json=body, headers={"Authorization": f"Bearer {agent[1]}"})
 
 
@@ -89,28 +107,49 @@ def test_the_digest_is_origin_s_of_the_exact_fields(custody_client, chair, agent
                                           "release": "2026.11.15"}), "key order is not content"
     assert a != action_digest("release", {**RELEASE, "release": "2026.11.16"})
     filed = _release(custody_client, agent)
-    assert filed["digest"] == a and filed["level"] == "Outward"
+    assert filed["digest"] == a and filed["level"] == "" and filed["resource"] == "W"
 
 
-def test_the_next_cut_is_21_00_toronto():
-    from origin.services.chair_notes import next_cut
-    # 15 November 2026 is EST (UTC-5): 21:00 is 02:00 UTC the next day.
-    assert next_cut(datetime(2026, 11, 15, 18, 0, tzinfo=timezone.utc)) == \
-        datetime(2026, 11, 16, 2, 0, tzinfo=timezone.utc)
-    assert next_cut(datetime(2026, 11, 16, 3, 0, tzinfo=timezone.utc)) == \
-        datetime(2026, 11, 17, 2, 0, tzinfo=timezone.utc)
-    # 15 July is EDT (UTC-4).
-    assert next_cut(datetime(2026, 7, 15, 12, 0, tzinfo=timezone.utc)) == \
-        datetime(2026, 7, 16, 1, 0, tzinfo=timezone.utc)
+def test_a_train_s_digest_is_unchanged():
+    """A train request filed as kind "train" with its name in the fields digests as before."""
+    import hashlib
+    import json
+    from origin.services.chair_notes import action_digest, steps_digest
+    steps = [action_digest("release", RELEASE), action_digest("release", {**RELEASE, "release": "x"})]
+    old = {"kind": "train", "train": "2026-11-15", "actions": steps}
+    want = "sha256:" + hashlib.sha256(json.dumps(old, sort_keys=True, separators=(",", ":"),
+                                                 ensure_ascii=False).encode()).hexdigest()
+    assert steps_digest("train", {"train": "2026-11-15"}, steps) == want
 
 
-def test_the_page_answers_only_the_chair_s_session_on_origin_s_page(custody_client, chair, agent):
+def test_level_and_expiry_are_the_filer_s_data(custody_client, chair, agent):
+    c = custody_client
+    when = _soon(3)
+    r = _file(c, agent, {"kind": "deploy", "fields": {"x": 1}, "aud": AUD, "expires": when,
+                         "level": "Outward"})
+    assert r.status_code == 201 and r.json()["level"] == "Outward"
+    assert datetime.fromisoformat(r.json()["expires"]) == datetime.fromisoformat(when)
+    for bad in (None, "tomorrow", (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat(),
+                (datetime.now(timezone.utc) + timedelta(days=8)).isoformat()):
+        r = _file(c, agent, {"kind": "deploy", "fields": {"x": 1}, "aud": AUD, "expires": bad})
+        assert r.status_code == 422, (bad, r.text)
+
+
+def test_a_request_names_a_resource_the_filer_can_read(custody_client, chair, agent):
+    c = custody_client
+    stranger = af.person("Sam", email="sam@team.test")
+    for who, resource in ((agent, None), (agent, "elsewhere"), (stranger, "W")):
+        body = {"kind": "deploy", "fields": {"x": 1}, "aud": AUD, "resource": resource}
+        r = _file(c, who, body)
+        assert r.status_code == 422, r.text
+        assert r.json()["detail"] == "resource names a workspace or collection you can read"
+
+
+def test_the_page_answers_only_a_session_on_origin_s_page(custody_client, chair, agent):
     c = custody_client
     filed = _release(c, agent)
     c.cookies.clear()
     assert c.get("/notes/page/state", headers=_page_hdr()).status_code == 401
-    _session(c, agent[0])
-    assert c.get("/notes/page/state", headers=_page_hdr()).status_code == 403
     _session(c, chair[0])
     assert c.get("/notes/page/state").status_code == 403, "no Origin or Referer: not the page"
     assert c.get("/notes/page/state", headers={"Origin": "https://evil.test"}).status_code == 403
@@ -122,17 +161,55 @@ def test_the_page_answers_only_the_chair_s_session_on_origin_s_page(custody_clie
                                                "Authorization": f"Bearer {chair[1]}"}).status_code == 401
 
 
-def test_approving_needs_a_passkey_sign_in(custody_client, chair, agent):
+def test_an_admin_approves_with_one_click_and_no_passkey(custody_client, chair, agent):
     c = custody_client
     filed = _release(c, agent)
     _session(c, chair[0], amr=("fed",))
     view = _open(c, filed["id"])
-    assert view["strong"] is False
-    r = _decide(c, view)
-    assert r.status_code == 401 and "passkey" in r.json()["detail"]
-    _session(c, chair[0], amr=("pop",))
+    assert view["can_decide"] is True and view["resource"] == "W"
+    done = _decide(c, view)
+    assert done.status_code == 200 and done.json()["state"] == "approved"
+
+
+def test_an_admin_granted_on_the_workspace_approves_too(custody_client, chair, agent):
+    c = custody_client
+    bea = af.person("Bea", email="bea@team.test")
+    _share(c, chair, "g-W-bea", bea, ("read", "admin"))
+    filed = _release(c, agent)
+    _session(c, bea[0])
+    state = c.get("/notes/page/state", headers=_page_hdr()).json()
+    assert [p["id"] for p in state["pending"]] == [filed["id"]]
+    assert _decide(c, _open(c, filed["id"])).status_code == 200
+
+
+def test_a_reader_sees_the_request_and_cannot_decide_it(custody_client, chair, agent):
+    from origin.services.chair_notes import CANNOT_APPROVE
+    c = custody_client
+    filed = _release(c, agent)
+    _session(c, agent[0])
+    assert c.get("/notes/page/state", headers=_page_hdr()).json()["pending"] == [], \
+        "the list holds what the viewer can approve"
     view = _open(c, filed["id"])
-    assert _decide(c, view).status_code == 200
+    assert view["can_decide"] is False and view["fields"] == RELEASE
+    for decision in ("approve", "decline"):
+        r = _decide(c, view, decision=decision)
+        assert r.status_code == 403 and r.json()["detail"] == CANNOT_APPROVE
+    got = c.get(f"/notes/requests/{filed['id']}", headers={"Authorization": f"Bearer {agent[1]}"})
+    assert got.status_code == 200 and got.json()["state"] == "pending"
+
+
+def test_a_stranger_is_refused_and_shown_nothing(custody_client, chair, agent):
+    from origin.services.chair_notes import CANNOT_APPROVE
+    c = custody_client
+    filed = _release(c, agent)
+    sam = af.person("Sam", email="sam@team.test")
+    _session(c, sam[0])
+    r = c.get(f"/notes/page/requests/{filed['id']}", headers=_page_hdr())
+    assert r.status_code == 403
+    assert set(r.json()) == {"detail", "app_uri"} and r.json()["detail"] == CANNOT_APPROVE
+    assert c.get("/notes/page/state", headers=_page_hdr()).json()["pending"] == []
+    got = c.get(f"/notes/requests/{filed['id']}", headers={"Authorization": f"Bearer {sam[1]}"})
+    assert got.status_code == 404
 
 
 def test_a_changed_request_answers_412_and_mints_nothing(custody_client, chair, agent):
@@ -184,16 +261,30 @@ def test_a_revoked_note_is_refused(custody_client, chair, agent):
     assert spent.status_code == 410 and spent.json()["detail"] == "revoked"
 
 
-def test_governance_is_shown_and_only_declined(custody_client, chair, agent):
+def test_another_admin_may_revoke_a_note_and_a_reader_may_not(custody_client, chair, agent):
+    c = custody_client
+    bea = af.person("Bea", email="bea@team.test")
+    _share(c, chair, "g-W-bea", bea, ("read", "admin"))
+    filed = _release(c, agent)
+    _session(c, bea[0])
+    done = _decide(c, _open(c, filed["id"])).json()
+    _session(c, agent[0])
+    assert "revoke_form" not in _open(c, filed["id"]), "a reader gets no revoke form"
+    _session(c, chair[0])
+    view = _open(c, filed["id"])
+    r = c.post("/notes/page/revoke", json={"form": view["revoke_form"], "jti": done["note_jti"]},
+               headers=_page_hdr())
+    assert r.status_code == 200
+    spent = c.post("/notes/spend", json={"note": done["note"], "action": filed["digest"]})
+    assert spent.status_code == 410
+
+
+def test_a_decline_keeps_its_reason(custody_client, chair, agent):
     c = custody_client
     filed = _release(c, agent, level="Governance")
     assert filed["level"] == "Governance"
     _session(c, chair[0])
-    view = _open(c, filed["id"])
-    r = _decide(c, view)
-    assert r.status_code == 422
-    assert r.json()["detail"] == "Decide at your desk. Phone approval for Governance comes later."
-    d = _decide(c, view, decision="decline", reason="at my desk")
+    d = _decide(c, _open(c, filed["id"]), decision="decline", reason="at my desk")
     assert d.status_code == 200 and d.json()["state"] == "declined" and d.json()["reason"] == "at my desk"
 
 
@@ -298,16 +389,16 @@ def test_the_page_runs_no_inline_script_and_sends_its_referer():
     assert "<script>" not in html and 'src="/web/approvals-page.js"' in html
     assert 'referrerPolicy: "same-origin"' in js and 'credentials: "same-origin"' in js
     assert "Nothing waiting for you" in js and "Revoke this note" in js
+    assert "You can't approve this request. Approving needs approve access to it." in js
+    assert "Back to Agience" in js and "Ask for access" in js
     assert "innerHTML" not in js
+    for gone in ("Governance", "next_cut", "Phone approval"):
+        assert gone not in js
 
 
-def test_without_a_verified_chair_the_routes_answer_503(custody_client, agent, monkeypatch):
-    c = custody_client
-    monkeypatch.delenv("CHAIR_EMAIL", raising=False)
-    r = c.post("/notes/spend", json={"note": "x", "action": "y"})
-    assert r.status_code == 503 and r.json()["detail"] == "approvals are not set up on this node"
-    af.person("unverified", email="nobody@team.test", verified=False)
-    monkeypatch.setenv("CHAIR_EMAIL", "nobody@team.test")
-    r = _file(c, agent, {"kind": "question", "aud": AUD, "summary": "?", "options": ["a", "b"]})
-    assert r.status_code == 503
-    assert r.json()["detail"] == "the chair has no verified account on this node"
+def test_nobody_is_named_in_the_settings():
+    from origin import config
+    from origin.services import chair_notes
+    assert not hasattr(config, "CHAIR_EMAIL")
+    for gone in ("chair_email", "chair_person_id", "LEVELS", "_OUTWARD_KINDS", "next_cut"):
+        assert not hasattr(chair_notes, gone)
