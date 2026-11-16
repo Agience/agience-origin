@@ -611,7 +611,9 @@ def _same_mask(a, b) -> bool:
 def _creation_grant(rc: Reach, ctx: "Context", new: Grant) -> Optional[str]:
     """The creator's own grant on what they created in this batch: on a self-rooted id (its
     root), any actions; on a member (its creation edge, already checked for create or add on the
-    collection), no more than the creator's own walk reaches on it."""
+    collection), no more than the creator's own walk reaches on it, plus update: whoever creates
+    an artifact may change it (BUG-118). Read is never added, so a create-only member still opens
+    nothing of the collection's."""
     if new.grantee_id != ctx.actor or new.grantee_type != "user" or new.effect != "allow":
         return None
     # The creation grant is the first live grant, and only that. A grant left revoked on an id
@@ -621,7 +623,7 @@ def _creation_grant(rc: Reach, ctx: "Context", new: Grant) -> Optional[str]:
     how = _created_in_batch(ctx, new.resource_id)
     if how == "root":
         return "the creation grant on a root created in this batch"
-    if how == "edge" and new.actions <= _reached_actions(rc, ctx.actor, new.resource_id):
+    if how == "edge" and new.actions <= _reached_actions(rc, ctx.actor, new.resource_id) | {"update"}:
         return "the creation grant on a member created in this batch, within its reach"
     return None
 
@@ -2345,7 +2347,8 @@ def _decide_persona(rc: Reach, ctx: Context, b: dict) -> Optional[str]:
     """A persona acts for its person on the one path a persona's routes need (review 26, L5): it
     creates a member (a memory, a note) by its creation edge in a collection its person reaches for
     Create or Add (`_decide_edge_add`, as for the person), and gives its person the creation grant
-    on that member in the same batch, no wider than the person's own reach (`_creation_grant`).
+    on that member in the same batch, no wider than the person's own reach plus update
+    (`_creation_grant`).
     It makes no root, no share, no deny, no edge removal and no change to what an edge conducts,
     and it never opens a key."""
     kind = b["kind"]

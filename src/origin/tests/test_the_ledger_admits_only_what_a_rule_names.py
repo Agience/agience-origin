@@ -63,6 +63,24 @@ def test_a_member_s_creator_records_what_they_already_reach(custody_client, worl
                      ).status_code == 403
 
 
+def test_whoever_creates_a_member_may_change_it_and_reads_nothing_more(custody_client, world):
+    """BUG-118: a Contributor's creation grant carries update on what they made, beyond their
+    reach; it carries no read, and gives nothing on any other member."""
+    c = custody_client
+    alice_id, alice = world["alice"]
+    carol_id, carol = world["carol"]
+    af.ok(af.submit(c, alice, af.edge("W", "C")))
+    af.ok(af.submit(c, alice, af.grant("g-ac", alice_id, "C", ALL)))
+    af.ok(af.submit(c, alice, af.edge("C", "A3")))
+    af.ok(af.submit(c, alice, af.grant("g-cc", carol_id, "C", ["create"])))
+    af.ok(af.submit(c, carol, af.edge("C", "X3")))
+    af.ok(af.submit(c, carol, af.grant("g-x3", carol_id, "X3", ["create", "update"])))
+    af.ok(af.submit(c, carol, af.edge("C", "X4")))
+    assert af.submit(c, carol, af.grant("g-x4", carol_id, "X4", ["update", "read"])
+                     ).status_code == 403
+    assert af.submit(c, carol, af.grant("g-a3", carol_id, "A3", ["update"])).status_code == 403
+
+
 def test_a_self_rooted_creation_keeps_the_creator_s_base_case(custody_client, world):
     """A node with no creation parent is its creator's to set up, as Mantle's own base case."""
     c = custody_client
