@@ -17,6 +17,9 @@ ledger rules as any of the person's, appended as theirs (`authority_ledger.sessi
     POST /auth/me/authority/claim            {token}
     POST /auth/me/authority/narrow           {audience, scope?}  -> a delegation narrowed to it
     POST /auth/me/authority/mantle-token     -> the person's token addressed to Mantle
+    POST /auth/me/authority/new-accounts-receive/backfill   {expires?}
+         -> {collection, grants[], request, page}: the dry run, filed for approval
+    POST /auth/me/authority/new-accounts-receive/backfill/{req}/run  -> {granted, held, refused[]}
         401 no live Origin session   403 refused (CSRF, the ledger's rule, or an invite
         from an account whose address is not verified)   400 malformed
         404 a grant or invite Origin does not hold
@@ -718,3 +721,35 @@ class SessionCORS(BaseHTTPMiddleware):
                       "Access-Control-Allow-Headers": f"content-type, {HEADER.lower()}",
                       "Access-Control-Max-Age": "600"})
         return h
+
+
+@authority_session_router.post("/new-accounts-receive/backfill")
+def new_accounts_backfill(request: Request, body: dict = Body(default={}),
+                          db: Session = Depends(get_db)):
+    """The dry run of giving existing accounts what "New accounts receive" lists, filed as one
+    approval request on that collection (`services.new_accounts_backfill`)."""
+    from origin.db import persons as db_persons
+    from origin.services import chair_notes
+    from origin.services import new_accounts_backfill as backfill
+
+    person = _person(request, db)
+    row = db_persons.get_by_id(db, person)
+    name = str(getattr(row, "name", None) or getattr(row, "email", None) or person)
+    try:
+        return backfill.file(db, person, name, body.get("expires"))
+    except backfill.BackfillRefused as e:
+        raise HTTPException(status_code=e.status, detail=e.detail)
+    except chair_notes.NoteRefused as e:
+        raise HTTPException(status_code=e.status, detail=e.detail)
+
+
+@authority_session_router.post("/new-accounts-receive/backfill/{req_id}/run")
+def new_accounts_backfill_run(req_id: str, request: Request, db: Session = Depends(get_db)):
+    """Run the approved backfill: one spend and one operator grant per step."""
+    from origin.services import new_accounts_backfill as backfill
+
+    person = _person(request, db)
+    try:
+        return backfill.run(db, person, req_id)
+    except backfill.BackfillRefused as e:
+        raise HTTPException(status_code=e.status, detail=e.detail)

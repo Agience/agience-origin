@@ -468,3 +468,28 @@ def verify_reach(request: Request, body: dict = Body(...), db: Session = Depends
                      "replica %s grants, %s edges", body.get("grants"), body.get("edges"),
                      mine["grants"], mine["edges"])
     return {"match": match, "replica": mine}
+
+
+@authority_router.post("/new-person-grants")
+def new_person_grants(body: dict = Body(...), db: Session = Depends(get_db),
+                      auth: AuthContext = Depends(_require_mantle)):
+    """What a new account receives, from the operator's "New accounts receive" collection, made
+    by Origin as the operator's own entries for one person when Mantle provisions them. Mantle
+    names only the person; Mantle then applies the entries from the ledger. A person already
+    holding them is answered with none."""
+    person = body.get("person_id")
+    if not isinstance(person, str) or not person:
+        raise HTTPException(status_code=400, detail="person_id names one person")
+    from origin.db import persons as db_persons
+    try:
+        found = db_persons.get_by_id(db, person)
+    except Exception:  # noqa: BLE001 — not an id
+        found = None
+    if found is None:
+        raise HTTPException(status_code=404, detail="no such person")
+    try:
+        receipts = authority_ledger.grant_new_account(db, person, f"new-person:{person}")
+    except authority_ledger.EntryRefused as exc:
+        logger.warning("new-account grants for %s refused: %s", person, exc)
+        raise HTTPException(status_code=exc.status, detail=str(exc))
+    return {"granted": len(receipts), "seqs": [r.get("seq") for r in receipts]}

@@ -171,6 +171,8 @@ class ReplicaView(Protocol):
 
     def origin_children(self, node_id: str) -> List[str]: ...
 
+    def children(self, node_id: str) -> List[Tuple[str, Any]]: ...
+
     def parents(self, node_id: str) -> List[Tuple[str, Any]]: ...
 
     def origin_added_by(self, node_id: str) -> Optional[str]: ...
@@ -219,6 +221,9 @@ class MemoryReplica:
 
     def origin_children(self, node_id):
         return [d for (s, d), e in sorted(self.edges.items()) if s == node_id and e.get("origin")]
+
+    def children(self, node_id):
+        return [(d, e.get("propagate")) for (s, d), e in sorted(self.edges.items()) if s == node_id]
 
     def parents(self, node_id):
         return [(s, e.get("propagate")) for (s, d), e in sorted(self.edges.items()) if d == node_id]
