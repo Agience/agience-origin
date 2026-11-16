@@ -2969,13 +2969,15 @@ def append(db: Session, body: dict, *, actor: Actor, submitted_jti: str = "",
                                         or actor.kind in ("operator", ORIGIN_PAGE,
                                                           ORIGIN_SESSION)),
                              batch=batch, submitted_by=submitted_by)
-        db.add(row)
-        _apply(db, b, seq, ctx)
         try:
+            db.add(row)
+            _apply(db, b, seq, ctx)           # a flush here can meet the seq clash too
             db.commit()
         except IntegrityError:
-            db.rollback()                     # another append took this seq; decide again
-            continue
+            db.rollback()
+            if head(db)[0] == last:
+                raise                         # the head did not move: not a race
+            continue                          # another append took this seq; decide again
         logger.info("authority entry %d appended: %s by %s (%s)", seq, b["kind"],
                     actor.subject, why)
         _alert(db, b, seq, actor.subject, why, bootstrap=bool(bootstrap), ref=actor.ref)
