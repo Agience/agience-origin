@@ -269,7 +269,8 @@ def test_address_variants_share_one_otp_ledger_and_one_cap():
     with patch("origin.routers.otp_router.email_service.is_configured", return_value=True), \
             patch("origin.services.email_service.send_otp", side_effect=fake_send), \
             patch("origin.routers.otp_router.create_jwt_token",
-                  side_effect=lambda d, **k: "jwt-for-" + d["email"]):
+                  side_effect=lambda d, **k: "jwt-for-" + d["email"]), \
+            patch("origin.services.auth_service.create_jwt_token", return_value="refresh.jwt"):
         c = TestClient(app)
         cap = otp_service._window_cap()
         first = [c.post("/auth/otp/request", json={"email": "alice@example.com"}).status_code
@@ -543,6 +544,7 @@ def test_a_reset_committed_during_the_rehash_wins(file_db, monkeypatch):
     app = _app(mock_db=False)
     with patch("origin.routers.auth_router.platform_settings.get_bool", return_value=True), \
             patch("origin.routers.auth_router.create_jwt_token", return_value="jwt"), \
+            patch("origin.services.auth_service.create_jwt_token", return_value="refresh.jwt"), \
             patch("origin.routers.auth_router._compute_roles", return_value=[]), \
             patch("origin.routers.auth_router.person_service.record_person_event"), \
             patch.object(auth_router_module, "hash_password", side_effect=hash_while_a_reset_commits):
@@ -573,6 +575,7 @@ def test_a_stale_hash_is_still_upgraded_when_nothing_raced_it(file_db):
     app = _app(mock_db=False)
     with patch("origin.routers.auth_router.platform_settings.get_bool", return_value=True), \
             patch("origin.routers.auth_router.create_jwt_token", return_value="jwt"), \
+            patch("origin.services.auth_service.create_jwt_token", return_value="refresh.jwt"), \
             patch("origin.routers.auth_router._compute_roles", return_value=[]), \
             patch("origin.routers.auth_router.person_service.record_person_event"):
         r = asyncio.run(_post_from(app, "198.51.100.51", "/auth/password/login",
