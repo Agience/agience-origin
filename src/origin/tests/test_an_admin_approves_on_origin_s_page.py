@@ -129,7 +129,16 @@ def test_level_and_expiry_are_the_filer_s_data(custody_client, chair, agent):
                          "level": "Outward"})
     assert r.status_code == 201 and r.json()["level"] == "Outward"
     assert datetime.fromisoformat(r.json()["expires"]) == datetime.fromisoformat(when)
-    for bad in (None, "tomorrow", (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat(),
+    toronto = (datetime.now(timezone(timedelta(hours=-5))) + timedelta(hours=3)).replace(
+        microsecond=0).isoformat()
+    assert toronto.endswith("-05:00")
+    r = _file(c, agent, {"kind": "deploy", "fields": {"x": 1}, "aud": AUD, "expires": toronto})
+    assert r.status_code == 201, r.text
+    assert datetime.fromisoformat(r.json()["expires"]) == datetime.fromisoformat(toronto)
+    epoch = int((datetime.now(timezone.utc) + timedelta(hours=3)).timestamp())
+    for bad in (None, "tomorrow", epoch, str(epoch),
+                (datetime.now(timezone.utc) + timedelta(hours=3)).replace(tzinfo=None).isoformat(),
+                (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat(),
                 (datetime.now(timezone.utc) + timedelta(days=8)).isoformat()):
         r = _file(c, agent, {"kind": "deploy", "fields": {"x": 1}, "aud": AUD, "expires": bad})
         assert r.status_code == 422, (bad, r.text)
