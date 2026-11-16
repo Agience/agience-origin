@@ -5,7 +5,7 @@
   "use strict";
   const $ = function (s) { return document.querySelector(s); };
   const TZ = "America/Toronto";
-  const CANNOT = "You can't approve this request. Approving needs update access to it.";
+  const CANNOT = "You can't approve this request. Approving needs Editor access to it.";
   let state = null;      // the last /notes/page/state
   let current = null;    // the request on screen
 
@@ -360,7 +360,7 @@
   }
 
   /* A request the viewer cannot see: the refusal names nothing of it, and offers a way back and a
-   * way to ask for access. Asking copies the request's link to hand to an admin of its workspace. */
+   * way to ask for access. Asking copies the request's link to hand to the workspace's owner. */
   function renderRefused(id, data) {
     current = null;
     const box = $("#detail");
@@ -377,7 +377,7 @@
     ask.addEventListener("click", async function () {
       const link = location.origin + "/approvals?req=" + encodeURIComponent(id);
       try { await navigator.clipboard.writeText(link); } catch (e) { /* shown below either way */ }
-      show("Send this link to an admin of the request's workspace and ask them for approve " +
+      show("Send this link to the owner of the request's workspace and ask them for Editor " +
            "access: " + link, "ok");
     });
     box.appendChild(ask);
