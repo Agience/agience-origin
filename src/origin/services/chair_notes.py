@@ -3,7 +3,7 @@ and their spends.
 
 An account files a request against a resource (a workspace or collection it can read) with the
 exact fields of what it will do, a level label and an expiry. Origin computes their digest
-(`action_digest`). Whoever holds `admin` on that resource, through the ordinary grants, approves
+(`action_digest`). Whoever holds `update` on that resource, through the ordinary grants, approves
 on Origin's own page; the approval mints one signed note (`chair-note+jwt`) bound to that digest,
 valid until the request's expiry and never longer than `MAX_NOTE_LIFE`. The agent that acts
 spends the note once per action.
@@ -36,7 +36,7 @@ TOKEN_TYPE = "chair_note"
 MAX_NOTE_LIFE = timedelta(days=7)
 
 #: What an approver holds on the request's resource; what a viewer holds to see the request.
-APPROVE_ACTION = "admin"
+APPROVE_ACTION = "update"
 SEE_ACTION = "read"
 
 
@@ -122,7 +122,7 @@ def _reaches(db: Session, person_id: str, resource_id: Optional[str], action: st
 
 
 def can_approve(db: Session, person_id: str, req: ChairRequest) -> bool:
-    """Does `person_id` hold `admin` on the request's resource?"""
+    """Does `person_id` hold `update` on the request's resource? Nothing else decides it."""
     return _reaches(db, person_id, req.resource_id, APPROVE_ACTION)
 
 
@@ -290,7 +290,7 @@ def request_view(db: Session, req: ChairRequest) -> dict:
 
 # --- decisions ------------------------------------------------------------------------------------
 
-CANNOT_APPROVE = "You can't approve this request. Approving needs approve access to it."
+CANNOT_APPROVE = "You can't approve this request. Approving needs update access to it."
 
 
 def _decidable(db: Session, req: Optional[ChairRequest], person_id: str,

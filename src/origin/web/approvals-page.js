@@ -5,7 +5,7 @@
   "use strict";
   const $ = function (s) { return document.querySelector(s); };
   const TZ = "America/Toronto";
-  const CANNOT = "You can't approve this request. Approving needs approve access to it.";
+  const CANNOT = "You can't approve this request. Approving needs update access to it.";
   let state = null;      // the last /notes/page/state
   let current = null;    // the request on screen
 

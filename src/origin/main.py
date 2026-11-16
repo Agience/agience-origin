@@ -823,7 +823,7 @@ def job_grant_page(back: str = "") -> Response:
 @app.get("/approvals", include_in_schema=False)
 def approvals_page() -> Response:
     """The approvals page (`/notes/page/*`): the requests filed against what the viewer can see,
-    decided here in their Origin session by whoever holds admin on the request's resource."""
+    decided here in their Origin session by whoever holds update on the request's resource."""
     out = _page("approvals.html")
     out.headers["Content-Security-Policy"] = PASSKEY_PAGE_CSP
     out.headers["Cache-Control"] = "no-store"

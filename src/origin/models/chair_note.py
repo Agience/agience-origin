@@ -2,7 +2,7 @@
 and each spend.
 
 A request is filed by an account (`POST /notes/requests`) against a resource it can read, with the
-exact fields of what it will do; Origin computes their digest. Whoever holds admin on that resource
+exact fields of what it will do; Origin computes their digest. Whoever holds update on that resource
 approves or declines it on Origin's own page, in their Origin session; an approval mints one signed
 note (`chair-note+jwt`) bound to that digest. The agent that acts spends the note at Origin once
 per action (`POST /notes/spend`).

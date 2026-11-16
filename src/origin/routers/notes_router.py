@@ -6,7 +6,7 @@ decides on Origin's page, and the agent spends the note it gets.
   and reads back any request it can see.
 - `/notes/page/*`: the approvals page at `/approvals`. These routes take no bearer token: only an
   Origin session, sent from Origin's own page, with a per-form token bound to that session. Whoever
-  holds admin on the request's resource decides it; anyone who can read the resource sees it.
+  holds update on the request's resource decides it; anyone who can read the resource sees it.
 - `POST /notes/spend`: whoever holds a note spends it once per action. The note is the only
   credential the route reads.
 """

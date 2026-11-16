@@ -1,8 +1,8 @@
-"""Approvals: an account files a request against a workspace, an admin of it decides on Origin's
+"""Approvals: an account files a request against a workspace, whoever may update it decides on Origin's
 page, the agent spends the note once.
 
 - A request's digest is Origin's own, of the exact fields; the filer's is kept beside it.
-- A request names a resource the filer can read. Whoever holds admin on it approves with one click
+- A request names a resource the filer can read. Whoever holds update on it approves with one click
   in their Origin session; a reader sees the request and cannot decide it; anyone else is told so
   and shown nothing of it. Nobody is named: approvers come from the ordinary grants.
 - The level and the expiry are the filer's data.
@@ -170,7 +170,7 @@ def test_the_page_answers_only_a_session_on_origin_s_page(custody_client, chair,
                                                "Authorization": f"Bearer {chair[1]}"}).status_code == 401
 
 
-def test_an_admin_approves_with_one_click_and_no_passkey(custody_client, chair, agent):
+def test_an_updater_approves_with_one_click_and_no_passkey(custody_client, chair, agent):
     c = custody_client
     filed = _release(c, agent)
     _session(c, chair[0], amr=("fed",))
@@ -180,14 +180,46 @@ def test_an_admin_approves_with_one_click_and_no_passkey(custody_client, chair, 
     assert done.status_code == 200 and done.json()["state"] == "approved"
 
 
-def test_an_admin_granted_on_the_workspace_approves_too(custody_client, chair, agent):
+def test_an_update_grant_on_the_workspace_approves_too(custody_client, chair, agent):
     c = custody_client
     bea = af.person("Bea", email="bea@team.test")
-    _share(c, chair, "g-W-bea", bea, ("read", "admin"))
+    _share(c, chair, "g-W-bea", bea, ("read", "update"))
     filed = _release(c, agent)
     _session(c, bea[0])
     state = c.get("/notes/page/state", headers=_page_hdr()).json()
     assert [p["id"] for p in state["pending"]] == [filed["id"]]
+    assert _decide(c, _open(c, filed["id"])).status_code == 200
+
+
+def test_admin_without_update_does_not_approve(custody_client, chair, agent):
+    """The update grant decides; admin carries no approval of its own."""
+    from origin.services.chair_notes import CANNOT_APPROVE
+    c = custody_client
+    dee = af.person("Dee", email="dee@team.test")
+    _share(c, chair, "g-W-dee", dee, ("read", "admin"))
+    filed = _release(c, agent)
+    _session(c, dee[0])
+    assert c.get("/notes/page/state", headers=_page_hdr()).json()["pending"] == []
+    view = _open(c, filed["id"])
+    assert view["can_decide"] is False
+    r = _decide(c, view)
+    assert r.status_code == 403 and r.json()["detail"] == CANNOT_APPROVE
+
+
+def test_the_filer_gains_nothing_by_filing(custody_client, chair, agent):
+    """Filing writes the request and no grant: a filer holding read and add on the collection,
+    and nothing more, cannot decide its own request."""
+    from origin.services.chair_notes import CANNOT_APPROVE
+    c = custody_client
+    _share(c, chair, "g-W-agent-add", agent, ("add",))
+    filed = _release(c, agent)
+    _session(c, agent[0])
+    assert c.get("/notes/page/state", headers=_page_hdr()).json()["pending"] == []
+    view = _open(c, filed["id"])
+    assert view["can_decide"] is False
+    r = _decide(c, view)
+    assert r.status_code == 403 and r.json()["detail"] == CANNOT_APPROVE
+    _session(c, chair[0])
     assert _decide(c, _open(c, filed["id"])).status_code == 200
 
 
@@ -270,10 +302,10 @@ def test_a_revoked_note_is_refused(custody_client, chair, agent):
     assert spent.status_code == 410 and spent.json()["detail"] == "revoked"
 
 
-def test_another_admin_may_revoke_a_note_and_a_reader_may_not(custody_client, chair, agent):
+def test_another_updater_may_revoke_a_note_and_a_reader_may_not(custody_client, chair, agent):
     c = custody_client
     bea = af.person("Bea", email="bea@team.test")
-    _share(c, chair, "g-W-bea", bea, ("read", "admin"))
+    _share(c, chair, "g-W-bea", bea, ("read", "update"))
     filed = _release(c, agent)
     _session(c, bea[0])
     done = _decide(c, _open(c, filed["id"])).json()
@@ -398,7 +430,7 @@ def test_the_page_runs_no_inline_script_and_sends_its_referer():
     assert "<script>" not in html and 'src="/web/approvals-page.js"' in html
     assert 'referrerPolicy: "same-origin"' in js and 'credentials: "same-origin"' in js
     assert "Nothing waiting for you" in js and "Revoke this note" in js
-    assert "You can't approve this request. Approving needs approve access to it." in js
+    assert "You can't approve this request. Approving needs update access to it." in js
     assert "Back to Agience" in js and "Ask for access" in js
     assert "innerHTML" not in js
     for gone in ("Governance", "next_cut", "Phone approval"):
