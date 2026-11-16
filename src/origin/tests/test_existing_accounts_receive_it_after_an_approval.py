@@ -12,9 +12,11 @@ from datetime import datetime, timezone
 import pytest
 
 from origin.tests import authority_fixtures as af
-from origin.tests.test_a_new_account_receives_what_the_collection_lists import (  # noqa: F401
-    _grants, custody_client, platform,
-)
+from origin.tests import test_a_new_account_receives_what_the_collection_lists as _new
+
+_grants = _new._grants
+custody_client = _new.custody_client
+platform = _new.platform
 
 
 @pytest.fixture()
