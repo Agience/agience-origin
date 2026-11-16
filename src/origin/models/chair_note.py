@@ -1,9 +1,11 @@
-"""Chair notes: a request for the chair's approval, the note an approval mints, and each spend.
+"""Approval notes: a request filed against a workspace or collection, the note an approval mints,
+and each spend.
 
-A request is filed by an agent's account (`POST /notes/requests`) with the exact fields of what it
-will do; Origin computes their digest. The chair approves or declines it on Origin's own page, in
-the chair's Origin session; an approval mints one signed note (`chair-note+jwt`) bound to that
-digest. The agent that acts spends the note at Origin once per action (`POST /notes/spend`).
+A request is filed by an account (`POST /notes/requests`) against a resource it can read, with the
+exact fields of what it will do; Origin computes their digest. Whoever holds update on that resource
+approves or declines it on Origin's own page, in their Origin session; an approval mints one signed
+note (`chair-note+jwt`) bound to that digest. The agent that acts spends the note at Origin once
+per action (`POST /notes/spend`).
 
 These are Origin's own tables, never ledger entries: Mantle has no part in them.
 """
@@ -22,12 +24,12 @@ class ChairRequest(Base):
     __tablename__ = "chair_requests"
 
     id = Column(String(64), primary_key=True)
-    #: An action kind (`release`, `github-publish`, `prod-script`, `release-step`), `train`, or
-    #: `question`.
+    #: The filer's name for the action, or `question`.
     kind = Column(String(32), nullable=False)
+    #: The filer's label for the request, shown on the page.
     level = Column(String(16), nullable=False)
     fields = Column(JSON, nullable=False)
-    #: `sha256:<hex>` of `fields` for an action; for a train, the digests of its steps in `steps`.
+    #: `sha256:<hex>` of `fields` for an action; with `steps`, of `fields` and each step's digest.
     digest = Column(String(80), nullable=False)
     steps = Column(JSON, nullable=True)
     summary = Column(Text, nullable=False, default="")
@@ -47,6 +49,8 @@ class ChairRequest(Base):
     answer = Column(String(64), nullable=True)
     #: The jti of the note an approval minted.
     note_jti = Column(String(64), nullable=True)
+    #: The workspace or collection the request is filed against; its admins approve it.
+    resource_id = Column(String(64), nullable=True, index=True)
 
 
 class ChairNote(Base):
@@ -56,7 +60,7 @@ class ChairNote(Base):
     req = Column(String(64), nullable=False, index=True)
     person_id = Column(String(64), nullable=False, index=True)
     level = Column(String(16), nullable=False)
-    #: The note itself: the chair's page shows it again, and the filer fetches it.
+    #: The note itself: the approvals page shows it again, and the filer fetches it.
     token = Column(Text, nullable=False)
     issued_time = Column(DateTime(timezone=True), nullable=False, default=_utcnow)
     expires_time = Column(DateTime(timezone=True), nullable=False)

@@ -1,9 +1,15 @@
-"""Chair notes: requests for the chair's approval, the notes approvals mint, and their spends.
+"""Approval notes: requests filed against a workspace or collection, the notes approvals mint,
+and their spends.
 
-An agent's account files a request with the exact fields of what it will do. Origin computes their
-digest (`action_digest`) and raises the level to the kind's floor. The chair approves on Origin's
-own page; the approval mints one signed note (`chair-note+jwt`) bound to that digest, valid until
-the next 21:00 in Toronto. The agent that acts spends the note once per action.
+An account files a request against a resource (a workspace or collection it can read) with the
+exact fields of what it will do, a level label and an expiry. Origin computes their digest
+(`action_digest`). Whoever holds `update` on that resource, through the ordinary grants, approves
+on Origin's own page; the approval mints one signed note (`chair-note+jwt`) bound to that digest,
+valid until the request's expiry and never longer than `MAX_NOTE_LIFE`. The agent that acts
+spends the note once per action.
+
+The kinds, levels and expiries are the filer's data. Origin names no approver and holds no
+process of its own.
 
 A note is never a bearer token: it carries `token_type: "chair_note"`, which every bearer check
 refuses.
@@ -12,7 +18,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
@@ -27,20 +32,12 @@ from origin.models.chair_note import ChairNote, ChairRequest, ChairSpend
 NOTE_TYP = "chair-note+jwt"
 TOKEN_TYPE = "chair_note"
 
-#: The exact fields each action kind carries: no more, no fewer.
-DIGEST_FIELDS: dict[str, tuple[str, ...]] = {
-    "release": ("release", "heads"),
-    "github-publish": ("repo", "tree", "tag", "branch"),
-    "prod-script": ("host", "command", "kit_sha256sums"),
-    "release-step": ("release", "step", "heads"),
-}
-
-LEVELS = ("Routine", "Costed", "Outward")
-#: A request may be filed at Governance; it is shown, and only declined: no note carries it.
-REQUEST_LEVELS = LEVELS + ("Governance",)
-_OUTWARD_KINDS = {"release", "github-publish", "release-step", "train"}
-
+#: The longest a request stays open and a note stays valid.
 MAX_NOTE_LIFE = timedelta(days=7)
+
+#: What an approver holds on the request's resource; what a viewer holds to see the request.
+APPROVE_ACTION = "update"
+SEE_ACTION = "read"
 
 
 class NoteRefused(Exception):
@@ -50,23 +47,6 @@ class NoteRefused(Exception):
         super().__init__(detail)
         self.status = status
         self.detail = detail
-
-
-def chair_email() -> Optional[str]:
-    """`CHAIR_EMAIL`: the chair's address. The chair is the account holding it, verified."""
-    return (os.getenv("CHAIR_EMAIL") or "").strip().lower() or None
-
-
-def chair_person_id(db: Session) -> Optional[str]:
-    """The account that holds `CHAIR_EMAIL`, verified; None when unset or no such account."""
-    email = chair_email()
-    if email is None:
-        return None
-    from origin.services import person_service
-    person = person_service.get_user_by_email(db, email)
-    if person is None or not getattr(person, "email_verified", False):
-        return None
-    return str(person.id)
 
 
 def _now() -> datetime:
@@ -79,106 +59,118 @@ def _aware(t: datetime) -> datetime:
 
 # --- digest ---------------------------------------------------------------------------------------
 
+def _canon(body: dict) -> str:
+    return "sha256:" + hashlib.sha256(json.dumps(
+        body, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")).hexdigest()
+
+
+def _kind(kind: Any) -> str:
+    if not isinstance(kind, str) or not kind or len(kind) > 32:
+        raise NoteRefused(422, "kind names the action, in at most 32 characters")
+    return kind
+
+
 def action_digest(kind: str, fields: dict) -> str:
     """`sha256:<hex>` of the canonical JSON of `{"kind": kind, **fields}`."""
-    want = DIGEST_FIELDS.get(kind)
-    if want is None:
-        raise NoteRefused(422, f"unknown action kind {kind!r}")
-    if not isinstance(fields, dict) or set(fields) != set(want):
-        raise NoteRefused(422, f"a {kind} action carries exactly {', '.join(want)}")
-    body = json.dumps({"kind": kind, **fields}, sort_keys=True, separators=(",", ":"),
-                      ensure_ascii=False)
-    return "sha256:" + hashlib.sha256(body.encode("utf-8")).hexdigest()
+    kind = _kind(kind)
+    if not isinstance(fields, dict) or "kind" in fields:
+        raise NoteRefused(422, f"a {kind} action carries its fields as an object without `kind`")
+    return _canon({"kind": kind, **fields})
 
 
-def level_floor(kind: str, fields: dict) -> str:
-    if kind in _OUTWARD_KINDS:
-        return "Outward"
-    if kind == "prod-script" and str(fields.get("host", "")).lower().startswith("prod"):
-        return "Outward"
-    return "Routine"
+def steps_digest(kind: str, fields: dict, step_digests: list[str]) -> str:
+    """`sha256:<hex>` of `{"kind": kind, **fields, "actions": [each step's digest]}`."""
+    kind = _kind(kind)
+    if not isinstance(fields, dict) or "kind" in fields or "actions" in fields:
+        raise NoteRefused(422, "a request with steps carries its fields as an object without "
+                               "`kind` or `actions`")
+    return _canon({"kind": kind, **fields, "actions": list(step_digests)})
 
 
-def raised_level(asked: Optional[str], kind: str, fields: dict) -> str:
-    """The asked level raised to the kind's floor, never lowered."""
-    if asked is not None and asked not in REQUEST_LEVELS:
-        raise NoteRefused(422, "level is Routine, Costed, Outward or Governance")
-    floor = level_floor(kind, fields)
-    return REQUEST_LEVELS[max(REQUEST_LEVELS.index(asked or "Routine"),
-                              REQUEST_LEVELS.index(floor))]
+def _level(raw: Any) -> str:
+    """The filer's label for the request, shown on the page."""
+    if raw is None:
+        return ""
+    if not isinstance(raw, str) or len(raw) > 16:
+        raise NoteRefused(422, "level is a label of at most 16 characters")
+    return raw
 
 
-# --- the next cut ---------------------------------------------------------------------------------
-
-def _nth_sunday(year: int, month: int, n: int) -> datetime:
-    first = datetime(year, month, 1)
-    return first + timedelta(days=(6 - first.weekday()) % 7 + 7 * (n - 1))
-
-
-def toronto_offset(at: datetime) -> timedelta:
-    """Toronto's UTC offset at `at`: daylight time from the second Sunday of March at 02:00 local
-    to the first Sunday of November at 02:00 local, standard time otherwise. Computed here so no
-    host needs a time-zone database."""
-    at = _aware(at).astimezone(timezone.utc)
-    y = at.year
-    start = _nth_sunday(y, 3, 2).replace(hour=2, tzinfo=timezone.utc) + timedelta(hours=5)
-    end = _nth_sunday(y, 11, 1).replace(hour=2, tzinfo=timezone.utc) + timedelta(hours=4)
-    return timedelta(hours=-4) if start <= at < end else timedelta(hours=-5)
+def _expires(raw: Any, now: datetime) -> datetime:
+    """The filer's expiry: an ISO time after now and within `MAX_NOTE_LIFE`."""
+    if not isinstance(raw, str):
+        raise NoteRefused(422, "expires is the ISO time the request closes")
+    try:
+        at = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        raise NoteRefused(422, "expires is the ISO time the request closes")
+    if at.tzinfo is None:
+        raise NoteRefused(422, "expires carries its UTC offset")
+    at = at.astimezone(timezone.utc)
+    if at <= now or at > now + MAX_NOTE_LIFE:
+        raise NoteRefused(422, "expires is after now and within 7 days")
+    return at
 
 
-def next_cut(now: Optional[datetime] = None) -> datetime:
-    """The next 21:00 in Toronto after `now`, in UTC."""
-    now = _aware(now or _now()).astimezone(timezone.utc)
-    for days in range(0, 3):
-        local_day = (now + toronto_offset(now)).date() + timedelta(days=days)
-        guess = datetime(local_day.year, local_day.month, local_day.day, 21, tzinfo=timezone.utc)
-        cut = guess - toronto_offset(guess - timedelta(hours=5))
-        if cut > now:
-            return cut
-    raise AssertionError("unreachable")
+# --- who sees and who decides ---------------------------------------------------------------------
+
+def _reaches(db: Session, person_id: str, resource_id: Optional[str], action: str) -> bool:
+    if not person_id or not resource_id:
+        return False
+    from origin.services import authority_ledger
+    return authority_ledger.reach(db).reaches(str(person_id), str(resource_id), action)
+
+
+def can_approve(db: Session, person_id: str, req: ChairRequest) -> bool:
+    """Does `person_id` hold `update` on the request's resource? Nothing else decides it."""
+    return _reaches(db, person_id, req.resource_id, APPROVE_ACTION)
+
+
+def can_see(db: Session, person_id: str, req: ChairRequest) -> bool:
+    """The filer, and anyone who can read the request's resource, sees the request."""
+    return person_id == req.filed_by_account         or _reaches(db, person_id, req.resource_id, SEE_ACTION)
 
 
 # --- requests -------------------------------------------------------------------------------------
 
 def file_request(db: Session, *, filer_id: str, filer_name: str, body: dict) -> ChairRequest:
-    """File a request. `body` holds `kind`, `fields` (or `steps` for a train), and optionally
-    `level`, `summary`, `evidence`, `aud`, `options`, `default`."""
-    kind = body.get("kind")
+    """File a request. `body` holds `resource` (a workspace or collection the filer can read),
+    `kind`, `fields` (with `steps` when the request covers several actions), `expires`, and
+    optionally `level`, `summary`, `evidence`, `aud`, `options`, `default`."""
+    now = _now()
+    resource = body.get("resource")
+    if not isinstance(resource, str) or not resource or len(resource) > 64 \
+            or not _reaches(db, filer_id, resource, SEE_ACTION):
+        raise NoteRefused(422, "resource names a workspace or collection you can read")
+    kind = _kind(body.get("kind"))
     aud = body.get("aud") or []
     if not isinstance(aud, list) or not aud or not all(isinstance(a, str) and a for a in aud):
         raise NoteRefused(422, "aud names the agents the note is for")
     summary = str(body.get("summary") or "")[:2000]
+    level = _level(body.get("level"))
+    expires = _expires(body.get("expires"), now)
     steps_out = None
-    if kind == "train":
-        train = body.get("train")
-        steps = body.get("steps")
-        if not isinstance(train, str) or not train or not isinstance(steps, list) or not steps:
-            raise NoteRefused(422, "a train names itself and lists its steps")
-        steps_out = []
-        for s in steps:
-            if not isinstance(s, dict):
-                raise NoteRefused(422, "each step is {kind, fields}")
-            steps_out.append({"kind": s.get("kind"), "fields": s.get("fields"),
-                              "digest": action_digest(s.get("kind"), s.get("fields"))})
-        fields = {"train": train}
-        digest = action_digest_of_train(train, [s["digest"] for s in steps_out])
-        level = raised_level(body.get("level"), "train", fields)
-    elif kind == "question":
+    options = None
+    if kind == "question":
         options = _options(body.get("options"))
         fields = {"question": summary}
         # The question's digest covers its options, each action's digest among them.
-        digest = "sha256:" + hashlib.sha256(json.dumps(
-            {"kind": "question", "options": options}, sort_keys=True, separators=(",", ":"),
-            ensure_ascii=False).encode("utf-8")).hexdigest()
-        level = body.get("level")
-        for o in options:
-            if o.get("action"):
-                level = raised_level(level, o["action"]["kind"], o["action"]["fields"])
-        level = raised_level(level, "question", fields)
+        digest = _canon({"kind": "question", "options": options})
+    elif body.get("steps") is not None:
+        steps = body.get("steps")
+        fields = body.get("fields")
+        if not isinstance(steps, list) or not steps:
+            raise NoteRefused(422, "steps lists the actions the request covers")
+        steps_out = []
+        for st in steps:
+            if not isinstance(st, dict):
+                raise NoteRefused(422, "each step is {kind, fields}")
+            steps_out.append({"kind": st.get("kind"), "fields": st.get("fields"),
+                              "digest": action_digest(st.get("kind"), st.get("fields"))})
+        digest = steps_digest(kind, fields, [st["digest"] for st in steps_out])
     else:
         fields = body.get("fields")
         digest = action_digest(kind, fields)
-        level = raised_level(body.get("level"), kind, fields)
     default = body.get("default")
     if default is not None:
         if kind != "question":
@@ -191,13 +183,11 @@ def file_request(db: Session, *, filer_id: str, filer_name: str, body: dict) -> 
     claimed = body.get("digest")
     if claimed is not None and not isinstance(claimed, str):
         raise NoteRefused(422, "digest is the filer's own sha256:<hex>, for comparison")
-    now = _now()
     req = ChairRequest(
         id=str(uuid.uuid4()), kind=kind, level=level, fields=fields, digest=digest,
-        steps=steps_out, summary=summary, aud=aud,
-        options=options if kind == "question" else None, default_option=default,
+        steps=steps_out, summary=summary, aud=aud, options=options, default_option=default,
         filed_by=filer_name[:200], filed_by_account=filer_id, created_time=now,
-        expires_time=next_cut(now), state="pending",
+        expires_time=expires, state="pending", resource_id=resource,
     )
     # Origin never takes the filer's digest; it keeps it beside its own so the page can say
     # whether both computed the same.
@@ -253,12 +243,6 @@ def _evidence(raw: Any) -> list[dict]:
     return out
 
 
-def action_digest_of_train(train: str, step_digests: list[str]) -> str:
-    body = json.dumps({"kind": "train", "train": train, "actions": step_digests},
-                      sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-    return "sha256:" + hashlib.sha256(body.encode("utf-8")).hexdigest()
-
-
 def get_request(db: Session, req_id: str) -> Optional[ChairRequest]:
     req = db.get(ChairRequest, req_id)
     return settle(db, req) if req is not None else None
@@ -281,6 +265,7 @@ def settle(db: Session, req: ChairRequest) -> ChairRequest:
 def request_view(db: Session, req: ChairRequest) -> dict:
     out: dict[str, Any] = {
         "id": req.id, "kind": req.kind, "level": req.level, "fields": req.fields,
+        "resource": req.resource_id,
         "digest": req.digest, "steps": req.steps, "summary": req.summary,
         "evidence": (req.evidence or {}).get("items", []),
         "filer_digest": (req.evidence or {}).get("filer_digest"), "aud": req.aud, "options": req.options,
@@ -305,9 +290,15 @@ def request_view(db: Session, req: ChairRequest) -> dict:
 
 # --- decisions ------------------------------------------------------------------------------------
 
-def _decidable(req: Optional[ChairRequest], chair_id: str, digest: Optional[str]) -> ChairRequest:
+CANNOT_APPROVE = "You can't approve this request. Approving needs update access to it."
+
+
+def _decidable(db: Session, req: Optional[ChairRequest], person_id: str,
+               digest: Optional[str]) -> ChairRequest:
     if req is None:
         raise NoteRefused(404, "no such request")
+    if not can_approve(db, person_id, req):
+        raise NoteRefused(403, CANNOT_APPROVE)
     if not is_open(req):
         raise NoteRefused(409, "this request is no longer open")
     if digest is not None and digest != req.digest:
@@ -315,12 +306,10 @@ def _decidable(req: Optional[ChairRequest], chair_id: str, digest: Optional[str]
     return req
 
 
-def approve(db: Session, req: Optional[ChairRequest], *, chair_id: str, digest: str,
+def approve(db: Session, req: Optional[ChairRequest], *, person_id: str, digest: str,
             auth_time: datetime, amr: list[str], option: Optional[str] = None) -> ChairRequest:
     """Approve: mint the note. For a question, record the option (no note is minted)."""
-    req = _decidable(req, chair_id, digest)
-    if req.level not in LEVELS:
-        raise NoteRefused(422, "Decide at your desk. Phone approval for Governance comes later.")
+    req = _decidable(db, req, person_id, digest)
     now = _now()
     action = req.digest
     if req.kind == "question":
@@ -330,41 +319,40 @@ def approve(db: Session, req: Optional[ChairRequest], *, chair_id: str, digest: 
         req.answer = option
         if not chosen[0].get("action"):
             req.state = "answered"
-            req.decided_time, req.decided_by = now, chair_id
+            req.decided_time, req.decided_by = now, person_id
             db.commit()
             return req
         action = chosen[0]["action"]["digest"]
     from origin.key_manager import get_key_id, get_private_key_pem
-    exp = min(next_cut(now), now + MAX_NOTE_LIFE)
+    exp = min(_aware(req.expires_time), now + MAX_NOTE_LIFE)
     jti = str(uuid.uuid4())
     payload: dict[str, Any] = {
-        "iss": config.AUTHORITY_ISSUER, "sub": chair_id, "aud": list(req.aud),
+        "iss": config.AUTHORITY_ISSUER, "sub": person_id, "aud": list(req.aud),
         "iat": int(now.timestamp()), "nbf": int(now.timestamp()), "exp": int(exp.timestamp()),
         "jti": jti, "level": req.level, "decision": "approve",
         "auth_time": int(_aware(auth_time).timestamp()), "amr": list(amr), "req": req.id,
-        "parent": None, "token_type": TOKEN_TYPE,
+        "resource": req.resource_id, "parent": None, "token_type": TOKEN_TYPE,
     }
-    if req.kind == "train":
-        payload["scope"] = {"train": req.fields["train"],
-                            "actions": [s["digest"] for s in req.steps or []]}
+    if req.steps:
+        payload["scope"] = {**(req.fields or {}), "actions": [st["digest"] for st in req.steps]}
     else:
         payload["action"] = action
     token = jwt.encode(payload, get_private_key_pem(), algorithm="RS256",
                        headers={"kid": get_key_id(), "typ": NOTE_TYP})
-    db.add(ChairNote(jti=jti, req=req.id, person_id=chair_id, level=req.level, token=token,
+    db.add(ChairNote(jti=jti, req=req.id, person_id=person_id, level=req.level, token=token,
                      issued_time=now, expires_time=exp))
     req.state = "answered" if req.kind == "question" else "approved"
     req.note_jti = jti
-    req.decided_time, req.decided_by = now, chair_id
+    req.decided_time, req.decided_by = now, person_id
     db.commit()
     return req
 
 
-def decline(db: Session, req: Optional[ChairRequest], *, chair_id: str, digest: str,
+def decline(db: Session, req: Optional[ChairRequest], *, person_id: str, digest: str,
             reason: str = "") -> ChairRequest:
-    req = _decidable(req, chair_id, digest)
+    req = _decidable(db, req, person_id, digest)
     req.state, req.decline_reason = "declined", (reason or "")[:2000]
-    req.decided_time, req.decided_by = _now(), chair_id
+    req.decided_time, req.decided_by = _now(), person_id
     db.commit()
     return req
 
@@ -424,20 +412,26 @@ def spend(db: Session, token: str, action: str) -> dict:
 
 # --- revoking -------------------------------------------------------------------------------------
 
-def revoke(db: Session, jti: str, *, chair_id: str) -> bool:
+def revoke(db: Session, jti: str, *, person_id: str) -> bool:
+    """Revoke a note: the one who approved it, or an approver on its request's resource."""
     note = db.get(ChairNote, jti)
-    if note is None or note.person_id != chair_id:
+    if note is None:
         return False
+    if note.person_id != person_id:
+        req = db.get(ChairRequest, note.req)
+        if req is None or not can_approve(db, person_id, req):
+            return False
     if note.revoked_time is None:
         note.revoked_time = _now()
         db.commit()
     return True
 
 
-def revoke_all(db: Session, *, chair_id: str) -> int:
+def revoke_all(db: Session, *, person_id: str) -> int:
+    """Revoke every unspent, unexpired note `person_id` approved."""
     now = _now()
     n = 0
-    for note in db.query(ChairNote).filter(ChairNote.person_id == chair_id,
+    for note in db.query(ChairNote).filter(ChairNote.person_id == person_id,
                                            ChairNote.revoked_time.is_(None)):
         if _aware(note.expires_time) > now:
             note.revoked_time = now
@@ -446,15 +440,17 @@ def revoke_all(db: Session, *, chair_id: str) -> int:
     return n
 
 
-def pending(db: Session) -> list[ChairRequest]:
+def pending_for(db: Session, person_id: str) -> list[ChairRequest]:
+    """The open requests `person_id` can approve, oldest first."""
     now = _now()
-    rows = db.query(ChairRequest).filter(ChairRequest.state == "pending") \
+    rows = db.query(ChairRequest).filter(ChairRequest.state == "pending",
+                                         ChairRequest.resource_id.isnot(None)) \
         .order_by(ChairRequest.created_time).all()
-    return [r for r in rows if _aware(r.expires_time) > now]
+    return [r for r in rows if _aware(r.expires_time) > now and can_approve(db, person_id, r)]
 
 
-def live_notes(db: Session, chair_id: str) -> list[ChairNote]:
+def live_notes(db: Session, person_id: str) -> list[ChairNote]:
     now = _now()
-    rows = db.query(ChairNote).filter(ChairNote.person_id == chair_id,
+    rows = db.query(ChairNote).filter(ChairNote.person_id == person_id,
                                       ChairNote.revoked_time.is_(None)).all()
     return [n for n in rows if _aware(n.expires_time) > now]

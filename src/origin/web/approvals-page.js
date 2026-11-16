@@ -1,13 +1,11 @@
-/* The chair's approvals page (/approvals). Every call runs in the chair's Origin session: a
+/* The approvals page (/approvals). Every call runs in the viewer's Origin session: a
  * same-origin fetch that sends the cookie and the page's own address as Referer, which is how
  * Origin knows the call comes from this page. Nothing here holds a bearer token. */
 (function () {
   "use strict";
   const $ = function (s) { return document.querySelector(s); };
   const TZ = "America/Toronto";
-  const GLOSS = { Routine: "routine", Costed: "costs money", Outward: "goes public",
-                  Governance: "changes who decides" };
-  const ORDER = ["Governance", "Outward", "Costed", "Routine"];
+  const CANNOT = "You can't approve this request. Approving needs update access to it.";
   let state = null;      // the last /notes/page/state
   let current = null;    // the request on screen
 
@@ -63,6 +61,15 @@
     return firstLine(req.summary) || (req.kind === "question" ? "A question" : req.kind);
   }
   function noun(req) { return req.kind === "question" ? "question" : "request"; }
+  /* The level is the filer's own label; it shows only when the filer set one. */
+  function levelTag(req) {
+    return req.level ? el("span", "level", req.level) : null;
+  }
+  function metaLine(box, req, rest) {
+    const tag = levelTag(req);
+    if (tag) { box.appendChild(tag); box.appendChild(document.createTextNode(" · ")); }
+    box.appendChild(document.createTextNode(rest));
+  }
 
   /* --- signing in --------------------------------------------------------------------------- */
 
@@ -97,22 +104,13 @@
     const pending = sorted(state.pending.filter(function (r) { return r.state === "pending"; }));
     if (!pending.length) {
       box.appendChild(el("p", null, "Nothing waiting for you."));
-      box.appendChild(el("p", "muted", "Train request after " + when(state.next_cut) + "."));
     } else {
-      const counts = el("div", "counts");
-      ORDER.forEach(function (lv) {
-        const n = pending.filter(function (r) { return r.level === lv; }).length;
-        if (n) counts.appendChild(el("span", null, n + " " + lv));
-      });
-      box.appendChild(counts);
       pending.forEach(function (r) {
         const b = el("button", "row");
         b.type = "button";
         b.appendChild(el("b", null, title(r)));
         const meta = el("span", "muted");
-        meta.appendChild(el("span", "level " + r.level, r.level));
-        meta.appendChild(document.createTextNode(" · " + GLOSS[r.level] + " · expires " +
-                                                 when(r.expires) + " · " + r.filed_by));
+        metaLine(meta, r, "expires " + when(r.expires) + " · " + r.filed_by);
         b.appendChild(meta);
         b.addEventListener("click", function () { openRequest(r.id); });
         box.appendChild(b);
@@ -286,16 +284,11 @@
 
   function renderDecision(box, req) {
     box.appendChild(el("div", "spacer"));
-    if (req.level === "Governance") {
-      box.appendChild(el("p", "banner", "Decide at your desk. Phone approval for Governance comes later."));
-    } else if (!req.strong) {
-      box.appendChild(el("p", "banner", "Approving needs a passkey sign-in. Sign in, and this " +
-                                        noun(req) + " opens again."));
-      const s = el("button", "primary", "Sign in with a passkey");
-      s.type = "button";
-      s.addEventListener("click", function () { signIn("Sign in with a passkey to approve."); });
-      box.appendChild(s);
-    } else if (req.kind === "question") {
+    if (!req.can_decide) {
+      box.appendChild(el("p", "banner", CANNOT));
+      return;
+    }
+    if (req.kind === "question") {
       (req.options || []).forEach(function (o) {
         const b = el("button", "primary option", o.label);
         b.type = "button";
@@ -334,9 +327,7 @@
     if (banner) { $("#banner").textContent = banner; hide("#banner", false); } else hide("#banner", true);
 
     const head = el("p", "muted");
-    head.appendChild(el("span", "level " + req.level, req.level));
-    head.appendChild(document.createTextNode(" · " + GLOSS[req.level] + " · Written by " + req.filed_by +
-                                             " · expires " + when(req.expires)));
+    metaLine(head, req, "Written by " + req.filed_by + " · expires " + when(req.expires));
     box.appendChild(head);
     if (req.summary && req.summary.indexOf("\n") >= 0) box.appendChild(el("div", "summary", req.summary));
     renderEvidence(box, req.evidence);
@@ -368,9 +359,35 @@
     window.scrollTo(0, 0);
   }
 
+  /* A request the viewer cannot see: the refusal names nothing of it, and offers a way back and a
+   * way to ask for access. Asking copies the request's link to hand to an admin of its workspace. */
+  function renderRefused(id, data) {
+    current = null;
+    const box = $("#detail");
+    box.textContent = "";
+    $("#heading").textContent = "Approvals";
+    hide("#banner", true); show("");
+    box.appendChild(el("p", "refusal", CANNOT));
+    const back = el("a", "primary", "Back to Agience");
+    back.href = (data && data.app_uri) || (state && state.app_uri) || "/";
+    box.appendChild(back);
+    box.appendChild(el("div", "spacer"));
+    const ask = el("button", "secondary", "Ask for access");
+    ask.type = "button";
+    ask.addEventListener("click", async function () {
+      const link = location.origin + "/approvals?req=" + encodeURIComponent(id);
+      try { await navigator.clipboard.writeText(link); } catch (e) { /* shown below either way */ }
+      show("Send this link to an admin of the request's workspace and ask them for approve " +
+           "access: " + link, "ok");
+    });
+    box.appendChild(ask);
+    hide("#list", true); hide("#detail", false); hide("#bottom", true);
+  }
+
   async function openRequest(id, keepMsg, banner) {
     const r = await call("GET", "/notes/page/requests/" + encodeURIComponent(id));
     if (r.status === 401) { signIn(); return; }
+    if (r.status === 403 && r.data && r.data.app_uri !== undefined) { renderRefused(id, r.data); return; }
     if (!r.ok) { show(r.detail || "Could not open the request.", "err"); return; }
     if (!keepMsg) show("");
     history.replaceState(null, "", "/approvals?req=" + encodeURIComponent(id));
@@ -388,7 +405,7 @@
       await openRequest(req.id, false, "This request changed after you opened it. Here is the new version.");
       return;
     }
-    if (r.status === 401) { signIn("Sign in with a passkey to approve."); show(r.detail || "", "err"); return; }
+    if (r.status === 401) { signIn("Sign in to decide."); show(r.detail || "", "err"); return; }
     if (!r.ok) { show(r.detail || "That did not go through.", "err"); return; }
     const s = await call("GET", "/notes/page/state");
     if (s.ok) state = s.data;
