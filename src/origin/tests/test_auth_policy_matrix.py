@@ -99,6 +99,16 @@ PUBLIC = {
     ("GET", "/passkey"): _SHELL,
     ("GET", "/job-grant"): _SHELL,
     ("GET", "/key"): _SHELL,
+    ("GET", "/approvals"): _SHELL,
+    # Phone approvals: the chair's page calls answer only the chair's Origin session from Origin's
+    # own page, with a form token bound to that session; approving needs a passkey or code sign-in.
+    ("GET", "/notes/page/state"): "the chair's approvals, read in the chair's Origin session on Origin's page",
+    ("GET", "/notes/page/requests/{req_id}"): "one request, read in the chair's Origin session on Origin's page",
+    ("POST", "/notes/page/decide"): "the chair's decision in their Origin session, bound by its form token",
+    ("POST", "/notes/page/revoke"): "a note revoked in the chair's Origin session, bound by its form token",
+    ("POST", "/notes/page/revoke-all"): "every unspent note revoked in the chair's Origin session, by form token",
+    ("POST", "/notes/page/sign-out-everywhere"): "the chair's sign-ins ended in their Origin session, by form token",
+    ("POST", "/notes/spend"): "the note is the credential: signed by Origin, spent once per action it covers",
     ("GET", "/auth/signup-form"): "the sign-up form's time-stamped token (FR-027); it grants nothing "
                                   "and only lets a later sign-up show the form was really filled in",
 
@@ -131,6 +141,13 @@ PUBLIC = {
     ("POST", "/auth/password/reset-confirm"): _PREAUTH,
     # Names the account a reset link resets; the link's signed, single-use token is the credential.
     ("POST", "/auth/password/reset-check"): _PREAUTH,
+    # Feedback from the Help panel, from anyone, signed in or not: a person who cannot sign in is
+    # the one most likely to need it. It files only into the Feedback collection, as the feedback
+    # account, after the sign-up form's FR-027 tests and hourly ceilings (`feedback_intake.admit`).
+    ("GET", "/feedback/form"): "the feedback form's FR-027 token, fetched before anything is "
+                               "sent, as the sign-up form's is",
+    ("POST", "/feedback"): "feedback from anyone; admitted by FR-027's tests and ceilings, filed "
+                           "only into the Feedback collection, the same thank-you either way",
     ("POST", "/auth/otp/request"): _PREAUTH,
     ("POST", "/auth/otp/verify"): _PREAUTH,
     ("POST", "/auth/passkey/login-options"): _PREAUTH,

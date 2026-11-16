@@ -5,6 +5,26 @@ All notable changes to `agience-origin` are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-15
+
+### Added
+- `POST /notes/requests` and `GET /notes/requests/{id}` let a signed-in account, including an agent's own, file a request for the chair's approval and read it back. Filing computes a digest of the exact fields and raises the level to the floor for its kind.
+- The chair decides requests on Origin's own page at `/approvals` (`/notes/page/*`), in the chair's Origin session. An approval mints a signed `chair-note+jwt` note bound to the request's digest, only in a session signed in by a passkey or a one-time code. The page also revokes unspent notes, revokes all of them, and signs the chair out everywhere.
+- `POST /notes/spend` spends a note once per action. A note carries `token_type: "chair_note"`, so no bearer check accepts it.
+- `POST /feedback` and `GET /feedback/form` file Help-panel feedback as an item in the platform's Feedback collection, under the feedback account's own identity. The request must pass the sign-up form's checks, a length cap and hourly ceilings; it is answered with the same thank-you whether or not it is filed. It answers 503 when feedback is not configured or Mantle does not take it.
+- The grants list at `/authority/session` shows `invited_address` and `sent_at` for a pending email invite, to people who may share the item. The address is stored in the new `invite_addresses` table and deleted once the invite is claimed, declined, revoked, expired or spent.
+- Origin sessions record `auth_time`, `amr` and `last_seen_time`, set by the sign-in method: passkey, one-time code, password, email link or federated sign-in.
+- The operator can conduct an existing link stored with the empty mask when the person who added it holds Share or Admin on what it links, through `conduct_existing_links` in `services/authority_ledger`.
+
+### Changed
+- An access check on a node now follows every edge into it by its mask, not only the creation edge. A deny on the node itself still refuses, and a deny higher up cuts only the paths through it.
+- Restoring an orphaned creation edge is refused when the node already has one, or when no container holds it.
+- Invite emails and the grantee name shown for a user grant use the sender's display name, or else the verified address.
+
+### Breaking
+- New required setting: `CHAIR_EMAIL` names the chair by a verified address. Without it every `/notes` route answers 503. `FEEDBACK_BOT_ID` and `FEEDBACK_COLLECTION_ID` are needed for feedback to be accepted.
+- Migrations `0033_invite_addresses` and `0034_chair_notes` add tables and nullable `origin_sessions` columns. Neither downgrade drops them, so a rollback needs only `alembic stamp`.
+
 ## [0.2.25] - 2026-11-14
 
 ### Added

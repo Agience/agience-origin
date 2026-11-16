@@ -100,4 +100,4 @@ async def verify_otp(
     db.commit()
     from origin.routers.auth_router import _signed_in_on_page
     return _signed_in_on_page(request, db, str(person.id), OTPVerifyResponse(
-        access_token=access_token, refresh_token=refresh_token).model_dump())
+        access_token=access_token, refresh_token=refresh_token).model_dump(), ["otp"])

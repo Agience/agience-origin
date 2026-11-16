@@ -18,6 +18,16 @@ import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi.testclient import TestClient
+# Every temporary file or folder this run makes, by `tempfile` (`mkdtemp()` included) or by a
+# subprocess (`TMPDIR`), goes in one folder of its own, removed when the run ends. A CI host keeps its
+# temp directory in memory, and a folder left by every run fills it.
+import atexit as _tmp_atexit
+import shutil as _tmp_shutil
+import tempfile as _tmp_tempfile
+_RUN_TMP = _tmp_tempfile.mkdtemp(prefix="origin-tests-")
+_tmp_tempfile.tempdir = _RUN_TMP
+_os.environ["TMPDIR"] = _RUN_TMP
+_tmp_atexit.register(_tmp_shutil.rmtree, _RUN_TMP, ignore_errors=True)
 
 #: The test node's own redirect URIs (`CLIENT_REDIRECT_URIS`), on the in-code default host
 #: (`FACET_URI` = `ORIGIN_URI` = http://localhost:8080): a callback, the web app's callback and

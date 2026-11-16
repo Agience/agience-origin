@@ -171,6 +171,8 @@ class ReplicaView(Protocol):
 
     def origin_children(self, node_id: str) -> List[str]: ...
 
+    def parents(self, node_id: str) -> List[Tuple[str, Any]]: ...
+
     def origin_added_by(self, node_id: str) -> Optional[str]: ...
 
     def edge(self, src: str, dst: str) -> Optional[dict]: ...
@@ -217,6 +219,9 @@ class MemoryReplica:
 
     def origin_children(self, node_id):
         return [d for (s, d), e in sorted(self.edges.items()) if s == node_id and e.get("origin")]
+
+    def parents(self, node_id):
+        return [(s, e.get("propagate")) for (s, d), e in sorted(self.edges.items()) if d == node_id]
 
     def origin_added_by(self, node_id):
         for (s, d), e in sorted(self.edges.items()):
@@ -323,6 +328,35 @@ class Reach:
             seen.add(parent_id)
             cursor = parent_id
 
+    # `lattice_api.light_cone` (BUG-074, John 2026-11-14): every edge into a node conducts by its
+    # mask, the creation edge or any other; breadth-first, nearest first. A node `cut` is true of
+    # (a deny) is yielded and not walked past.
+    def cone(self, node_id: str, action: str, *, cut=None,
+             ceiling: int = ORIGIN_WALK_CEILING) -> Iterator[str]:
+        first = str(node_id)
+        seen = {first}
+        yield first
+        frontier = [first]
+        while frontier:
+            nxt = []
+            for node in frontier:
+                if cut is not None and cut(node):
+                    continue
+                for src, mask in self.r.parents(node):
+                    if not src or not propagates(mask, action):
+                        continue
+                    src = str(src)
+                    if src in seen:
+                        continue
+                    seen.add(src)
+                    if len(seen) > ceiling:
+                        raise OriginChainUnterminated(
+                            f"the light cone above {node_id!r} did not close within {ceiling} "
+                            "nodes")
+                    yield src
+                    nxt.append(src)
+            frontier = nxt
+
     # `LightConeResolver._grants_for` for a person: active, unexpired, held as `user`.
     def grants(self, subject: str, *, not_issued_by: Optional[str] = None) -> List[Grant]:
         return [g for g in self.r.grants_held_by(str(subject))
@@ -353,9 +387,11 @@ class Reach:
         if not allow:
             return None
         try:
-            for resource in self.chain(str(node_id), action):
+            for resource in self.cone(str(node_id), action, cut=deny.__contains__):
                 if resource in deny:
-                    return None
+                    if resource == str(node_id):
+                        return None                   # a deny on the node itself
+                    continue                          # a deny above cuts its paths only
                 if resource in allow:
                     return allow[resource]
         except Exception:  # noqa: BLE001 — a malformed chain authorizes nothing

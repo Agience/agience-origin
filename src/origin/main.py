@@ -34,6 +34,8 @@ from origin.routers.auth_router import internal_router as auth_internal_router
 from origin.routers.auth_router import root_router as auth_root_router
 from origin.routers.otp_router import otp_router
 from origin.routers.passkey_router import passkey_router
+from origin.routers.feedback_router import feedback_router
+from origin.routers.notes_router import notes_router
 from origin.routers.system_router import system_router
 from origin.routers.server_credentials_router import router as server_credentials_router
 from origin.routers.setup_router import setup_router
@@ -619,6 +621,8 @@ app.include_router(oracle_router)
 app.include_router(key_share_router)
 app.include_router(delegation_router)
 app.include_router(authority_router)
+app.include_router(feedback_router)
+app.include_router(notes_router)
 from origin.routers.authority_session_router import authority_session_router  # noqa: E402 (review 12)
 app.include_router(authority_session_router)
 
@@ -810,6 +814,17 @@ def job_grant_page(back: str = "") -> Response:
     if back.rstrip("/").lower() not in _app_origins():
         return Response(status_code=400, content="unknown app origin", media_type="text/plain")
     out = _page("job-grant.html")
+    out.headers["Content-Security-Policy"] = PASSKEY_PAGE_CSP
+    out.headers["Cache-Control"] = "no-store"
+    out.headers["Referrer-Policy"] = "no-referrer"
+    return out
+
+
+@app.get("/approvals", include_in_schema=False)
+def approvals_page() -> Response:
+    """The chair's approvals (`/notes/page/*`): what agents asked for, decided here in the chair's
+    Origin session. A note is minted only in a session signed in by a passkey or a one-time code."""
+    out = _page("approvals.html")
     out.headers["Content-Security-Policy"] = PASSKEY_PAGE_CSP
     out.headers["Cache-Control"] = "no-store"
     out.headers["Referrer-Policy"] = "no-referrer"

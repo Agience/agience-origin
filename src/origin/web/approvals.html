@@ -1,0 +1,63 @@
+<!doctype html><html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Approvals · Agience</title><link rel="icon" href="/web/favicon.png"><link rel="stylesheet" href="/web/app.css">
+<style>
+  .card.wide { max-width: 560px; }
+  .counts { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; margin: 0 0 14px; font-size: 13px; }
+  .counts span { background: #f3f4f6; border-radius: 999px; padding: 4px 10px; }
+  .row { display: block; width: 100%; text-align: left; background: #fff; border: 1px solid #e5e7eb;
+         border-radius: 12px; padding: 12px 14px; margin: 0 0 10px; min-height: 48px; cursor: pointer; font: inherit; color: inherit; }
+  .row b { display: block; font-weight: 600; }
+  .row .muted { font-size: 12px; }
+  .level { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; }
+  .level.Outward, .level.Governance { color: #b45309; }
+  .field { padding: 8px 0; border-bottom: 1px solid #eef0f3; font-size: 13px; overflow-wrap: anywhere; }
+  .field .k { color: #6b7280; display: block; font-size: 12px; }
+  .head { display: flex; flex-wrap: wrap; gap: 6px; align-items: baseline; padding: 6px 0; }
+  .sha { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; background: #f3f4f6; border: 0;
+         border-radius: 6px; padding: 6px 8px; min-height: 44px; font-size: 13px; cursor: pointer;
+         overflow-wrap: anywhere; text-align: left; color: inherit; }
+  .mark { font-size: 12px; font-weight: 600; }
+  .mark.same { color: #16a34a; } .mark.diff { color: #dc2626; } .mark.none { color: #6b7280; }
+  .digest { margin: 14px 0 4px; text-align: center; }
+  .digest .big { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 26px; letter-spacing: .06em; }
+  .digest .small { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+  .evidence { background: #f0fdf4; border-radius: 10px; padding: 10px 12px; margin: 12px 0; font-size: 13px; }
+  .evidence a { font-size: 12px; }
+  .summary { white-space: pre-wrap; font-size: 13px; color: #374151; margin: 8px 0 12px; }
+  .step { border-left: 3px solid #e5e7eb; padding-left: 10px; margin: 10px 0; }
+  .option { min-height: 56px; font-size: 16px; }
+  .banner { background: #eff6ff; border-radius: 10px; padding: 10px 12px; margin: 0 0 12px; font-size: 13px; }
+  textarea { width: 100%; padding: 10px 12px; border: 1px solid #d1d5db; border-radius: 10px; font: inherit; min-height: 44px; }
+  button.secondary { width: 100%; margin-top: 12px; padding: 12px; min-height: 44px; border: 1px solid #d1d5db;
+                     border-radius: 10px; background: #fff; font-size: 14px; font-weight: 600; cursor: pointer; }
+  button.danger { color: #b91c1c; }
+  button.link { min-height: 44px; }
+  .bottom { margin-top: 36px; padding-top: 14px; border-top: 1px solid #e5e7eb; }
+  .spacer { height: 28px; }
+</style>
+</head><body>
+<div class="bg"><div class="grad"></div><div class="blob b1"></div><div class="blob b2"></div></div>
+<div class="card wide">
+  <img class="logo" src="/web/logo_v.png" alt="Agience">
+  <h1 id="heading">Approvals</h1>
+
+  <div id="signin" class="hidden">
+    <p class="muted" id="signinWhy">Sign in at Origin to see what is waiting for you.</p>
+    <input id="email" type="email" autocomplete="username webauthn" placeholder="Email">
+    <button class="primary" id="signinBtn" type="button">Sign in with a passkey</button>
+    <p class="muted"><a href="/login" target="_blank" rel="noopener">Sign in with a one-time code</a>, then reload this page.</p>
+  </div>
+
+  <div id="banner" class="banner hidden"></div>
+  <div id="list" class="hidden"></div>
+  <div id="detail" class="hidden"></div>
+  <div id="bottom" class="bottom hidden"></div>
+
+  <div class="msg" id="msg"></div>
+</div>
+<script src="/web/bg.js"></script>
+<script src="/web/app.js"></script>
+<script src="/web/passkey.js"></script>
+<script src="/web/approvals-page.js"></script>
+</body></html>

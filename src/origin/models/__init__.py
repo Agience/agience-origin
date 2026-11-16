@@ -29,7 +29,9 @@ from origin.models.key_custody import (
 from origin.models.authority_ledger import (
     AuthorityBootstrapWindow, AuthorityEdge, AuthorityEntry, AuthorityGrant, AuthorityNode,
     AuthorityRoot, AuthoritySigningKey, OperatorAlert, AuthorityJobGrant, AuthorityKey,
+    InviteAddress,
 )
+from origin.models.chair_note import ChairNote, ChairRequest, ChairSpend
 
 __all__ = [
     "UseNonce",
@@ -67,6 +69,10 @@ __all__ = [
     "OperatorAlert",
     "AuthorityJobGrant",
     "AuthorityKey",
+    "InviteAddress",
     "DelegationRecord",
     "SeedCredential",
+    "ChairRequest",
+    "ChairNote",
+    "ChairSpend",
 ]

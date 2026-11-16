@@ -28,6 +28,8 @@
     show(detail || "Refused.", "err");
     $("#approveBtn").classList.add("hidden");
     $("#cancelBtn").textContent = "Close";
+    /* The app is told at once, with the reason, and stops waiting for an approval. */
+    answer({ type: "agience.job-grant-refused", detail: detail || "Refused." });
   }
   function done(message) {
     answer(message);

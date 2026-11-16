@@ -382,6 +382,12 @@ class SqlReplica:
                 .order_by(AuthorityEdge.src).all())
         return [(r.src, _prop_load(r.propagate)) for r in rows]
 
+    def parents(self, node_id):
+        """Every edge into `node_id`, the creation edge or any other: `(src, propagate)`."""
+        rows = (self.db.query(AuthorityEdge).filter(AuthorityEdge.dst == node_id)
+                .order_by(AuthorityEdge.src).all())
+        return [(r.src, _prop_load(r.propagate)) for r in rows]
+
     def origin_children(self, node_id):
         rows = (self.db.query(AuthorityEdge.dst)
                 .filter(AuthorityEdge.src == node_id, AuthorityEdge.origin.is_(True))
@@ -1468,10 +1474,65 @@ def restore_creation_edge(db: Session, seq: int, operator_id: str, ref: str) -> 
             break
     if prior is None or not prior.get("origin"):
         raise EntryRefused(f"entry {seq} did not remove a creation edge", 400)
+    holders = db.query(AuthorityEdge).filter(AuthorityEdge.dst == b["dst"])
+    if holders.filter(AuthorityEdge.origin.is_(True)).count():
+        raise EntryRefused(f"{b['dst']} has a creation edge now", 409)
+    if not holders.count():
+        raise EntryRefused(f"no container holds {b['dst']}: it was deleted, not orphaned", 409)
     body = {"kind": "edge.add", "src": b["src"], "dst": b["dst"], "origin": True,
             "propagate": prior.get("propagate")}
     return append(db, body, actor=Actor(operator_id, "operator", ref),
                   submitted_jti=f"console:{ref}")
+
+
+#: What a link's adder holds on what it links for the link to conduct (John, 2026-11-15).
+LINK_CONDUCTS_ON = ("share", "admin")
+
+
+def _link_adder_shares(rc: Reach, db: Session, src: str, dst: str) -> bool:
+    row = db.get(AuthorityEdge, (src, dst))
+    adder = (row.added_by or "") if row is not None else ""
+    return bool(adder) and any(rc.reaches(adder, dst, a) for a in LINK_CONDUCTS_ON)
+
+
+def _conducts_existing_link(rc: Reach, ctx: "Context", b: dict) -> bool:
+    """The operator's second widening (John, 2026-11-15): an existing link (not a creation edge)
+    stored with the empty mask conducts everything, when the person who added it holds Share (or
+    Admin) on what it links. Nothing else about the edge changes."""
+    if b["origin"] or b["propagate"] is not None or ctx.db is None:
+        return False
+    prior = rc.r.edge(b["src"], b["dst"])
+    if prior is None or prior["origin"] or not _same_mask(prior["propagate"], []):
+        return False
+    return _link_adder_shares(rc, ctx.db, b["src"], b["dst"])
+
+
+def links_to_conduct(db: Session) -> tuple:
+    """The links the rewrite conducts, and the ones it leaves blocked: `(conduct, kept)`, each a
+    sorted list of `(src, dst)`; `kept` pairs carry the adder, `(src, dst, added_by)`. Decided on
+    the store as it stands, before any of them changes."""
+    rc = reach(db)
+    conduct, kept = [], []
+    for row in (db.query(AuthorityEdge).filter(AuthorityEdge.origin.is_(False))
+                .order_by(AuthorityEdge.src, AuthorityEdge.dst)):
+        if not _same_mask(_prop_load(row.propagate), []):
+            continue
+        if _link_adder_shares(rc, db, row.src, row.dst):
+            conduct.append((row.src, row.dst))
+        else:
+            kept.append((row.src, row.dst, row.added_by or ""))
+    return conduct, kept
+
+
+def conduct_existing_links(db: Session, operator_id: str, ref: str) -> list:
+    """The operator's rewrite of existing links (John, 2026-11-15): each link stored with the empty
+    mask whose adder holds Share on what it links is restated to conduct, one `edge.add` entry
+    each, in `links_to_conduct` order. Returns the receipts."""
+    conduct, _kept = links_to_conduct(db)
+    actor = Actor(operator_id, "operator", ref)
+    return [append(db, {"kind": "edge.add", "src": src, "dst": dst, "origin": False,
+                        "propagate": None}, actor=actor, submitted_jti=f"console:{ref}")
+            for src, dst in conduct]
 
 
 def revoke_entry(db: Session, seq: int, operator_id: str, ref: str) -> Optional[dict]:
@@ -2301,9 +2362,10 @@ def _operator_only():
 
 
 def _decide_operator(rc: Reach, ctx: "Context", b: dict) -> Optional[str]:
-    """The operator, through the console, revokes or removes; they never widen reach. They also
-    retire a planted root or node (its grants revoked and its edges removed first, as their own
-    entries)."""
+    """The operator, through the console, revokes or removes. They widen reach in two cases only:
+    restoring a creation edge a removal took from a held member, and conducting an existing link
+    stored with the empty mask whose adder holds Share on what it links. They also retire a planted
+    root or node (its grants revoked and its edges removed first, as their own entries)."""
     if b["kind"] == "root.confirm_empty":
         raise EntryRefused("a charged root is no longer confirmed: its key is rotated at step 21 "
                            "and opens for its own principal alone", 409)
@@ -2352,14 +2414,17 @@ def _decide_operator(rc: Reach, ctx: "Context", b: dict) -> Optional[str]:
         # only narrows, and Mantle applies it to the key it holds under that id.
         return "the operator revokes a key"
     if b["kind"] == "edge.add":
-        # The one widening the operator makes (John to approve, 2026-11-14): restoring the creation
-        # edge a removal took from a member still held elsewhere, which Origin read as deleting it.
+        # Restoring the creation edge a removal took from a member still held elsewhere, which
+        # Origin read as deleting it (2026-11-14); and conducting an existing link (2026-11-15).
         src, dst = b["src"], b["dst"]
         if (b["origin"] and rc.origin_parent(dst) is None and rc.r.has_edges(dst)
                 and ctx.db is not None and _last_creation_parent(ctx.db, dst) == src):
             return "the operator restores a creation edge a removal took from a held member"
+        if _conducts_existing_link(rc, ctx, b):
+            return "the operator conducts a link whose adder holds share on what it links"
         raise EntryRefused("the operator adds an edge only to restore the creation edge a removal "
-                           "took from a member still held elsewhere", 403)
+                           "took from a member still held elsewhere, or to conduct a link stored "
+                           "with the empty mask whose adder holds share on what it links", 403)
     if b["kind"] == "edge.remove":
         return None if rc.r.edge(b["src"], b["dst"]) is None else "the operator removes an edge"
     if b["kind"] == "grant":

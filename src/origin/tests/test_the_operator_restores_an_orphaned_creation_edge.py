@@ -57,3 +57,48 @@ def test_the_operator_adds_no_other_edge(custody_client):
             L.restore_creation_edge(db, seq, "operator-1", "repair-2")      # already restored
         with pytest.raises(L.EntryRefused):
             L.append(db, af.edge(cc, x), actor=L.Actor("operator-1", "operator", "x"))
+
+
+def _entries():
+    from origin.db.session import SessionLocal
+    from origin.models.authority_ledger import AuthorityEntry
+    with SessionLocal() as db:
+        return db.query(AuthorityEntry).count()
+
+
+def test_a_member_held_nowhere_else_was_deleted_and_is_not_restored(custody_client):
+    """The removal of a member's only edge deletes it: the restore refuses, and appends nothing."""
+    import origin.services.authority_ledger as L
+    from origin.db.session import SessionLocal
+    from origin.models.authority_ledger import AuthorityEntry
+    c = custody_client
+    alice = af.person("alice", email="alice@team.test")
+    _root(c, alice, alice[0])
+    a, x = alice[0], "X-" + alice[0][:8]
+    af.ok(af.submit(c, alice[1], af.edge(a, x), batch="mk"))
+    af.ok(af.submit(c, alice[1], af.grant("g-" + x, a, x, ("read", "delete", "admin")), batch="mk"))
+    af.ok(af.submit(c, alice[1], af.unedge(a, x), batch="rm"))
+    with SessionLocal() as db:
+        seq = max(r.seq for r in db.query(AuthorityEntry).filter(AuthorityEntry.kind == "edge.remove"))
+    before = _entries()
+    with SessionLocal() as db:
+        with pytest.raises(L.EntryRefused) as refused:
+            L.restore_creation_edge(db, seq, "operator-1", "repair-1")
+    assert refused.value.status == 409 and "no container holds" in str(refused.value)
+    assert _entries() == before, "a refused restore appends nothing"
+
+
+def test_a_member_with_a_creation_edge_now_is_not_restored(custody_client):
+    """Once restored, the same entry is refused by the restore's own check, and appends nothing."""
+    import origin.services.authority_ledger as L
+    from origin.db.session import SessionLocal
+    c = custody_client
+    alice, a, cc, x, seq = _orphan(c)
+    with SessionLocal() as db:
+        L.restore_creation_edge(db, seq, "operator-1", "repair-1")
+    before = _entries()
+    with SessionLocal() as db:
+        with pytest.raises(L.EntryRefused) as refused:
+            L.restore_creation_edge(db, seq, "operator-1", "repair-2")
+    assert refused.value.status == 409 and "has a creation edge now" in str(refused.value)
+    assert _entries() == before

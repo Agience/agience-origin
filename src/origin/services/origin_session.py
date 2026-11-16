@@ -25,7 +25,28 @@ from origin.models.origin_session import OriginSession
 #: `Domain`: no sibling host can set one Origin would read (review 13, M1).
 COOKIE = "origin_session"
 HOST_COOKIE = "__Host-origin_session"
+#: A session ends after this many hours unused (`ORIGIN_SESSION_IDLE_HOURS`), and in any case
+#: this many days after its sign-in (`ORIGIN_SESSION_DAYS`).
 HOURS = 12
+DAYS = 7
+#: A session's last use is written at most this often.
+SEEN_EVERY = timedelta(minutes=5)
+
+
+def idle_hours() -> float:
+    import os
+    try:
+        return max(float(os.getenv("ORIGIN_SESSION_IDLE_HOURS", HOURS)), 0.1)
+    except ValueError:
+        return float(HOURS)
+
+
+def absolute_days() -> float:
+    import os
+    try:
+        return max(float(os.getenv("ORIGIN_SESSION_DAYS", DAYS)), 0.01)
+    except ValueError:
+        return float(DAYS)
 
 
 class TossedCookie(HTTPException):
@@ -83,24 +104,28 @@ def _digest(raw: str) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
-def issue(db: Session, person_id: str) -> str:
-    """A new session for `person_id`; the raw cookie value (never stored). The caller commits."""
+def issue(db: Session, person_id: str, amr: Optional[list] = None) -> str:
+    """A new session for `person_id`, signed in now by the methods `amr` names (`pop` a passkey,
+    `otp` a one-time code, `pwd` a password, `fed` a federated provider); the raw cookie value
+    (never stored). The caller commits."""
     raw = secrets.token_urlsafe(32)
+    now = _now()
     db.add(OriginSession(id_sha256=_digest(raw), person_id=str(person_id),
-                         expires_time=_now() + timedelta(hours=HOURS)))
+                         expires_time=now + timedelta(days=absolute_days()), auth_time=now,
+                         amr=list(amr or []), last_seen_time=now))
     db.flush()
     return raw
 
 
 def set_cookie(response, raw: str) -> None:
-    response.set_cookie(cookie_name(), raw, max_age=HOURS * 3600, httponly=True,
+    response.set_cookie(cookie_name(), raw, max_age=int(absolute_days() * 86400), httponly=True,
                         secure=_https(), samesite="strict", path="/")
 
 
-def start(db: Session, response, person_id: Optional[str]) -> None:
+def start(db: Session, response, person_id: Optional[str], amr: Optional[list] = None) -> None:
     """Sign the person in to Origin's own session on this response, when Origin knows who it is."""
     if person_id:
-        set_cookie(response, issue(db, str(person_id)))
+        set_cookie(response, issue(db, str(person_id), amr))
         db.commit()
 
 
@@ -110,14 +135,29 @@ def digest_of(request: Request) -> Optional[str]:
     return _digest(raw) if raw else None
 
 
-def person_of(request: Request, db: Session) -> Optional[str]:
+def session_of(request: Request, db: Session) -> Optional[OriginSession]:
+    """The live Origin session this request carries, or None."""
     raw = _raw(request)
     if not raw:
         return None
     row = db.get(OriginSession, _digest(raw))
-    if row is None or row.revoked_time is not None or _aware(row.expires_time) <= _now():
+    now = _now()
+    if row is None or row.revoked_time is not None or _aware(row.expires_time) <= now:
         return None
-    return row.person_id
+    seen = _aware(row.last_seen_time or row.created_time)
+    if seen is not None and seen + timedelta(hours=idle_hours()) <= now:
+        return None
+    if seen is None or now - seen >= SEEN_EVERY:
+        row.last_seen_time = now
+        # Written now when nothing else is pending; otherwise the caller's commit carries it.
+        if not (db.new or db.deleted or [o for o in db.dirty if o is not row]):
+            db.commit()
+    return row
+
+
+def person_of(request: Request, db: Session) -> Optional[str]:
+    row = session_of(request, db)
+    return row.person_id if row is not None else None
 
 
 def require(request: Request, db: Session, person_id: str) -> None:

@@ -7,7 +7,7 @@ this session. Only the SHA-256 of the cookie is kept.
 """
 from datetime import datetime, timezone
 
-from sqlalchemy import Column, DateTime, String
+from sqlalchemy import JSON, Column, DateTime, String
 
 from origin.db.base import Base
 
@@ -24,3 +24,10 @@ class OriginSession(Base):
     created_time = Column(DateTime(timezone=True), nullable=False, default=_utcnow)
     expires_time = Column(DateTime(timezone=True), nullable=False)
     revoked_time = Column(DateTime(timezone=True), nullable=True)
+    #: When the sign-in that started the session happened, and how (RFC 8176 values: `pop` and
+    #: `mfa` for a passkey with user verification, `otp`, `pwd`, `fed` for a federated sign-in).
+    #: A chair note carries both.
+    auth_time = Column(DateTime(timezone=True), nullable=True)
+    amr = Column(JSON, nullable=True)
+    #: The session's last use, for the idle timeout.
+    last_seen_time = Column(DateTime(timezone=True), nullable=True)
