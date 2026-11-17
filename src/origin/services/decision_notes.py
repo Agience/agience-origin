@@ -294,6 +294,7 @@ def request_view(db: Session, req: DecisionRequest) -> dict:
 # --- decisions ------------------------------------------------------------------------------------
 
 CANNOT_APPROVE = "You can't approve this request. Approving needs Editor access to it."
+FILER_CANNOT_APPROVE = "You filed this request, so someone else approves it. You can withdraw it."
 
 
 def _decidable(db: Session, req: Optional[DecisionRequest], person_id: str,
@@ -301,7 +302,8 @@ def _decidable(db: Session, req: Optional[DecisionRequest], person_id: str,
     if req is None:
         raise NoteRefused(404, "no such request")
     if not can_approve(db, person_id, req):
-        raise NoteRefused(403, CANNOT_APPROVE)
+        raise NoteRefused(403, FILER_CANNOT_APPROVE if person_id == req.filed_by_account
+                          else CANNOT_APPROVE)
     if not is_open(req):
         raise NoteRefused(409, "this request is no longer open")
     if digest is not None and digest != req.digest:

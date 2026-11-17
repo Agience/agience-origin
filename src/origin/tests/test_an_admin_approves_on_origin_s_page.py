@@ -210,8 +210,8 @@ def test_admin_without_update_does_not_approve(custody_client, approver, agent):
 
 def test_the_filer_gains_nothing_by_filing(custody_client, approver, agent):
     """Filing writes the request and no grant: a filer holding read and add on the collection,
-    and nothing more, cannot decide its own request."""
-    from origin.services.decision_notes import CANNOT_APPROVE
+    and nothing more, cannot decide its own request, and is told why."""
+    from origin.services.decision_notes import FILER_CANNOT_APPROVE
     c = custody_client
     _share(c, approver, "g-W-agent-add", agent, ("add",))
     filed = _release(c, agent)
@@ -220,13 +220,13 @@ def test_the_filer_gains_nothing_by_filing(custody_client, approver, agent):
     view = _open(c, filed["id"])
     assert view["can_decide"] is False
     r = _decide(c, view)
-    assert r.status_code == 403 and r.json()["detail"] == CANNOT_APPROVE
+    assert r.status_code == 403 and r.json()["detail"] == FILER_CANNOT_APPROVE
     _session(c, approver[0])
     assert _decide(c, _open(c, filed["id"])).status_code == 200
 
 
 def test_a_reader_sees_the_request_and_cannot_decide_it(custody_client, approver, agent):
-    from origin.services.decision_notes import CANNOT_APPROVE
+    from origin.services.decision_notes import FILER_CANNOT_APPROVE
     c = custody_client
     filed = _release(c, agent)
     _session(c, agent[0])
@@ -236,7 +236,7 @@ def test_a_reader_sees_the_request_and_cannot_decide_it(custody_client, approver
     assert view["can_decide"] is False and view["fields"] == RELEASE
     for decision in ("approve", "decline"):
         r = _decide(c, view, decision=decision)
-        assert r.status_code == 403 and r.json()["detail"] == CANNOT_APPROVE
+        assert r.status_code == 403 and r.json()["detail"] == FILER_CANNOT_APPROVE
     got = c.get(f"/notes/requests/{filed['id']}", headers={"Authorization": f"Bearer {agent[1]}"})
     assert got.status_code == 200 and got.json()["state"] == "pending"
 
