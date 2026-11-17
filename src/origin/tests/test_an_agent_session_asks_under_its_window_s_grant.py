@@ -316,3 +316,86 @@ def test_a_window_s_revoke_naming_no_grant_ends_the_grant_for_its_key(custody_cl
     assert r.status_code == 200 and r.json()["revoked"] == "window"
     assert _exchange(c, a, APPROVAL, _actor(session, agent, a)).status_code == 401
     assert _revoke(c, window, None, grant=None).status_code == 403
+
+
+# -- an agent's Key artifact token is the actor ----------------------------------------------------
+
+KEY = "urn:agience:params:oauth:token-type:agent-key"
+
+
+@pytest.fixture
+def keys(monkeypatch):
+    """Mantle stubbed: what `GET /credentials/self` answers for each live key token."""
+    from origin.services import agent_sessions
+    live = {}
+
+    async def reader(key):
+        if key not in live:
+            raise agent_sessions.Refused("the key is not live")
+        return live[key]
+    monkeypatch.setattr(agent_sessions, "read_key_in_mantle", reader)
+    return live
+
+
+def _key_token(artifact="key-1"):
+    return f"agk_{artifact}.{secrets.token_urlsafe(32)}"
+
+
+def _seen(person, artifact="key-1", **over):
+    return {"person": person, "actor": "agent-1", "artifact": artifact, "reach": ["ws-home"],
+            "actions": ["create", "read"], "scope": "mantle:agent",
+            "ends": (datetime.now(timezone.utc) + timedelta(days=1)).isoformat(), **over}
+
+
+def _by_key(c, key, subject=None):
+    data = {"grant_type": "urn:ietf:params:oauth:grant-type:token-exchange",
+            "actor_token": key, "actor_token_type": KEY}
+    if subject:
+        data.update(subject_token=subject, subject_token_type=KEY)
+    return c.post("/auth/token", data=data)
+
+
+def test_a_key_exchanges_for_the_person_s_token_acted_by_its_agent(custody_client, people, keys):
+    c, alice = custody_client, people["alice"][0]
+    key = _key_token()
+    keys[key] = _seen(alice)
+    for subject in (None, key):
+        r = _by_key(c, key, subject)
+        assert r.status_code == 200, r.text
+        tok = jose_jwt.get_unverified_claims(r.json()["access_token"])
+        assert tok["sub"] == alice and tok["act"] == {"sub": "agent-1"} and tok["aud"] == "mantle"
+        assert tok["scope"] == "mantle:agent" and tok["narrowed"] is True
+        assert tok["job_reach"] == ["ws-home"] and tok["reach_actions"] == ["create", "read"]
+        assert tok["exp"] - tok["iat"] <= 300
+
+
+def test_a_key_never_outlives_itself_or_names_another_key(custody_client, people, keys):
+    c, alice = custody_client, people["alice"][0]
+    soon = _key_token()
+    keys[soon] = _seen(alice, ends=(datetime.now(timezone.utc)
+                                    + timedelta(seconds=40)).isoformat())
+    tok = jose_jwt.get_unverified_claims(_by_key(c, soon).json()["access_token"])
+    assert tok["exp"] - time.time() <= 41
+    ended = _key_token()
+    keys[ended] = _seen(alice, ends=(datetime.now(timezone.utc)
+                                     - timedelta(seconds=1)).isoformat())
+    assert _by_key(c, ended).status_code == 401
+    other = _key_token("key-1")
+    keys[other] = _seen(alice, artifact="key-2")                     # Mantle names another key
+    assert _by_key(c, other).status_code == 401
+    for over in ({"reach": []}, {"actions": []}, {"actor": ""}, {"scope": "mantle:user"}):
+        bad = _key_token()
+        keys[bad] = _seen(alice, **over)
+        assert _by_key(c, bad).status_code == 401, over
+
+
+def test_a_key_mantle_refuses_or_a_wrong_subject_yields_nothing(custody_client, people, keys):
+    c, alice = custody_client, people["alice"][0]
+    assert _by_key(c, _key_token()).status_code == 401                # archived: Mantle refuses
+    assert _by_key(c, "agk_nodot").status_code == 401
+    assert _by_key(c, "not-a-key").status_code == 401
+    key = _key_token()
+    keys[key] = _seen(alice)
+    assert _by_key(c, key, subject=_key_token()).status_code == 400
+    keys[key] = _seen("no-such-person")
+    assert _by_key(c, key).status_code == 401
