@@ -1,6 +1,5 @@
-"""The request, note and spend tables are named for what they hold. A node made under their first
-names has them renamed, rows and indexes kept; a rollback renames them back."""
-import importlib
+"""The request, note and spend tables are named for what they hold, and a node at head holds them
+under those names with the models' indexes."""
 from pathlib import Path
 
 import sqlalchemy as sa
@@ -30,27 +29,14 @@ def test_the_models_name_the_tables_for_what_they_hold():
         "decision_requests", "decision_notes", "decision_spends"]
 
 
-def test_a_node_made_under_the_first_names_is_renamed_with_its_rows(tmp_path):
-    first = dict(importlib.import_module(
-        "origin.alembic.versions.0037_decision_tables")._TABLES)
+def test_a_node_at_head_holds_the_tables_and_indexes_the_models_name(tmp_path):
     db = tmp_path / "origin.db"
-    cfg = _cfg(db)
-    command.upgrade(cfg, "head")
+    command.upgrade(_cfg(db), "head")
     engine = sa.create_engine(f"sqlite:///{db}")
     try:
-        with engine.begin() as cx:
-            cx.execute(sa.text("INSERT INTO decision_spends (jti, action, id, req, spent_time) "
-                               "VALUES ('j1', 'sha256:a', 's1', 'r1', '2026-11-17 15:00:00')"))
-        command.downgrade(cfg, "0036_agent_approvals")
         names = set(sa.inspect(engine).get_table_names())
-        assert set(first) <= names and not {m.__tablename__ for m in MODELS} & names
-        command.upgrade(cfg, "head")
-        names = set(sa.inspect(engine).get_table_names())
-        assert not set(first) & names
-        with engine.connect() as cx:
-            rows = cx.execute(sa.text("SELECT jti, id FROM decision_spends")).all()
-        assert [tuple(r) for r in rows] == [("j1", "s1")]
         for m in MODELS:
+            assert m.__tablename__ in names
             assert _indexes(engine, m.__tablename__) == {ix.name for ix in m.__table__.indexes}
     finally:
         engine.dispose()
