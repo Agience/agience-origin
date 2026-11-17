@@ -9,16 +9,29 @@ function show(t,cls){ msg.className="msg "+(cls||"muted"); msg.textContent=t||""
                      "service, so you weren't sent back to it.", "err");
 })();
 
-const claims = decodeJwt(getToken()) || {};
-const rows = [
-  ["Name", claims.name || "—"],
-  ["Email", claims.email || "—"],
-  ["Roles", (claims.roles && claims.roles.length ? claims.roles.join(", ") : "—")],
-  ["ID", claims.sub || "—"],
-];
-$("#details").innerHTML = rows.map(function(r){
-  return '<div class="kv"><span class="k">'+r[0]+'</span><span>'+String(r[1]).replace(/</g,"&lt;")+'</span></div>';
-}).join("");
+// Who is signed in comes from Origin, not from the token in this browser: a token for an account
+// this store doesn't hold, or one since deactivated, is answered with a refusal and signs out here.
+let claims = {};
+(async function(){
+  const t = getToken();
+  if (!t) return;
+  let r;
+  try { r = await fetch("/auth/userinfo", { headers: { Authorization: "Bearer " + t }, cache: "no-store" }); }
+  catch (e) { show("The sign-in service can't be reached. Try again shortly.", "err"); return; }
+  if (r.status === 401 || r.status === 403 || r.status === 404) { clearToken(); location.replace("/logout"); return; }
+  if (!r.ok) { show("Your account couldn't be loaded. Try again shortly.", "err"); return; }
+  let me = {}; try { me = await r.json(); } catch (e) { /* empty body */ }
+  claims = { name: me.name, email: me.email, roles: me.roles, sub: me.id };
+  const rows = [
+    ["Name", claims.name || "—"],
+    ["Email", claims.email || "—"],
+    ["Roles", (claims.roles && claims.roles.length ? claims.roles.join(", ") : "—")],
+    ["ID", claims.sub || "—"],
+  ];
+  $("#details").innerHTML = rows.map(function(r){
+    return '<div class="kv"><span class="k">'+r[0]+'</span><span>'+String(r[1]).replace(/&/g,"&amp;").replace(/</g,"&lt;")+'</span></div>';
+  }).join("");
+})();
 
 // The way back to the app: the SP that sent this person here if its return is still stashed,
 // else the app URL Origin is configured with. Hidden when there is neither.
