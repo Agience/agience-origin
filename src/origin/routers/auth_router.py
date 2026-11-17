@@ -2376,8 +2376,19 @@ async def token_endpoint(
     client_assertion_type: Optional[str] = Form(None),
     client_assertion: Optional[str] = Form(None),
     actor_token: Optional[str] = Form(None),
+    actor_token_type: Optional[str] = Form(None),
     db: Session = Depends(get_db),
 ):
+    if grant_type == _TOKEN_EXCHANGE and actor_token_type == _agent_sessions.KEY_TOKEN_TYPE:
+        # An agent's Key artifact token (FR-032): the key is the actor and names its person, so a
+        # subject, when sent, is the same key.
+        if subject_token and subject_token != actor_token:
+            raise HTTPException(status_code=400, detail="an agent's key is its own subject")
+        try:
+            return JSONResponse(await _agent_sessions.exchange_key(db, actor_token or ""))
+        except _agent_sessions.Refused as exc:
+            db.rollback()
+            raise HTTPException(status_code=exc.status_code, detail=exc.detail)
     if grant_type == _TOKEN_EXCHANGE and subject_token_type in (_agent_sessions.ASK_TOKEN_TYPE,
                                                                 _agent_sessions.APPROVAL_TOKEN_TYPE):
         # An agent session (FR-032): its window-signed ask for an approval, or its approval and

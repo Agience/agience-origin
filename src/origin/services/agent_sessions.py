@@ -22,6 +22,13 @@ person, `act.sub` the agent, scope `mantle:agent`, `job_reach` the approval's co
 `reach_actions` its actions, five minutes long. The window key is never the actor (its thumbprint
 is not the approval's `cnf.jkt`), and the window key alone yields no Mantle token.
 
+The key. An agent may instead carry its Key artifact's token (`agk_<key id>.<secret>`), issued
+once when the person creates the Key in Mantle under the agent. At `/auth/token` it is the actor
+(`actor_token_type` `agent-key`); Origin asks Mantle what it is (`GET /credentials/self`, the key
+as the bearer) and signs the same five-minute delegation: `sub` the person, `act.sub` the agent,
+`job_reach` and `reach_actions` as the Key says, never past the Key's end. Mantle answers only for
+a live Key whose collection is live, so archiving either ends it.
+
 Revocation. An approval is checked by `jti` at every exchange. Revoking the grant (the window's
 key signs it, or the person on Origin's page, or signing out everywhere) revokes every approval
 made under it; a session's key revokes its own.
@@ -32,6 +39,7 @@ import base64
 import hashlib
 import json
 import logging
+import re
 import secrets
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -47,6 +55,8 @@ logger = logging.getLogger(__name__)
 
 ASK_TOKEN_TYPE = "urn:agience:params:oauth:token-type:agent-ask"
 APPROVAL_TOKEN_TYPE = "urn:agience:params:oauth:token-type:agent-approval"
+#: An agent's Key artifact token, the actor at the exchange (`exchange_key`).
+KEY_TOKEN_TYPE = "urn:agience:params:oauth:token-type:agent-key"
 REVOKE_TYPE = "agent-revoke+jwt"
 ASK_TYP = "agent-ask+jwt"
 APPROVAL_TYP = "agent-approval+jwt"
@@ -163,7 +173,10 @@ def _ids(value: Any, what: str) -> list:
 def _person(db: Session, person_id: str):
     from origin.db import persons as db_persons
     from origin.services.auth_service import refuse_if_deactivated
-    person = db_persons.get_by_id(db, person_id)
+    try:
+        person = db_persons.get_by_id(db, person_id)
+    except ValueError:
+        person = None
     if person is None:
         raise Refused("no such person")
     refuse_if_deactivated(person)
@@ -357,6 +370,72 @@ def exchange(db: Session, approval: str, actor_token: Optional[str]) -> dict:
     issued = _jwt.get_unverified_claims(token)
     db.add(NarrowHop(jti=str(issued["jti"]), sub=str(person.id), subject_jti=row.jti,
                      from_aud=f"agent:{row.agent}", to_aud=auth_service.MANTLE_AUDIENCE))
+    db.commit()
+    return {"access_token": token,
+            "issued_token_type": "urn:ietf:params:oauth:token-type:access_token",
+            "token_type": "bearer",
+            "expires_in": max(0, int(issued["exp"] - datetime.now(timezone.utc).timestamp())),
+            "scope": AGENT_SCOPE}
+
+
+#: The shape of a Key artifact's token: its type's prefix, the Key's id, a dot, the secret.
+_KEY_SHAPE = re.compile(r"^agk_[A-Za-z0-9-]{1,128}\.[A-Za-z0-9_-]{20,}$")
+
+#: Reads what a Key token is from Mantle: ``async (key) -> dict``.
+KeyReader = Callable[[str], Awaitable[dict]]
+
+
+async def read_key_in_mantle(key: str) -> dict:
+    """What Mantle says the Key token ``key`` is (``GET /credentials/self``, the key as the
+    bearer): the person, the agent, the reach, the actions, the end."""
+    import httpx
+    mantle = (getattr(config, "MANTLE_URI", "") or "").rstrip("/")
+    if not mantle:
+        raise Refused("Mantle is not configured", 503)
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            r = await client.get(f"{mantle}/credentials/self",
+                                 headers={"Authorization": f"Bearer {key}"})
+    except httpx.HTTPError as exc:
+        raise Refused(f"Mantle is unreachable ({type(exc).__name__})", 502)
+    if r.status_code in (401, 403, 404):
+        raise Refused("the key is not live")
+    if r.status_code != 200:
+        raise Refused(f"Mantle did not read the key ({r.status_code})", 502)
+    return r.json()
+
+
+async def exchange_key(db: Session, key: str, reader: Optional[KeyReader] = None) -> dict:
+    """A five-minute delegation to Mantle for an agent's Key artifact token."""
+    from jose import jwt as _jwt
+
+    from origin.models.narrow_hop import NarrowHop
+    from origin.services import auth_service
+    if not isinstance(key, str) or not _KEY_SHAPE.match(key):
+        raise Refused("the actor is not an agent's key")
+    seen = await (reader or read_key_in_mantle)(key)
+    actor, artifact = str(seen.get("actor") or ""), str(seen.get("artifact") or "")
+    reach, actions = seen.get("reach"), seen.get("actions")
+    if not actor:
+        raise Refused("the key names no agent: a person's own key is used at Mantle as it is")
+    if (seen.get("scope") != AGENT_SCOPE or not artifact
+            or not key.startswith(f"agk_{artifact}.")
+            or not isinstance(reach, list) or not reach
+            or not isinstance(actions, list) or not actions):
+        raise Refused("the key does not say whom it acts for and what it reaches")
+    person = _person(db, str(seen.get("person") or ""))
+    ends = None
+    if seen.get("ends"):
+        ends = authority_ledger.parse_time(str(seen["ends"]))
+        if ends is None or ends <= datetime.now(timezone.utc):
+            raise Refused("the key has ended")
+    token = auth_service.issue_narrow_delegation(
+        str(person.id), auth_service.MANTLE_AUDIENCE, [AGENT_SCOPE], expires_at=ends,
+        actor=actor, job_reach=[str(i) for i in reach],
+        reach_actions=[str(a) for a in actions])
+    issued = _jwt.get_unverified_claims(token)
+    db.add(NarrowHop(jti=str(issued["jti"]), sub=str(person.id), subject_jti=artifact[:64],
+                     from_aud=f"key:{actor}"[:128], to_aud=auth_service.MANTLE_AUDIENCE))
     db.commit()
     return {"access_token": token,
             "issued_token_type": "urn:ietf:params:oauth:token-type:access_token",
