@@ -1209,6 +1209,8 @@ _REGISTER_TOGGLE = """    <div class="row"><button class="link" type="button" id
 _REGISTER_BLOCK = """  <div id="reg" class="hidden">
     <form id="regForm">
       <div aria-hidden="true" style="position:absolute;left:-10000px;top:auto;width:1px;height:1px;overflow:hidden"><label for="rwebsite">Website</label><input id="rwebsite" name="website" type="text" tabindex="-1" autocomplete="off"></div>
+      <label for="rname">Your name</label>
+      <input id="rname" type="text" autocomplete="name" required maxlength="120">
       <label for="remail">Email for the new account</label>
       <input id="remail" type="email" autocomplete="email" required placeholder="you@example.com">
       <label for="rpassword">New password</label>
@@ -1709,6 +1711,10 @@ class _LocalRegister(BaseModel):
     oauth_state: str
     email: _Identifier
     password: str
+    #: The person's name: the title of their account.
+    name: str = ""
+    #: The starting browser's verification nonce; the link signs in only that browser.
+    verify_nonce: _VerifyNonce = ""
     #: FR-027: the token the form fetched when it opened, and the field a person never sees.
     form_token: str = ""
     website: str = ""
@@ -1777,7 +1783,7 @@ async def authorize_local_register(
         person = person_service.create_user_with_password(
             db,
             username=email,
-            name="",            # the person names themselves; never their address's local part
+            name=(body.name or "").strip()[:120],  # never their address's local part
             password_hash=password_hash,
             email=email,
             # Recorded verified only once proven (the link, or an OTP sign-in), whatever the plane
@@ -1804,7 +1810,8 @@ async def authorize_local_register(
             logger.warning("sign-up mail ceiling reached; confirmation for a new account held")
             _release_db(db)
             return {"verification_required": True, "email": person.email}
-        queued = _queue_verification_email(background_tasks, person, db=db, request=request)
+        queued = _queue_verification_email(background_tasks, person, body.verify_nonce, db=db,
+                                           request=request)
         return {"verification_required": True, "email": queued}
 
     from origin.services.auth_service import is_person_allowed
@@ -3547,7 +3554,9 @@ async def email_verify_confirm(
     if user.password_hash and payload.disown:
         user.password_hash = None
         password_cleared = True
-    elif user.password_hash:
+    elif user.password_hash and not _verification_nonce_matches(claims, payload.verify_nonce):
+        # The browser that registered holds the nonce and chose the password; opening the link
+        # proves the mailbox too, so only another browser is asked for the password.
         if not payload.password:
             return {"password_required": True}
         # Its own budget, per account in a ledger of its own (`guess_budget.
