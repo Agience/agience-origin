@@ -2440,7 +2440,7 @@ def _decide_operator(rc: Reach, ctx: "Context", b: dict) -> Optional[str]:
         prior = rc.r.grant(b["grant_id"])
         new = _grant_from_body(b)
         if prior is None and new.state == _ACTIVE:
-            why = _new_account_grant(rc, ctx.actor, b)
+            why = _new_account_grant(rc, ctx.actor, b) or _definitions_grant(rc, ctx.actor, b)
             if why:
                 return why
         if (prior is not None and ctx.retiring and prior.resource_id == ctx.retiring
@@ -2539,6 +2539,87 @@ def grant_new_account(db: Session, person_id: str, ref: str) -> list:
         return []
     return [append(db, body, actor=Actor(operator, "operator", ref), submitted_jti=f"new:{ref}")
             for body in new_account_grant_bodies(db, person_id, operator)]
+
+
+#: What the operator definitions' publisher, the platform's system principal, is given on the
+#: platform operators' collection: create, and nothing more. Create does not carry read, so it
+#: reaches only what its own creation grants give it.
+DEFINITIONS_ACTIONS = frozenset({"create"})
+
+
+def platform_operators_id() -> Optional[str]:
+    """The platform operators' collection: Mantle's seed id for `platform/platform-operators` under
+    the instance namespace, or None without one."""
+    from origin import service_identity
+    ns = service_identity.get_instance_namespace()
+    return str(uuid.uuid5(ns, "platform/platform-operators")) if ns else None
+
+
+def _definitions_grant_id(operator: str, collection: str, system: str) -> str:
+    return str(uuid.uuid5(uuid.NAMESPACE_URL,
+                          f"agience://operator-definitions/{operator}/{collection}/{system}"))
+
+
+def _definitions_target(rc: Reach, operator: str) -> Optional[tuple]:
+    """(collection, system principal) when the operator made the platform operators' collection,
+    still holds create on it, and the node has a system principal; else None."""
+    from origin import service_identity
+    system = service_identity.get_system_principal_id() or ""
+    coll = platform_operators_id()
+    if not system or not coll or not operator or system == operator:
+        return None
+    if (rc.r.node(coll) or {}).get("created_by") != operator or rc.gone(coll):
+        return None
+    if not rc.reaches(operator, coll, "create"):
+        return None
+    return coll, system
+
+
+def _definitions_grant(rc: Reach, operator: str, b: dict) -> Optional[str]:
+    """Why the operator's grant `b` is the definitions publisher's, or None: the system principal,
+    allow, create alone, no expiry, target or claim limit, on the platform operators' collection
+    the operator made."""
+    target = _definitions_target(rc, operator)
+    if target is None:
+        return None
+    coll, system = target
+    if (b.get("grantee_type") != "user" or str(b.get("grantee_id")) != system
+            or str(b.get("resource_id")) != coll or b.get("effect") != "allow"):
+        return None
+    if b.get("expires_at") or b.get("target") or b.get("max_claims") is not None:
+        return None
+    if frozenset(b.get("actions") or ()) != DEFINITIONS_ACTIONS:
+        return None
+    return "the operator gives the platform's principal create on the platform operators' collection"
+
+
+def definitions_grant_body(db: Session, operator: str, rc: Optional[Reach] = None) -> Optional[dict]:
+    """The definitions publisher's grant body, with a stable id, or None when it is held already
+    or cannot be made here."""
+    rc = rc or reach(db)
+    target = _definitions_target(rc, operator)
+    if target is None:
+        return None
+    coll, system = target
+    gid = _definitions_grant_id(operator, coll, system)
+    prior = rc.r.grant(gid)
+    if prior is not None and prior.state == _ACTIVE:
+        return None
+    return {"kind": "grant", "grant_id": gid, "grantee_id": system, "grantee_type": "user",
+            "resource_id": coll, "actions": sorted(DEFINITIONS_ACTIONS), "effect": "allow",
+            "state": _ACTIVE, "expires_at": None, "target": None, "max_claims": None}
+
+
+def grant_definitions_publisher(db: Session, ref: str) -> list:
+    """Append, as the operator's own entry, the system principal's create grant on the platform
+    operators' collection. Returns the receipts; none when it is held already or cannot be made."""
+    operator = _operator()
+    if not operator:
+        return []
+    body = definitions_grant_body(db, operator)
+    if body is None:
+        return []
+    return [append(db, body, actor=Actor(operator, "operator", ref), submitted_jti=f"defs:{ref}")]
 
 
 def _structure_key(g) -> tuple:
