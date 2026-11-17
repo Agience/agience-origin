@@ -5,6 +5,25 @@ All notable changes to `agience-origin` are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-16
+
+### Added
+- Approval requests: an account files a request against a workspace or collection with `POST /notes/requests` and reads it back with `GET /notes/requests/{id}`. Whoever holds update on that resource approves or declines on Origin's own `/approvals` page (`/notes/page/*`). Origin's session cookie and a per-form token are required there, and no bearer token is accepted.
+- An approval mints one signed note (`chair-note+jwt`) bound to the request's digest. `POST /notes/spend` spends it once per action while its approver still holds update on the resource. The page also lets the filer withdraw an open request, lets approvers revoke unspent notes (one or all), and offers a sign-out-everywhere action. The new tables are `chair_requests`, `chair_notes` and `chair_spends`, created by migrations `0034_chair_notes` and `0035_request_resource`.
+- Origin sessions now record `auth_time`, `amr` and `last_seen_time`. `amr` is `pop` for a passkey, `otp`, `pwd`, `email` or `fed`, depending on the sign-in method.
+- Feedback intake: `GET /feedback/form` and `POST /feedback` file text from the Help panel's "Send feedback" into the Feedback collection as a dedicated feedback account. Set `FEEDBACK_BOT_ID` and `FEEDBACK_COLLECTION_ID` to enable it. Without both, these routes answer 503 and the app offers mail instead. Requests pass the sign-up form's spam tests, a length cap and hourly ceilings, and the body is read only up to 32 KiB.
+- The authority router's `POST /new-person-grants` makes the operator's "New accounts receive" grants for one newly provisioned person.
+- `POST /auth/me/authority/new-accounts-receive/backfill` files a dry run of giving existing accounts what that collection lists, as an approval request. `POST .../backfill/{req}/run` performs it once approved.
+- Pending email invites in a resource's grant listing now carry `invited_address` and `sent_at`, visible to people who may share the item. The address is stored in the new `invite_addresses` table (migration `0033_invite_addresses`) and deleted once the invite is accepted, declined, revoked, claimed, spent or expired.
+- Operator tooling can rewrite existing links stored with an empty mask so they conduct everything, when the person who added each link holds Share or Admin on what it links.
+
+### Changed
+- Whoever creates an artifact in a collection now also holds update on it. Read is not added, so a create-only member still opens nothing of the collection.
+- Restoring an orphaned creation edge is refused when the item already has a creation edge, or when no container holds it any more.
+- In grant listings, a user grantee is named by display name, falling back to verified address. Invite emails name the sender by display name.
+- Migrations `0033`–`0035` are additive and are kept on rollback. Rolling back is only an `alembic stamp` to the earlier revision.
+- Version is now `0.3.0`.
+
 ## [0.3.0] - 2026-11-15
 
 ### Added
