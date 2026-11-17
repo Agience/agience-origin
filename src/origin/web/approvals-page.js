@@ -301,6 +301,7 @@
     box.appendChild(el("div", "spacer"));
     box.appendChild(reason);
     box.appendChild(d);
+    if (req.withdraw_form) { box.appendChild(el("div", "spacer")); withdrawButton(box, req); }
   }
 
   function renderRequest(req, banner) {
@@ -371,9 +372,14 @@
     hide("#list", true); hide("#detail", false); hide("#bottom", true);
   }
 
-  /* The filer's own open request: someone else approves it, and the filer may take it back. */
+  /* The filer's own open request, which the filer cannot decide: the filer may take it back. */
   function renderFilerOwn(box, req) {
-    box.appendChild(el("p", "refusal", "You filed this " + noun(req) + ", so someone else approves it."));
+    box.appendChild(el("p", "refusal", CANNOT));
+    withdrawButton(box, req);
+  }
+
+  /* While a request is open its filer may take it back. */
+  function withdrawButton(box, req) {
     if (!req.withdraw_form) return;
     const w = el("button", "secondary danger", "Withdraw");
     w.type = "button";

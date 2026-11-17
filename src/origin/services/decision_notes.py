@@ -294,7 +294,7 @@ def request_view(db: Session, req: DecisionRequest) -> dict:
 # --- decisions ------------------------------------------------------------------------------------
 
 CANNOT_APPROVE = "You can't approve this request. Approving needs Editor access to it."
-FILER_CANNOT_APPROVE = "You filed this request, so someone else approves it. You can withdraw it."
+FILER_CANNOT_APPROVE = CANNOT_APPROVE + " You can withdraw it."
 
 
 def _decidable(db: Session, req: Optional[DecisionRequest], person_id: str,

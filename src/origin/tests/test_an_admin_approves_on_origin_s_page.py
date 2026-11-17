@@ -225,6 +225,17 @@ def test_the_filer_gains_nothing_by_filing(custody_client, approver, agent):
     assert _decide(c, _open(c, filed["id"])).status_code == 200
 
 
+def test_a_filer_holding_update_approves_its_own_request(custody_client, approver, agent):
+    """Holding update on the resource is the right to approve, for the filer too."""
+    c = custody_client
+    _share(c, approver, "g-W-agent-update", agent, ("read", "update"))
+    filed = _release(c, agent)
+    _session(c, agent[0])
+    view = _open(c, filed["id"])
+    assert view["is_filer"] is True and view["can_decide"] is True and view["withdraw_form"]
+    assert _decide(c, view).status_code == 200
+
+
 def test_a_reader_sees_the_request_and_cannot_decide_it(custody_client, approver, agent):
     from origin.services.decision_notes import FILER_CANNOT_APPROVE
     c = custody_client
