@@ -429,7 +429,10 @@ def change_grant(grant_id: str, request: Request, body: dict = Body(...),
 def revoke_grant(grant_id: str, request: Request, db: Session = Depends(get_db)):
     """A grant or invite Origin holds, revoked, built from Origin's own row."""
     person = _person(request, db)
-    receipt = _append(db, person, _entry_from(_held(db, grant_id), state="revoked"))
+    row = _held(db, grant_id)
+    receipt = _append(db, person, _entry_from(row, state="revoked"))
+    if row.grantee_type == "invite":
+        _retire_record_read(db, person, grant_id)
     _forget_addresses(db, grant_id)
     return receipt
 
@@ -543,6 +546,66 @@ def _is_uuid(value: str) -> bool:
         return False
 
 
+def _record_read_id(invite_id: str) -> str:
+    """The grant that lets an invite's invitee read the artifact recording it (FR-004)."""
+    return f"invread-{invite_id}"
+
+
+def _retire_record_read(db: Session, person: str, invite_id: str) -> None:
+    """The invitee's read of the invite's record, revoked once the invite is taken, declined or
+    revoked: the Inbox shows only invites still waiting. Revoked by the invitee (their own grant)
+    or the inviter (admin on the record); anyone else leaves it for them."""
+    from origin.models.authority_ledger import AuthorityGrant
+    from origin.services import authority_ledger
+    row = db.get(AuthorityGrant, _record_read_id(invite_id))
+    if row is None or row.state != "active":
+        return
+    try:
+        authority_ledger.session_entry(db, person, _entry_from(row, state="revoked"))
+    except authority_ledger.EntryRefused as exc:
+        logger.info("record read for %s left in place: %s", invite_id, exc)
+
+
+@authority_session_router.post("/invites/{invite_id}/record")
+def record_invite(invite_id: str, request: Request, body: dict = Body(...),
+                  db: Session = Depends(get_db)):
+    """The artifact recording an invite (FR-004), made readable by the person the invite names, so
+    it shows in their Inbox. Asked by the inviter in their own Origin session, for an artifact they
+    may share. The invitee is found from the address the invite went to, and only when that
+    address belongs to a verified account; the answer is the same either way, so it says nothing
+    about who holds an account. The grant is read alone, and lapses with the invite."""
+    from origin.db import persons as db_persons
+    from origin.models.authority_ledger import AuthorityGrant, InviteAddress
+    from origin.services import authority_ledger
+
+    person = _person(request, db)
+    inv = _live_invite(db, invite_id)
+    if str(inv.created_by or "") != person:
+        raise HTTPException(status_code=404, detail="no live invite with this id that you made")
+    artifact_id = body.get("artifact_id")
+    if not isinstance(artifact_id, str) or not artifact_id:
+        raise HTTPException(status_code=400, detail="artifact_id is the invite's record")
+    if authority_ledger.reach(db).r.node(artifact_id) is None:
+        raise HTTPException(status_code=409, detail="Origin has not yet seen this artifact; "
+                            "try again shortly")
+    if not _may_share(db, person, artifact_id):
+        raise HTTPException(status_code=403, detail="you hold neither Share nor Admin on this")
+    held = db.get(AuthorityGrant, _record_read_id(invite_id))
+    if held is not None:
+        if held.resource_id != artifact_id:
+            raise HTTPException(status_code=409, detail="this invite is recorded already")
+        return {"recorded": True}
+    sent = db.get(InviteAddress, inv.grant_id) if inv.target_kind == "email" else None
+    who = db_persons.get_by_email(db, sent.email) if sent is not None else None
+    if who is not None and who.email_verified and str(who.id) != person:
+        _append(db, person, {"kind": "grant", "grant_id": _record_read_id(invite_id),
+                             "grantee_id": str(who.id), "grantee_type": "user",
+                             "resource_id": artifact_id, "actions": ["read"], "effect": "allow",
+                             "state": "active", "expires_at": inv.expires_at, "target": None,
+                             "max_claims": None})
+    return {"recorded": True}
+
+
 @authority_session_router.post("/invite-context")
 def invite_context(request: Request, body: dict = Body(...), db: Session = Depends(get_db)):
     """What an invite is, for the person opening its link: shown only in a session, and carrying
@@ -642,6 +705,7 @@ def accept_invite(invite_id: str, request: Request, db: Session = Depends(get_db
              "state": "active", "expires_at": inv.expires_at, "target": None, "max_claims": None}
     receipt = _append(db, str(person), entry,
                       {"invite_id": inv.grant_id, "session": authority_ledger.SESSION_TARGETED})
+    _retire_record_read(db, str(person), inv.grant_id)
     _forget_addresses(db, inv.grant_id)
     return {**receipt, "resource_id": inv.resource_id, "grant_id": entry["grant_id"]}
 
@@ -655,6 +719,7 @@ def decline_invite(invite_id: str, request: Request, db: Session = Depends(get_d
     if not _for_me(db, person, inv):
         raise HTTPException(status_code=403, detail="this invite does not name you")
     receipt = _append(db, str(person), _entry_from(inv, state="retired"))
+    _retire_record_read(db, str(person), inv.grant_id)
     _forget_addresses(db, inv.grant_id)
     return receipt
 
@@ -686,6 +751,7 @@ def session_claim(request: Request, body: dict = Body(...), db: Session = Depend
     try:
         receipt = authority_ledger.session_entry(db, str(person), entry,
                                                  {"invite_id": inv.grant_id, "token": token})
+        _retire_record_read(db, str(person), inv.grant_id)
         _forget_addresses(db, inv.grant_id)
         return {**receipt, "resource_id": inv.resource_id, "grant_id": entry["grant_id"]}
     except authority_ledger.EntryRefused as exc:
