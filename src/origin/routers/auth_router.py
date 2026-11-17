@@ -1209,14 +1209,14 @@ _REGISTER_TOGGLE = """    <div class="row"><button class="link" type="button" id
 _REGISTER_BLOCK = """  <div id="reg" class="hidden">
     <form id="regForm">
       <div aria-hidden="true" style="position:absolute;left:-10000px;top:auto;width:1px;height:1px;overflow:hidden"><label for="rwebsite">Website</label><input id="rwebsite" name="website" type="text" tabindex="-1" autocomplete="off"></div>
-      <label for="remail">Email</label>
+      <label for="remail">Email for the new account</label>
       <input id="remail" type="email" autocomplete="email" required placeholder="you@example.com">
-      <label for="rpassword">Password</label>
+      <label for="rpassword">New password</label>
       <input id="rpassword" type="password" autocomplete="new-password" required
              placeholder="At least __MINLEN__ characters">
       <button class="primary" type="submit" id="regBtn">Create account</button>
     </form>
-    <div class="row"><button class="link" type="button" id="regBack">Already have an account? Sign in</button></div>
+    <div class="row"><button class="link" type="button" id="regBack">Already have an account? Go to sign-in</button></div>
   </div>
 """
 
@@ -1226,7 +1226,7 @@ _OTP_TOGGLE = """    <div class="row"><button class="link" type="button" id="otp
 _OTP_BLOCK = """  <div id="otp"__OTPHIDDEN__>
     <div id="step1">
       <form id="sendForm">
-        <label for="email">Email</label>
+        <label for="email">Email to send the code to</label>
         <input id="email" type="email" autocomplete="email" required>
         <button class="primary" type="submit" id="send">Send code</button>
       </form>
@@ -1235,7 +1235,7 @@ _OTP_BLOCK = """  <div id="otp"__OTPHIDDEN__>
       <form id="codeForm">
         <label for="code">Code</label>
         <input id="code" inputmode="numeric" autocomplete="one-time-code" required>
-        <button class="primary" type="submit" id="verify">Sign in</button>
+        <button class="primary" type="submit" id="verify">Sign in with this code</button>
       </form>
     </div>
 __OTPBACK__

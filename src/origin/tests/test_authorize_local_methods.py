@@ -122,6 +122,21 @@ def test_chooser_offers_password_and_otp_when_both_are_available(db_client, loca
     assert 'id="otpToggle"' in page, "no way to reach the OTP form from the password form"
 
 
+def test_the_chooser_names_each_button_and_field_once(db_client, local_only):
+    """A script or a screen reader asking for "Password" or "Sign in" gets one answer, with the
+    sign-up and one-time-code forms rendered (hidden or not) beside the sign-in form."""
+    import re
+    page = _authorize(db_client).text
+    assert 'id="regForm"' in page and 'id="codeForm"' in page
+    buttons = [m.strip() for m in re.findall(r"<button[^>]*>(?:<svg.*?</svg>)?([^<]+)</button>", page, re.S)]
+    labels = [m.strip() for m in re.findall(r"<label[^>]*>([^<]+)</label>", page)]
+    labels.remove("Website")  # the honeypot, out of the accessibility tree (aria-hidden)
+    for names in (buttons, labels):
+        dupes = sorted({n for n in names if names.count(n) > 1})
+        assert dupes == [], f"named twice: {dupes}"
+    assert "Sign in" in buttons and "Password" in labels
+
+
 def test_the_chooser_uses_the_shared_branded_surface_and_keeps_the_animation(db_client, local_only):
     """The page is one artifact with `web/index.html`, not a second copy of it.
 
