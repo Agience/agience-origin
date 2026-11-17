@@ -40,7 +40,8 @@
   }
   function done(message) {
     answer(message);
-    if (window.opener && back) setTimeout(function () { window.close(); }, 600);
+    /* A CLI's window page has no app to return to; it says so instead of closing. */
+    if (back) setTimeout(function () { window.close(); }, 600);
     else msg.textContent += " You can close this window.";
   }
 
