@@ -2487,21 +2487,36 @@ def _decide_operator(rc: Reach, ctx: "Context", b: dict) -> Optional[str]:
     raise EntryRefused("the operator only revokes grants and removes edges here", 403)
 
 
-#: The most a new account receives on any one member, whatever the edge conducts.
-NEW_ACCOUNT_CEILING = frozenset({"read", "invoke"})
-
-
 def new_accounts_receive_id(operator: str) -> str:
     """The operator's "New accounts receive" collection. Its edges are the list: every new account
-    receives, on each member, what the edge into it conducts, within `NEW_ACCOUNT_CEILING` and
-    what the operator itself reaches. The id is derived from the operator's, so Mantle and Origin
-    name the same collection without a setting."""
+    receives, on each member, what the edge into it conducts, within the ceiling
+    (`new_account_ceiling_id`) and what the operator itself reaches. The id is derived from the
+    operator's, so Mantle and Origin name the same collection without a setting."""
     return str(uuid.uuid5(uuid.NAMESPACE_URL, f"agience://new-accounts-receive/{operator}"))
 
 
-def _new_account_actions(rc: Reach, operator: str, member: str, propagate) -> frozenset:
+def new_account_ceiling_id(operator: str) -> str:
+    """The operator's "New account ceiling" collection. The edge from it into "New accounts
+    receive" is the most a new account receives on any one member: its mask bounds every edge
+    of the list. No such edge, or a ceiling someone other than the operator made, gives none."""
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"agience://new-account-ceiling/{operator}"))
+
+
+def _new_account_ceiling(rc: Reach, operator: str, coll: str) -> frozenset:
     from origin.services.authority_reach import Mask
-    edge = Mask.from_propagate(propagate).actions & NEW_ACCOUNT_CEILING
+    ceiling = new_account_ceiling_id(operator)
+    if (rc.r.node(ceiling) or {}).get("created_by") != operator or rc.gone(ceiling):
+        return frozenset()
+    edge = rc.r.edge(ceiling, coll)
+    if edge is None:
+        return frozenset()
+    return frozenset(Mask.from_propagate(edge.get("propagate")).actions)
+
+
+def _new_account_actions(rc: Reach, operator: str, member: str, propagate,
+                         ceiling: frozenset) -> frozenset:
+    from origin.services.authority_reach import Mask
+    edge = frozenset(Mask.from_propagate(propagate).actions) & ceiling
     return frozenset(a for a in edge if rc.reaches(operator, member, a))
 
 
@@ -2511,9 +2526,10 @@ def _new_account_list(rc: Reach, operator: str) -> list:
     coll = new_accounts_receive_id(operator)
     if (rc.r.node(coll) or {}).get("created_by") != operator or rc.gone(coll):
         return []
+    ceiling = _new_account_ceiling(rc, operator, coll)
     out = []
     for member, propagate in rc.r.children(coll):
-        acts = _new_account_actions(rc, operator, str(member), propagate)
+        acts = _new_account_actions(rc, operator, str(member), propagate, ceiling)
         if acts and not rc.gone(str(member)):
             out.append((str(member), acts))
     return out
