@@ -1969,6 +1969,40 @@ def _authorize_refusal(error: str, description: str) -> JSONResponse:
     )
 
 
+_UNREGISTERED_RETURN_PAGE = """<!doctype html><html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>App not registered · Agience</title><link rel="icon" href="/web/favicon.png">
+<link rel="stylesheet" href="/web/app.css">
+</head><body>
+<div class="bg"></div>
+<div class="card">
+  <img class="logo" src="/web/logo_v.png" alt="Agience">
+  <h1>This app isn't registered</h1>
+  <p>The app that sent you here asked to come back to <strong id="address">__ADDRESS__</strong>,
+    and that address isn't registered with this sign-in service, so you can't sign in to it here.</p>
+  <p>If you run the app, register that exact address with this sign-in service. Otherwise, tell
+    whoever runs it.</p>
+  <div class="foot"><a href="https://agience.ai/terms">Terms</a> · <a href="https://agience.ai/privacy">Privacy</a></div>
+</div>
+<script src="/web/bg.js"></script></body></html>"""
+
+
+def _unregistered_return(request: Request, redirect_uri: str, detail: str):
+    """A 403 for a return address this client may not use, before anything is signed in.
+
+    A browser gets a page naming the address, so the person or operator knows what to register; a
+    program gets the same 403 with `detail` naming the setting. Nothing is sent to the address
+    (RFC 6749 §4.1.2.1)."""
+    if "text/html" in (request.headers.get("accept") or ""):
+        return HTMLResponse(
+            _UNREGISTERED_RETURN_PAGE.replace("__ADDRESS__", _html.escape(redirect_uri)),
+            status_code=403,
+            headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"},
+        )
+    return JSONResponse(status_code=403, content={"detail": detail},
+                        headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"})
+
+
 @auth_router.get("/authorize", dependencies=None)
 async def authorize(
     request: Request,
@@ -2057,23 +2091,23 @@ async def authorize(
         if not is_client_redirect_allowed(redirect_uri, client_id=client_id):
             logger.warning("Refused /authorize: redirect_uri not configured for client_id=%s",
                            client_id)
-            raise HTTPException(
-                status_code=403,
-                detail=f"redirect_uri is not configured for client_id {client_id!r}. A first-party "
-                       "client receives its code only at a URI listed for it, exactly, in "
-                       "CLIENT_REDIRECT_URIS; add the URI there to use it.",
+            return _unregistered_return(
+                request, redirect_uri,
+                f"redirect_uri is not configured for client_id {client_id!r}. A first-party "
+                "client receives its code only at a URI listed for it, exactly, in "
+                "CLIENT_REDIRECT_URIS; add the URI there to use it.",
             )
     elif not is_registered_redirect_allowed(redirect_uri, registration.redirect_uris):
         logger.warning(
             "Refused /authorize: registered client_id=%s asked for an unregistered redirect_uri",
             client_id,
         )
-        raise HTTPException(
-            status_code=403,
-            detail=f"redirect_uri is not in client_id {client_id!r}'s registration. A registered "
-                   "client receives its code only at a URI it registered, exactly; register the "
-                   "URI to use it (POST /auth/register, bounded by "
-                   "CLIENT_REGISTRATION_REDIRECT_URIS).",
+        return _unregistered_return(
+            request, redirect_uri,
+            f"redirect_uri is not in client_id {client_id!r}'s registration. A registered "
+            "client receives its code only at a URI it registered, exactly; register the "
+            "URI to use it (POST /auth/register, bounded by "
+            "CLIENT_REGISTRATION_REDIRECT_URIS).",
         )
 
     # PKCE, S256 only, on every authorization-code flow (RFC 9700 §2.1.1). A request without a

@@ -357,3 +357,23 @@ def test_an_empty_registration_matches_nothing(origin_app):
 
     assert not redirect_uri_matches_registered(FACET_REDIRECT, [])
     assert not redirect_uri_matches_registered(FACET_REDIRECT, None)
+
+
+def test_a_browser_is_told_which_return_address_is_not_registered(db_client, registration_open):
+    """A person sent here by an app whose return address is not registered sees a page naming that
+    address, escaped, instead of raw JSON; nothing is sent to the address."""
+    client_id = _register(db_client, [LOOPBACK_REDIRECT])
+    odd = "http://localhost:8080/<b>x</b>"
+    resp = db_client.get(
+        "/auth/authorize",
+        params={"response_type": "code", "client_id": client_id, "redirect_uri": odd,
+                "scope": "openid", "state": "st", **PKCE},
+        headers={"Accept": "text/html"}, follow_redirects=False,
+    )
+    assert resp.status_code == 403
+    assert resp.headers["content-type"].startswith("text/html")
+    assert resp.headers["cache-control"] == "no-store"
+    assert "location" not in {k.lower() for k in resp.headers}
+    assert "http://localhost:8080/&lt;b&gt;x&lt;/b&gt;" in resp.text
+    assert "<b>x</b>" not in resp.text
+    assert "isn't registered" in resp.text
