@@ -32,8 +32,10 @@ from origin.models.authority_ledger import (
     InviteAddress,
 )
 from origin.models.chair_note import ChairNote, ChairRequest, ChairSpend
+from origin.models.agent_approval import AgentApproval
 
 __all__ = [
+    "AgentApproval",
     "UseNonce",
     "CredentialSeal",
     "BillingRecipient",

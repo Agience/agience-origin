@@ -32,6 +32,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session
 
 from origin.services import refresh_tokens as _refresh_tokens
+from origin.services import agent_sessions as _agent_sessions
 from origin import config
 from origin.db import oauth_clients as db_oauth_clients
 from origin.db import person_identities as db_person_identities
@@ -2343,6 +2344,17 @@ async def auth_callback(request: Request):
         )
 
 
+@auth_router.post("/agent-sessions/revoke")
+def revoke_agent_session(token: str = Form(...), db: Session = Depends(get_db)):
+    """An agent session's signed revoke (FR-032): the window's key ends its grant and every
+    approval under it; a session's key ends its own approval."""
+    try:
+        return _agent_sessions.revoke(db, token)
+    except _agent_sessions.Refused as exc:
+        db.rollback()
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail)
+
+
 # ---------------------------------------------------------------------------
 # OAuth /token
 # ---------------------------------------------------------------------------
@@ -2366,6 +2378,17 @@ async def token_endpoint(
     actor_token: Optional[str] = Form(None),
     db: Session = Depends(get_db),
 ):
+    if grant_type == _TOKEN_EXCHANGE and subject_token_type in (_agent_sessions.ASK_TOKEN_TYPE,
+                                                                _agent_sessions.APPROVAL_TOKEN_TYPE):
+        # An agent session (FR-032): its window-signed ask for an approval, or its approval and
+        # session-key actor for a delegation to Mantle.
+        try:
+            if subject_token_type == _agent_sessions.ASK_TOKEN_TYPE:
+                return JSONResponse(await _agent_sessions.approve(db, subject_token or ""))
+            return JSONResponse(_agent_sessions.exchange(db, subject_token or "", actor_token))
+        except _agent_sessions.Refused as exc:
+            db.rollback()
+            raise HTTPException(status_code=exc.status_code, detail=exc.detail)
     if grant_type == _TOKEN_EXCHANGE:
         # A delegation narrowed to a persona, exchanged for one narrowed to the next persona, is a
         # hop (review 12, decision 2): proven by that persona's own client assertion (RFC 7523).
@@ -4300,7 +4323,8 @@ async def my_job_grants(request: Request, auth: AuthContext = Depends(get_auth),
 async def make_my_job_grant(request: Request, body: dict = Body(...),
                             auth: AuthContext = Depends(get_auth), db: Session = Depends(get_db)):
     """Grant a named background job narrow authority over the person's own key, or over
-    collections they administer (`{job, expires_at, principal?, collections?}`): only in their
+    collections they administer (`{job, expires_at, principal?, collections?, reach?,
+    actions?}`; `actions` only for an agent window's grant, `agent.window.<key thumbprint>`): only in their
     Origin session with a fresh step-up bound to this very request. A bearer token or a
     delegation alone makes no job grant. Every one made raises an operator alert."""
     from origin.services import authority_ledger as _ledger, person_step_up
@@ -4310,15 +4334,18 @@ async def make_my_job_grant(request: Request, body: dict = Body(...),
     job, until = body.get("job"), body.get("expires_at")
     cols = body.get("collections") or []
     reach = body.get("reach") or []
+    actions = body.get("actions")
     if (not isinstance(job, str) or not job or not isinstance(until, str)
             or not isinstance(cols, list) or not all(isinstance(c, str) for c in cols)
-            or not isinstance(reach, list) or not all(isinstance(r, str) for r in reach)):
+            or not isinstance(reach, list) or not all(isinstance(r, str) for r in reach)
+            or (actions is not None and (not isinstance(actions, list)
+                                         or not all(isinstance(a, str) for a in actions)))):
         raise HTTPException(status_code=400, detail="job and expires_at are required; "
-                            "collections and reach are lists of ids")
+                            "collections, reach and actions are lists")
     try:
         receipt = _ledger.page_job_grant(db, who, job=job, expires_at=until,
                                          principal=body.get("principal"), collections=cols,
-                                         reach=reach)
+                                         reach=reach, actions=actions)
     except _ledger.EntryRefused as exc:
         raise HTTPException(status_code=exc.status, detail=str(exc))
     row = db.query(__import__("origin.models.authority_ledger", fromlist=["x"])

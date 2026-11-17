@@ -511,7 +511,7 @@ def mint_background_delegation(db: Session, principal_id: str, job: str,
     why_not = custody_plane.custody_refusal()
     if why_not:
         raise CredentialRefused(why_not)
-    if authority_ledger.is_reach_job(job):
+    if authority_ledger.is_reach_job(job) or authority_ledger.is_agent_window_job(job):
         # A timer's grant opens content within its reach, as the person, through Lumen; it never
         # releases a key share, whoever asks.
         raise CredentialRefused(f"job {job!r} is a timer's, and releases no key share")

@@ -195,22 +195,30 @@ def job_reach_of(claims: dict) -> Optional[dict]:
     if not isinstance(claims, dict) or "job_reach" not in claims:
         return None
     reach = claims.get("job_reach")
-    return {"job_reach": [str(r) for r in reach] if isinstance(reach, list) else [],
-            "job_grant": str(claims.get("job_grant") or "")}
+    out = {"job_reach": [str(r) for r in reach] if isinstance(reach, list) else [],
+           "job_grant": str(claims.get("job_grant") or "")}
+    if "reach_actions" in claims:
+        acts = claims.get("reach_actions")
+        out["reach_actions"] = [str(a) for a in acts] if isinstance(acts, list) else []
+    return out
 
 
-def _job_claims(job_reach: Optional[list], job_grant: Optional[str]) -> dict:
+def _job_claims(job_reach: Optional[list], job_grant: Optional[str],
+                reach_actions: Optional[list] = None) -> dict:
     if job_reach is None:
         return {}
     return {"job_reach": sorted({str(r) for r in job_reach if r}),
-            **({"job_grant": job_grant} if job_grant else {})}
+            **({"job_grant": job_grant} if job_grant else {}),
+            **({"reach_actions": sorted({str(a) for a in reach_actions if a})}
+               if reach_actions is not None else {})}
 
 
 def issue_delegation_token(server_client_id: str, user_id: str, ttl_seconds: int = 300,
                            *, signer: str = "", jti: Optional[str] = None,
                            narrowed_scope: Optional[str] = None,
                            job_reach: Optional[list] = None,
-                           job_grant: Optional[str] = None) -> str:
+                           job_grant: Optional[str] = None,
+                           reach_actions: Optional[list] = None) -> str:
     """Short-lived RFC 8693 delegation JWT — server acting on behalf of a user.
 
     `user_id` MUST already be derived from a token Origin itself verified (see
@@ -249,7 +257,7 @@ def issue_delegation_token(server_client_id: str, user_id: str, ttl_seconds: int
         "exp": (now + timedelta(seconds=ttl_seconds)).timestamp(),
         **({"jti": jti} if jti else {}),
         **({"narrowed": True, "scope": narrowed_scope} if narrowed_scope is not None else {}),
-        **_job_claims(job_reach, job_grant),
+        **_job_claims(job_reach, job_grant, reach_actions),
     }
     return jwt.encode(
         payload,
@@ -822,7 +830,8 @@ def issue_narrow_delegation(person_id: str, audience: str, scopes: list, *,
                             expires_at: Optional[datetime] = None,
                             hop: Optional[dict] = None, actor: Optional[str] = None,
                             job_reach: Optional[list] = None,
-                            job_grant: Optional[str] = None) -> str:
+                            job_grant: Optional[str] = None,
+                            reach_actions: Optional[list] = None) -> str:
     """A delegation for `person_id` narrowed to `audience` and `scopes`: `aud` and `act.sub` are
     the audience, it lives `NARROW_TTL_SECONDS` (and never past `expires_at` when given), it never
     carries `platform:admin`, and no refresh token comes with it. `hop` records the narrowed
@@ -830,7 +839,8 @@ def issue_narrow_delegation(person_id: str, audience: str, scopes: list, *,
     when given, is `act.sub` in place of the audience: Ember's delegation exchanged for one
     addressed to Mantle (`aud` `mantle`, actor `ember`, review 21). `job_reach`, for a delegation
     minted under a timer's job grant or exchanged from one, is the ids it may touch, carried on by
-    every exchange (`job_reach_of`); `job_grant` names the grant."""
+    every exchange (`job_reach_of`); `job_grant` names the grant; `reach_actions`, for an agent
+    session's delegation, is the most it may do within that reach."""
     from origin.service_identity import get_host_id
 
     now = datetime.now(timezone.utc)
@@ -845,7 +855,7 @@ def issue_narrow_delegation(person_id: str, audience: str, scopes: list, *,
                "host_id": get_host_id(), "iat": now.timestamp(),
                "exp": end.timestamp(),
                "jti": secrets.token_hex(16), **({"hop": hop} if hop else {}),
-               **_job_claims(job_reach, job_grant)}
+               **_job_claims(job_reach, job_grant, reach_actions)}
     return jwt.encode(payload, get_private_key_pem(), algorithm=JWT_ALGORITHM,
                       headers={"kid": get_key_id()})
 

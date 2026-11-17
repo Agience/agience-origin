@@ -139,6 +139,8 @@ PUBLIC = {
     ("GET", "/auth/providers"): _PREAUTH + " — which providers exist, to render the login page, "
                                 "and the public app URL the account page continues to",
     ("POST", "/auth/token"): _PREAUTH + " — the token endpoint IS the thing being obtained",
+    # The revoke is signed by the window's or the session's key (FR-032): the key is the credential.
+    ("POST", "/auth/agent-sessions/revoke"): "an agent session's revoke, signed by the key it ends",
     ("POST", "/auth/register"): _PREAUTH,
     ("POST", "/auth/password/login"): _PREAUTH,
     ("POST", "/auth/password/register"): _PREAUTH,

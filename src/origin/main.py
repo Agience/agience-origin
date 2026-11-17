@@ -829,13 +829,16 @@ def _app_origins() -> set:
 
 
 @app.get("/job-grant", include_in_schema=False)
-def job_grant_page(back: str = "") -> Response:
+def job_grant_page(back: str = "", job: str = "", revoke: str = "") -> Response:
     """Where a person approves, or stops, a timer's job grant (John, 2026-11-10): the app opens it
     with the grant to make (`job`, `reach`, `days`, `title`) or the one to revoke (`revoke`), and
     `back`, the app's origin. The grant is made here, in the person's Origin session with a fresh
     step-up bound to its body, and its id is posted back to `back` only, which must be the app or
-    a facet this authority serves."""
-    if back.rstrip("/").lower() not in _app_origins():
+    a facet this authority serves. An agent window's grant (`agent.window.<key thumbprint>`) is
+    opened by a CLI, which has no window to answer: it comes without `back`, and the CLI learns of
+    the grant by asking with that key."""
+    window = not back and not revoke and job.startswith("agent.window.")
+    if not window and back.rstrip("/").lower() not in _app_origins():
         return Response(status_code=400, content="unknown app origin", media_type="text/plain")
     out = _page("job-grant.html")
     out.headers["Content-Security-Policy"] = PASSKEY_PAGE_CSP

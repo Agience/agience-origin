@@ -145,8 +145,10 @@ _FIELDS = {
 KINDS = frozenset(_FIELDS)
 #: Fields an entry may carry beyond `_FIELDS`, kept in its body only when given, so an entry made
 #: before the field existed hashes as it did. A job grant's `reach` (John, 2026-11-10): the ids a
-#: timer's delegation may touch, and nothing outside them.
-_OPTIONAL: Dict[str, frozenset] = {"job_grant": frozenset({"reach"}), "key": frozenset({"agent"})}
+#: timer's delegation may touch, and nothing outside them. Its `actions`: the most an agent window's
+#: sessions may do there (FR-032).
+_OPTIONAL: Dict[str, frozenset] = {"job_grant": frozenset({"reach", "actions"}),
+                                   "key": frozenset({"agent"})}
 TARGET_KINDS = frozenset({"user_id", "email", "domain"})
 
 
@@ -293,6 +295,10 @@ def normalise(body: Any, *, canonical_times: bool = True) -> dict:
                 raise EntryRefused("reach is a list of at most 64 ids", 400)
             if reach_ids:
                 out["reach"] = sorted(set(reach_ids))
+        if body.get("actions") is not None:
+            acts = _actions(body["actions"], "actions")
+            if acts:
+                out["actions"] = sorted(acts)
         exp = body["expires_at"]
         try:
             parse_time(exp) if isinstance(exp, str) else (_ for _ in ()).throw(ValueError())
@@ -322,6 +328,21 @@ TIMER_JOB_PREFIX = "lumen.timer."
 #: ends within `RUN_GRANT_MAX_MINUTES`, and only one delegation is ever minted under it, to Crystal.
 RUN_JOB_PREFIX = "lumen.run."
 RUN_GRANT_MAX_MINUTES = 15
+
+
+#: An agent window's standing grant (FR-032): `agent.window.<jkt>`, where `jkt` is the RFC 7638
+#: thumbprint of the key the window made at sign-in. It names a `reach` (the collections its
+#: sessions may work in) and `actions` (the most they may do there), over the person's own key and
+#: no collection, for at most `AGENT_WINDOW_MAX_DAYS`. Only that key signs a session's ask under it,
+#: and it never releases a key share.
+AGENT_WINDOW_PREFIX = "agent.window."
+AGENT_WINDOW_MAX_DAYS = 7
+#: What an agent window's sessions may ever be granted: never delete, evict, share or admin.
+AGENT_WINDOW_ACTIONS = frozenset({"create", "read", "update", "invoke", "add"})
+
+
+def is_agent_window_job(job: str) -> bool:
+    return str(job or "").startswith(AGENT_WINDOW_PREFIX)
 
 
 def is_reach_job(job: str) -> bool:
@@ -1194,7 +1215,8 @@ def _decide_job_grant(rc: Reach, ctx: Context, b: dict) -> Optional[str]:
     if prior is not None:
         same = {k: prior[k] for k in ("job", "principal", "collections", "expires_at")}
         if (same != {k: b[k] for k in same}
-                or sorted(prior.get("reach") or []) != list(b.get("reach") or [])):
+                or sorted(prior.get("reach") or []) != list(b.get("reach") or [])
+                or sorted(prior.get("actions") or []) != list(b.get("actions") or [])):
             raise EntryRefused("a job grant does not change; grant a new one", 409)
         if prior["state"] == b["state"]:
             return None
@@ -1214,7 +1236,16 @@ def _decide_job_grant(rc: Reach, ctx: Context, b: dict) -> Optional[str]:
     if not _job_scope(rc, ctx.actor, b["principal"], b["collections"]):
         raise EntryRefused("a job grant is made by the person whose key it is, or an Admin of "
                            "each collection it names")
-    timer = is_reach_job(b["job"])
+    window = is_agent_window_job(b["job"])
+    timer = is_reach_job(b["job"]) or window
+    if window != bool(b.get("actions")):
+        raise EntryRefused("an agent window's job grant names its actions, and only one does", 400)
+    if window and not set(b["actions"]) <= AGENT_WINDOW_ACTIONS:
+        raise EntryRefused("an agent window's actions are drawn from "
+                           + ", ".join(sorted(AGENT_WINDOW_ACTIONS)), 400)
+    if window and until > now + timedelta(days=AGENT_WINDOW_MAX_DAYS):
+        raise EntryRefused(f"an agent window's job grant ends within {AGENT_WINDOW_MAX_DAYS} days",
+                           400)
     if b["job"].startswith(RUN_JOB_PREFIX) and until > now + timedelta(minutes=RUN_GRANT_MAX_MINUTES):
         raise EntryRefused(f"a run's job grant ends within {RUN_GRANT_MAX_MINUTES} minutes", 400)
     if timer != bool(b.get("reach")):
@@ -1580,6 +1611,7 @@ def job_grant_view(row) -> dict:
     return {"grant_id": row.grant_id, "job": row.job, "principal": row.principal,
             "collections": json.loads(row.collections or "[]"), "expires_at": row.expires_at,
             "reach": json.loads(getattr(row, "reach", None) or "[]"),
+            "actions": json.loads(getattr(row, "actions", None) or "[]"),
             "state": row.state, "created_by": row.created_by, "seq": row.seq}
 
 
@@ -1588,7 +1620,8 @@ def _job_grant_body(v: dict, state: str) -> dict:
     return {"kind": "job_grant", "grant_id": v["grant_id"], "job": v["job"],
             "principal": v["principal"], "collections": v["collections"],
             "expires_at": v["expires_at"], "state": state,
-            **({"reach": v["reach"]} if v.get("reach") else {})}
+            **({"reach": v["reach"]} if v.get("reach") else {}),
+            **({"actions": v["actions"]} if v.get("actions") else {})}
 
 
 def _held_for_tests(grant_id: str) -> bool:
@@ -1695,13 +1728,14 @@ def person_job_grants(db: Session, person_id: str) -> list:
 
 def page_job_grant(db: Session, person_id: str, *, job: str, expires_at: str,
                    principal: Optional[str] = None, collections: Optional[list] = None,
-                   reach: Optional[list] = None) -> dict:
+                   reach: Optional[list] = None, actions: Optional[list] = None) -> dict:
     """A job grant the person makes at Origin's own page (their session and a step-up, checked by
     the route), appended as theirs."""
     entry = {"kind": "job_grant", "grant_id": "jg-" + secrets.token_hex(8), "job": job,
              "principal": principal or person_id, "collections": list(collections or []),
              "expires_at": expires_at, "state": _ACTIVE,
-             **({"reach": list(reach)} if reach else {})}
+             **({"reach": list(reach)} if reach else {}),
+             **({"actions": list(actions)} if actions else {})}
     return append(db, entry, actor=Actor(person_id, ORIGIN_PAGE, f"page:{person_id}"))
 
 
@@ -2395,7 +2429,7 @@ def _decide_operator(rc: Reach, ctx: "Context", b: dict) -> Optional[str]:
             if b["state"] == "revoked":
                 return "the operator revokes a job grant"
             raise EntryRefused("a revoked job grant stays revoked", 409)
-        if is_reach_job(b["job"]) or b.get("reach"):
+        if is_reach_job(b["job"]) or is_agent_window_job(b["job"]) or b.get("reach"):
             raise EntryRefused("a timer's job grant is the person's own, made at Origin's page")
         system = service_identity.get_system_principal_id()
         if (system and b["principal"] != system and b["job"] == NON_PERSON_CUSTODY_JOB
@@ -2880,7 +2914,12 @@ def _apply(db: Session, b: dict, seq: int, ctx: Context) -> None:
         row.job, row.principal = b["job"], b["principal"]
         row.collections, row.expires_at = json.dumps(b["collections"]), b["expires_at"]
         row.reach = json.dumps(b["reach"]) if b.get("reach") else None
+        row.actions = json.dumps(b["actions"]) if b.get("actions") else None
         row.state, row.seq = b["state"], seq
+        if row.state != _ACTIVE and is_agent_window_job(row.job):
+            # An agent window's grant ends: every approval made under it ends with it (FR-032).
+            from origin.services.agent_sessions import revoke_approvals
+            revoke_approvals(db, grant_id=row.grant_id)
     elif kind == "key":
         from origin.models.authority_ledger import AuthorityKey
         row = db.get(AuthorityKey, b["grant_id"])
