@@ -83,7 +83,10 @@ PUBLIC = {
     # FR-004: invites that name the person arrive in the app; the same Origin session as above.
     ("GET", "/auth/me/authority/invites/incoming"): "the live invites naming the person (their id or verified "
                                                     "address), listed in their Origin session",
-    ("POST", "/auth/me/authority/invites/{invite_id}/accept"): "the invite's target claims it in their Origin "
+    ("POST", "/auth/me/authority/invites/{invite_id}/record"): "the inviter lets the invitee read the "
+                                                               "invite's artifact, in the inviter's "
+                                                               "Origin session",
+    ("POST", "/auth/me/authority/invites/{invite_id}/accept"):"the invite's target claims it in their Origin "
                                                                "session, by the ledger's claim rule",
     ("POST", "/auth/me/authority/invites/{invite_id}/decline"): "the invite's target retires it in their "
                                                                 "Origin session",
