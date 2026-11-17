@@ -13,7 +13,7 @@ class ServerCredentialCreate(BaseModel):
     client_id: str = Field(description="Well-known server identifier (e.g. agience-server-seraph)")
     name: str = Field(description="Human-readable label")
     server_id: str = Field(description="Which code (e.g. seraph)")
-    host_id: str = Field(description="Which compute (e.g. aria.ikailo.com)")
+    host_id: str = Field(description="Which compute (e.g. node-1.example.com)")
     scopes: List[str] = Field(default=["tool:*:invoke", "resource:*:read"])
     resource_filters: Dict[str, Any] = Field(default={"workspaces": "*", "collections": "*"})
 

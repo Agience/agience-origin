@@ -87,6 +87,10 @@ PUBLIC = {
                                                                "session, by the ledger's claim rule",
     ("POST", "/auth/me/authority/invites/{invite_id}/decline"): "the invite's target retires it in their "
                                                                 "Origin session",
+    ("POST", "/auth/me/authority/new-accounts-receive/backfill"): "the dry run, in the Origin session of "
+        "one who reaches invoke on New accounts receive; it files an approval request and grants nothing",
+    ("POST", "/auth/me/authority/new-accounts-receive/backfill/{req_id}/run"): "the run, in the Origin "
+        "session of the one the approved note is addressed to; each grant spends the note once",
     ("GET", "/auth/not-before"): "the signed not-before list peers enforce: person ids and times only, "
                                  "public like the JWKS (review 11, M2)",
     ("GET", "/"): _SHELL,
@@ -100,14 +104,15 @@ PUBLIC = {
     ("GET", "/job-grant"): _SHELL,
     ("GET", "/key"): _SHELL,
     ("GET", "/approvals"): _SHELL,
-    # Phone approvals: the chair's page calls answer only the chair's Origin session from Origin's
-    # own page, with a form token bound to that session; approving needs a passkey or code sign-in.
-    ("GET", "/notes/page/state"): "the chair's approvals, read in the chair's Origin session on Origin's page",
-    ("GET", "/notes/page/requests/{req_id}"): "one request, read in the chair's Origin session on Origin's page",
-    ("POST", "/notes/page/decide"): "the chair's decision in their Origin session, bound by its form token",
-    ("POST", "/notes/page/revoke"): "a note revoked in the chair's Origin session, bound by its form token",
-    ("POST", "/notes/page/revoke-all"): "every unspent note revoked in the chair's Origin session, by form token",
-    ("POST", "/notes/page/sign-out-everywhere"): "the chair's sign-ins ended in their Origin session, by form token",
+    # Approvals: the page's calls answer only an Origin session from Origin's own page, with a form
+    # token bound to that session; update on a request's resource decides it.
+    ("GET", "/notes/page/state"): "the viewer's approvals, read in their Origin session on Origin's page",
+    ("GET", "/notes/page/requests/{req_id}"): "one request the viewer can see, in their Origin session on Origin's page",
+    ("POST", "/notes/page/decide"): "a decision by whoever holds update, in their Origin session, bound by its form token",
+    ("POST", "/notes/page/withdraw"): "the filer's own open request withdrawn in their Origin session, by form token",
+    ("POST", "/notes/page/revoke"): "a note revoked in the viewer's Origin session, bound by its form token",
+    ("POST", "/notes/page/revoke-all"): "every unspent note the viewer approved revoked, by form token",
+    ("POST", "/notes/page/sign-out-everywhere"): "the viewer's sign-ins ended in their Origin session, by form token",
     ("POST", "/notes/spend"): "the note is the credential: signed by Origin, spent once per action it covers",
     ("GET", "/auth/signup-form"): "the sign-up form's time-stamped token (FR-027); it grants nothing "
                                   "and only lets a later sign-up show the form was really filled in",

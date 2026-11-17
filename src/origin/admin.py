@@ -11,7 +11,7 @@ removed by hand before deactivation existed, from a JSON backup of person rows (
 `password_hash`); it is refused for an account that has a password. No hash is ever printed.
 
 `noncanonical` reads, and changes nothing: it lists every person whose stored address is not in the
-canonical form (`services.email_address`), such as `john@ikailo.com.`, with the canonical form and
+canonical form (`services.email_address`), such as `person@example.com.`, with the canonical form and
 who holds it. Lookups by address use the canonical form, so these rows are reached by id:
 `person deactivate <id> --reason ...`.
 """

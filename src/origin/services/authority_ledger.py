@@ -394,6 +394,12 @@ class SqlReplica:
                 .order_by(AuthorityEdge.dst).all())
         return [r[0] for r in rows]
 
+    def children(self, node_id):
+        """Every edge out of `node_id`, the creation edges and the links: `(dst, propagate)`."""
+        rows = (self.db.query(AuthorityEdge).filter(AuthorityEdge.src == node_id)
+                .order_by(AuthorityEdge.dst).all())
+        return [(r.dst, _prop_load(r.propagate)) for r in rows]
+
     def origin_added_by(self, node_id):
         row = (self.db.query(AuthorityEdge)
                .filter(AuthorityEdge.dst == node_id, AuthorityEdge.origin.is_(True))
@@ -605,7 +611,9 @@ def _same_mask(a, b) -> bool:
 def _creation_grant(rc: Reach, ctx: "Context", new: Grant) -> Optional[str]:
     """The creator's own grant on what they created in this batch: on a self-rooted id (its
     root), any actions; on a member (its creation edge, already checked for create or add on the
-    collection), no more than the creator's own walk reaches on it."""
+    collection), no more than the creator's own walk reaches on it, plus update: whoever creates
+    an artifact may change it (BUG-118). Read is never added, so a create-only member still opens
+    nothing of the collection's."""
     if new.grantee_id != ctx.actor or new.grantee_type != "user" or new.effect != "allow":
         return None
     # The creation grant is the first live grant, and only that. A grant left revoked on an id
@@ -615,7 +623,7 @@ def _creation_grant(rc: Reach, ctx: "Context", new: Grant) -> Optional[str]:
     how = _created_in_batch(ctx, new.resource_id)
     if how == "root":
         return "the creation grant on a root created in this batch"
-    if how == "edge" and new.actions <= _reached_actions(rc, ctx.actor, new.resource_id):
+    if how == "edge" and new.actions <= _reached_actions(rc, ctx.actor, new.resource_id) | {"update"}:
         return "the creation grant on a member created in this batch, within its reach"
     return None
 
@@ -2339,7 +2347,8 @@ def _decide_persona(rc: Reach, ctx: Context, b: dict) -> Optional[str]:
     """A persona acts for its person on the one path a persona's routes need (review 26, L5): it
     creates a member (a memory, a note) by its creation edge in a collection its person reaches for
     Create or Add (`_decide_edge_add`, as for the person), and gives its person the creation grant
-    on that member in the same batch, no wider than the person's own reach (`_creation_grant`).
+    on that member in the same batch, no wider than the person's own reach plus update
+    (`_creation_grant`).
     It makes no root, no share, no deny, no edge removal and no change to what an edge conducts,
     and it never opens a key."""
     kind = b["kind"]
@@ -2430,6 +2439,10 @@ def _decide_operator(rc: Reach, ctx: "Context", b: dict) -> Optional[str]:
     if b["kind"] == "grant":
         prior = rc.r.grant(b["grant_id"])
         new = _grant_from_body(b)
+        if prior is None and new.state == _ACTIVE:
+            why = _new_account_grant(rc, ctx.actor, b)
+            if why:
+                return why
         if (prior is not None and ctx.retiring and prior.resource_id == ctx.retiring
                 and prior.effect == "deny" and new.state != _ACTIVE
                 and _structure_key(prior) == _structure_key(new)):
@@ -2438,6 +2451,94 @@ def _decide_operator(rc: Reach, ctx: "Context", b: dict) -> Optional[str]:
             raise EntryRefused("the operator only revokes a grant here", 403)
         return "the operator revokes a grant"
     raise EntryRefused("the operator only revokes grants and removes edges here", 403)
+
+
+#: The most a new account receives on any one member, whatever the edge conducts.
+NEW_ACCOUNT_CEILING = frozenset({"read", "invoke"})
+
+
+def new_accounts_receive_id(operator: str) -> str:
+    """The operator's "New accounts receive" collection. Its edges are the list: every new account
+    receives, on each member, what the edge into it conducts, within `NEW_ACCOUNT_CEILING` and
+    what the operator itself reaches. The id is derived from the operator's, so Mantle and Origin
+    name the same collection without a setting."""
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"agience://new-accounts-receive/{operator}"))
+
+
+def _new_account_actions(rc: Reach, operator: str, member: str, propagate) -> frozenset:
+    from origin.services.authority_reach import Mask
+    edge = Mask.from_propagate(propagate).actions & NEW_ACCOUNT_CEILING
+    return frozenset(a for a in edge if rc.reaches(operator, member, a))
+
+
+def _new_account_list(rc: Reach, operator: str) -> list:
+    """`[(member, actions)]` in the operator's "New accounts receive" collection, or [] when
+    there is no such collection or someone other than the operator made it."""
+    coll = new_accounts_receive_id(operator)
+    if (rc.r.node(coll) or {}).get("created_by") != operator or rc.gone(coll):
+        return []
+    out = []
+    for member, propagate in rc.r.children(coll):
+        acts = _new_account_actions(rc, operator, str(member), propagate)
+        if acts and not rc.gone(str(member)):
+            out.append((str(member), acts))
+    return out
+
+
+def _new_account_grant(rc: Reach, operator: str, b: dict) -> Optional[str]:
+    """Why the operator's grant `b` is one a new account receives, or None: a person, allow, no
+    expiry, target or claim limit, on a member of the operator's "New accounts receive"
+    collection, carrying no more than `_new_account_list` gives on it."""
+    if b.get("grantee_type") != "user" or b.get("effect") != "allow":
+        return None
+    if not rc.r.is_person(str(b.get("grantee_id"))):
+        return None
+    if b.get("expires_at") or b.get("target") or b.get("max_claims") is not None:
+        return None
+    actions = frozenset(b.get("actions") or ())
+    for member, acts in _new_account_list(rc, operator):
+        if member == str(b.get("resource_id")) and actions and actions <= acts:
+            return "a grant every new account receives (the operator's New accounts receive)"
+    return None
+
+
+def _new_account_grant_id(operator: str, member: str, person_id: str) -> str:
+    return str(uuid.uuid5(uuid.NAMESPACE_URL,
+                          f"agience://new-accounts-receive/{operator}/{member}/{person_id}"))
+
+
+def new_account_grant_bodies(db: Session, person_id: str, operator: str,
+                             rc: Optional[Reach] = None) -> list:
+    """The grant bodies `person_id` receives and does not hold yet, one per member, each with a
+    stable id, so asking twice grants once."""
+    rc = rc or reach(db)
+    out = []
+    for member, acts in _new_account_list(rc, operator):
+        gid = _new_account_grant_id(operator, member, person_id)
+        prior = rc.r.grant(gid)
+        if prior is not None and prior.state == _ACTIVE:
+            continue
+        out.append({"kind": "grant", "grant_id": gid, "grantee_id": str(person_id),
+                    "grantee_type": "user", "resource_id": member, "actions": sorted(acts),
+                    "effect": "allow", "state": _ACTIVE, "expires_at": None, "target": None,
+                    "max_claims": None})
+    return out
+
+
+def _operator() -> str:
+    from origin.services.platform_settings_service import settings as _ps
+    return str(_ps.get("platform.operator_id") or "")
+
+
+def grant_new_account(db: Session, person_id: str, ref: str) -> list:
+    """Append, as the operator's own entries, what `person_id` receives from the operator's "New
+    accounts receive" collection. Returns the receipts; none when there is no operator, no such
+    collection, or all are already held."""
+    operator = _operator()
+    if not operator:
+        return []
+    return [append(db, body, actor=Actor(operator, "operator", ref), submitted_jti=f"new:{ref}")
+            for body in new_account_grant_bodies(db, person_id, operator)]
 
 
 def _structure_key(g) -> tuple:
@@ -2868,13 +2969,15 @@ def append(db: Session, body: dict, *, actor: Actor, submitted_jti: str = "",
                                         or actor.kind in ("operator", ORIGIN_PAGE,
                                                           ORIGIN_SESSION)),
                              batch=batch, submitted_by=submitted_by)
-        db.add(row)
-        _apply(db, b, seq, ctx)
         try:
+            db.add(row)
+            _apply(db, b, seq, ctx)           # a flush here can meet the seq clash too
             db.commit()
         except IntegrityError:
-            db.rollback()                     # another append took this seq; decide again
-            continue
+            db.rollback()
+            if head(db)[0] == last:
+                raise                         # the head did not move: not a race
+            continue                          # another append took this seq; decide again
         logger.info("authority entry %d appended: %s by %s (%s)", seq, b["kind"],
                     actor.subject, why)
         _alert(db, b, seq, actor.subject, why, bootstrap=bool(bootstrap), ref=actor.ref)

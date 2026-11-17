@@ -1,9 +1,9 @@
 """The one form of an email address Origin stores and looks up.
 
 One account per address: `persons.email` is unique, and that rule holds only if every spelling of
-one mailbox reaches the column as the same string. Mail treats `john@ikailo.com.` (a fully
-qualified domain), `john@IKAILO.com` and `john@bücher.de` / `john@xn--bcher-kva.de` as the same
-destination, so each must be one key here too.
+one mailbox reaches the column as the same string. Mail treats `person@example.com.` (a fully
+qualified domain), `person@EXAMPLE.com` and `person@bücher.de` / `person@xn--bcher-kva.de` as the
+same destination, so each must be one key here too.
 
 The canonical form:
 
