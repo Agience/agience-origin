@@ -224,14 +224,22 @@ def client(origin_app):
 def pytest_configure(config):
     config.addinivalue_line("markers", "real_signup_form: run the FR-027 sign-up form check as "
                                        "production does, instead of the suite's stand-in")
+    config.addinivalue_line("markers", "real_signup_limits: run the FR-027 per-client, per-network "
+                                       "and per-address limits as production does")
 
 
 @pytest.fixture(autouse=True)
 def _signup_form_stand_in(request, monkeypatch):
     """FR-027: a sign-up is mailed only for a form a person filled in. Tests that register are not
     about that check, so here a form passes when its hidden field is empty; the check's own tests
-    (`real_signup_form`) run it as production does. The hourly ceiling starts fresh in every test."""
+    (`real_signup_form`) run it as production does. The hourly ceiling starts fresh in every test.
+    Every test client signs up from one host, `testclient`, so the per-client, per-network and
+    per-address limits admit everything here; their own tests (`real_signup_limits`) run them."""
     from origin.services import signup_guard
     signup_guard._reset_for_tests()
     if request.node.get_closest_marker("real_signup_form") is None:
         monkeypatch.setattr(signup_guard, "form_is_real", lambda token, honeypot, now=None: not honeypot)
+    if request.node.get_closest_marker("real_signup_limits") is None:
+        monkeypatch.setattr(signup_guard, "signup_from_admitted", lambda client, now=None: (True, False))
+        monkeypatch.setattr(signup_guard, "verification_mail_admitted",
+                            lambda email, created_time=None, now=None: True)

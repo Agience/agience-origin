@@ -7,6 +7,7 @@ surface — see the routers section.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -416,8 +417,31 @@ async def lifespan(app: FastAPI):
         _apply_db_settings_to_config()
     reload_oauth_providers()
 
+    sweep = None
+    if os.getenv("ORIGIN_SKIP_DB_SETTINGS") != "1":
+        sweep = asyncio.create_task(_expire_unverified_hourly())
+
     logger.info("Origin: ready (kid=%s, providers=%d)", get_key_id(), len(_registered_providers()))
-    yield
+    try:
+        yield
+    finally:
+        if sweep is not None:
+            sweep.cancel()
+
+
+async def _expire_unverified_hourly() -> None:
+    """FR-027: once an hour, the first an hour after start, delete accounts nobody verified."""
+    from origin.services.person_service import expire_unverified
+
+    while True:
+        await asyncio.sleep(3600)
+        try:
+            def _run() -> None:
+                with SessionLocal() as session:
+                    expire_unverified(session)
+            await asyncio.to_thread(_run)
+        except Exception:
+            logger.exception("unverified-account sweep failed")
 
 
 def _registered_providers() -> dict:

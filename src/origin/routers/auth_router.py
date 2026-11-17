@@ -1771,6 +1771,11 @@ async def authorize_local_register(
         # FR-027: answered as a real sign-up is, and nothing is created or mailed.
         logger.warning("sign-up form failed the bot check (authorize); nothing created or mailed")
         return {"verification_required": True, "email": email}
+    admitted, burst = signup_guard.signup_from_admitted(request.client.host if request.client else "")
+    if not admitted:
+        # FR-027: past the per-client or per-network cap, answered as a real sign-up is.
+        logger.warning("sign-up over the per-client cap (authorize); nothing created or mailed")
+        return {"verification_required": True, "email": email}
     min_len = platform_settings.get_int("auth.password.min_length", 12)
     if len(password) < min_len:
         raise HTTPException(
@@ -1790,6 +1795,8 @@ async def authorize_local_register(
             # asks: a targeted invite, and every peer, read this flag as proof of the address.
             email_verified=False,
         )
+        # Read by the new-account notice (`account_notify`), which fires on the commit.
+        person._signup_signals = signup_guard.soft_signals(email, email, person.name, burst)
         db.commit()
     except PermissionError as exc:
         db.rollback()
@@ -3359,6 +3366,11 @@ async def password_register(
         # FR-027: answered as a real sign-up is, and nothing is created or mailed.
         logger.warning("sign-up form failed the bot check (password); nothing created or mailed")
         return {"verification_required": True, "email": email}
+    admitted, burst = signup_guard.signup_from_admitted(request.client.host if request.client else "")
+    if not admitted:
+        # FR-027: past the per-client or per-network cap, answered as a real sign-up is.
+        logger.warning("sign-up over the per-client cap (password); nothing created or mailed")
+        return {"verification_required": True, "email": email}
 
     verify_required = email_verification_required(email)
     password_hash = await run_kdf(hash_password, password)
@@ -3373,6 +3385,8 @@ async def password_register(
             # asks: a targeted invite, and every peer, read this flag as proof of the address.
             email_verified=False,
         )
+        # Read by the new-account notice (`account_notify`), which fires on the commit.
+        user._signup_signals = signup_guard.soft_signals(email, username, name, burst)
         db.commit()
     except PermissionError as exc:
         db.rollback()
@@ -3708,6 +3722,12 @@ def _queue_verification_email(
     email = getattr(user, "email", None)
     if not email:
         return None
+    if not signup_guard.verification_mail_admitted(email, getattr(user, "created_time", None)):
+        # FR-027: one link a day per address, and none once the account is a week unproven.
+        logger.info("verification email held for address %s", _log_tag(email.strip().lower()))
+        if db is not None:
+            _release_db(db)
+        return email
     if request is not None and _mail_send_admitted(
         request, email.strip().lower(), "verification email"
     ) is None:
@@ -3736,6 +3756,12 @@ async def _send_verification_email(
     read, before the send is awaited."""
     email = getattr(user, "email", None)
     if not email:
+        return
+    if not signup_guard.verification_mail_admitted(email, getattr(user, "created_time", None)):
+        # FR-027: one link a day per address, and none once the account is a week unproven.
+        logger.info("verification email held for address %s", _log_tag(email.strip().lower()))
+        if db is not None:
+            _release_db(db)
         return
     if request is not None and _mail_send_admitted(
         request, email.strip().lower(), "verification email"

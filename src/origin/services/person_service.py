@@ -431,3 +431,51 @@ def set_email_verified(db: Session, user_id: str, verified: bool = True) -> Pers
     user.email_verified = verified
     db.flush()
     return user
+
+
+def expire_unverified(db: Session, now=None) -> int:
+    """FR-027: delete the accounts nobody verified. A person goes when the address was never
+    confirmed, the account is older than `signup_guard.UNVERIFIED_DAYS`, the address is one that
+    has to be verified, and nothing else holds the account: no identity, passkey, server
+    credential or platform setting of theirs. Each deletion commits on its own, so one that fails
+    leaves the rest. Returns how many went; logs counts and ids only."""
+    from datetime import datetime, timedelta, timezone
+
+    from origin.models.passkey_credential import PasskeyCredential
+    from origin.models.person_identity import PersonIdentity
+    from origin.models.platform_setting import PlatformSetting
+    from origin.models.server_credential import ServerCredential
+    from origin.services.auth_service import email_verification_required
+    from origin.services.signup_guard import UNVERIFIED_DAYS
+
+    now = now or datetime.now(timezone.utc)
+    cutoff = now - timedelta(days=UNVERIFIED_DAYS)
+    held = (
+        db.query(PersonIdentity.person_id).union(
+            db.query(PasskeyCredential.person_id),
+            db.query(ServerCredential.user_id),
+            db.query(PlatformSetting.updated_by).filter(PlatformSetting.updated_by.isnot(None)),
+        )
+    )
+    held_ids = {row[0] for row in held.all()}
+    candidates = (
+        db.query(Person)
+        .filter(Person.email_verified.is_(False), Person.created_time < cutoff)
+        .all()
+    )
+    removed = 0
+    for person in candidates:
+        if person.id in held_ids or not email_verification_required(person.email):
+            continue
+        pid = str(person.id)
+        try:
+            db.delete(person)
+            db.commit()
+            removed += 1
+            logger.info("expired unverified account %s", pid)
+        except Exception:
+            db.rollback()
+            logger.exception("could not expire unverified account %s", pid)
+    if removed:
+        logger.info("expired %d unverified account(s)", removed)
+    return removed
