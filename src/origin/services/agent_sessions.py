@@ -416,7 +416,9 @@ async def exchange_key(db: Session, key: str, reader: Optional[KeyReader] = None
     seen = await (reader or read_key_in_mantle)(key)
     actor, artifact = str(seen.get("actor") or ""), str(seen.get("artifact") or "")
     reach, actions = seen.get("reach"), seen.get("actions")
-    if (seen.get("scope") != AGENT_SCOPE or not actor or not artifact
+    if not actor:
+        raise Refused("the key names no agent: a person's own key is used at Mantle as it is")
+    if (seen.get("scope") != AGENT_SCOPE or not artifact
             or not key.startswith(f"agk_{artifact}.")
             or not isinstance(reach, list) or not reach
             or not isinstance(actions, list) or not actions):
