@@ -729,7 +729,7 @@ def new_accounts_backfill(request: Request, body: dict = Body(default={}),
     """The dry run of giving existing accounts what "New accounts receive" lists, filed as one
     approval request on that collection (`services.new_accounts_backfill`)."""
     from origin.db import persons as db_persons
-    from origin.services import chair_notes
+    from origin.services import decision_notes
     from origin.services import new_accounts_backfill as backfill
 
     person = _person(request, db)
@@ -739,7 +739,7 @@ def new_accounts_backfill(request: Request, body: dict = Body(default={}),
         return backfill.file(db, person, name, body.get("expires"))
     except backfill.BackfillRefused as e:
         raise HTTPException(status_code=e.status, detail=e.detail)
-    except chair_notes.NoteRefused as e:
+    except decision_notes.NoteRefused as e:
         raise HTTPException(status_code=e.status, detail=e.detail)
 
 

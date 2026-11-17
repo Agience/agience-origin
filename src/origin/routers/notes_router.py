@@ -24,7 +24,7 @@ from sqlalchemy.orm import Session
 
 from origin import config
 from origin.db.session import get_db
-from origin.services import chair_notes as notes
+from origin.services import decision_notes as notes
 from origin.services import origin_session
 from origin.services.dependencies import AuthContext, get_auth
 
@@ -84,7 +84,7 @@ def _form_token(session_digest: str, subject: str) -> str:
     secret = get_nonce_secret()
     if isinstance(secret, str):
         secret = secret.encode("utf-8")
-    return hmac.new(secret, f"chair-form|{session_digest}|{subject}".encode("utf-8"),
+    return hmac.new(secret, f"decision-form|{session_digest}|{subject}".encode("utf-8"),
                     hashlib.sha256).hexdigest()
 
 

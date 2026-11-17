@@ -60,7 +60,7 @@ def test_a_key_is_minted_once_and_listed_without_its_token(custody_client):
     from origin.models.authority_ledger import AuthorityKey
     c = custody_client
     alice, _ = _people(c)
-    r = _mint(c, alice, agent="chair-bot")
+    r = _mint(c, alice, agent="release-bot")
     assert r.status_code == 201, r.text
     out = r.json()
     token = out["token"]
@@ -68,9 +68,9 @@ def test_a_key_is_minted_once_and_listed_without_its_token(custody_client):
     with SessionLocal() as db:
         row = db.get(AuthorityKey, out["grant_id"])
         assert row.token_hash == hashlib.sha256(token.encode()).hexdigest()
-        assert row.created_by == alice[0] and row.agent == "chair-bot"
+        assert row.created_by == alice[0] and row.agent == "release-bot"
     [k] = _keys(c, alice)
-    assert k["hint"] == token[-4:] and k["state"] == "active" and k["agent"] == "chair-bot"
+    assert k["hint"] == token[-4:] and k["state"] == "active" and k["agent"] == "release-bot"
     assert "token_hash" not in k and token not in json.dumps(k)
     assert k["members"] == [{"resource_id": alice[0], "actions": ["read"], "state": "active"}]
 

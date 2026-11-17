@@ -31,7 +31,7 @@ from origin.models.authority_ledger import (
     AuthorityRoot, AuthoritySigningKey, OperatorAlert, AuthorityJobGrant, AuthorityKey,
     InviteAddress,
 )
-from origin.models.chair_note import ChairNote, ChairRequest, ChairSpend
+from origin.models.decision_note import DecisionNote, DecisionRequest, DecisionSpend
 from origin.models.agent_approval import AgentApproval
 
 __all__ = [
@@ -74,7 +74,7 @@ __all__ = [
     "InviteAddress",
     "DelegationRecord",
     "SeedCredential",
-    "ChairRequest",
-    "ChairNote",
-    "ChairSpend",
+    "DecisionRequest",
+    "DecisionNote",
+    "DecisionSpend",
 ]

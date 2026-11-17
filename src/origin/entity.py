@@ -16,7 +16,7 @@ Resolution is Origin → Authority → JWKS: a row's `_origin` references an Ori
 its Authority for token validation. This names the entity and gives it a resolvable link to the issuer;
 it does not rewire the live token path.
 
-## Governance carries the constants
+## The economy block carries the constants
 
 An Origin's `economy` block holds its coupling constants — the α's of its economy (the facilitation
 fee, the demurrage rate). Different origins may run different physics; within one, the constants are
