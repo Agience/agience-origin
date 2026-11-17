@@ -5,6 +5,45 @@ All notable changes to `agience-origin` are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-16
+
+### Added
+- Approval requests: an account files a request against a workspace or collection with `POST /notes/requests` and reads it back with `GET /notes/requests/{id}`. Whoever holds update on that resource approves or declines on Origin's own `/approvals` page (`/notes/page/*`). Origin's session cookie and a per-form token are required there, and no bearer token is accepted.
+- An approval mints one signed note (`chair-note+jwt`) bound to the request's digest. `POST /notes/spend` spends it once per action while its approver still holds update on the resource. The page also lets the filer withdraw an open request, lets approvers revoke unspent notes (one or all), and offers a sign-out-everywhere action. The new tables are `chair_requests`, `chair_notes` and `chair_spends`, created by migrations `0034_chair_notes` and `0035_request_resource`.
+- Origin sessions now record `auth_time`, `amr` and `last_seen_time`. `amr` is `pop` for a passkey, `otp`, `pwd`, `email` or `fed`, depending on the sign-in method.
+- Feedback intake: `GET /feedback/form` and `POST /feedback` file text from the Help panel's "Send feedback" into the Feedback collection as a dedicated feedback account. Set `FEEDBACK_BOT_ID` and `FEEDBACK_COLLECTION_ID` to enable it. Without both, these routes answer 503 and the app offers mail instead. Requests pass the sign-up form's spam tests, a length cap and hourly ceilings, and the body is read only up to 32 KiB.
+- The authority router's `POST /new-person-grants` makes the operator's "New accounts receive" grants for one newly provisioned person.
+- `POST /auth/me/authority/new-accounts-receive/backfill` files a dry run of giving existing accounts what that collection lists, as an approval request. `POST .../backfill/{req}/run` performs it once approved.
+- Pending email invites in a resource's grant listing now carry `invited_address` and `sent_at`, visible to people who may share the item. The address is stored in the new `invite_addresses` table (migration `0033_invite_addresses`) and deleted once the invite is accepted, declined, revoked, claimed, spent or expired.
+- Operator tooling can rewrite existing links stored with an empty mask so they conduct everything, when the person who added each link holds Share or Admin on what it links.
+
+### Changed
+- Whoever creates an artifact in a collection now also holds update on it. Read is not added, so a create-only member still opens nothing of the collection.
+- Restoring an orphaned creation edge is refused when the item already has a creation edge, or when no container holds it any more.
+- In grant listings, a user grantee is named by display name, falling back to verified address. Invite emails name the sender by display name.
+- Migrations `0033`–`0035` are additive and are kept on rollback. Rolling back is only an `alembic stamp` to the earlier revision.
+- Version is now `0.3.0`.
+
+## [0.3.0] - 2026-11-15
+
+### Added
+- `POST /notes/requests` and `GET /notes/requests/{id}` let a signed-in account, including an agent's own, file a request for the chair's approval and read it back. Filing computes a digest of the exact fields and raises the level to the floor for its kind.
+- The chair decides requests on Origin's own page at `/approvals` (`/notes/page/*`), in the chair's Origin session. An approval mints a signed `chair-note+jwt` note bound to the request's digest, only in a session signed in by a passkey or a one-time code. The page also revokes unspent notes, revokes all of them, and signs the chair out everywhere.
+- `POST /notes/spend` spends a note once per action. A note carries `token_type: "chair_note"`, so no bearer check accepts it.
+- `POST /feedback` and `GET /feedback/form` file Help-panel feedback as an item in the platform's Feedback collection, under the feedback account's own identity. The request must pass the sign-up form's checks, a length cap and hourly ceilings; it is answered with the same thank-you whether or not it is filed. It answers 503 when feedback is not configured or Mantle does not take it.
+- The grants list at `/authority/session` shows `invited_address` and `sent_at` for a pending email invite, to people who may share the item. The address is stored in the new `invite_addresses` table and deleted once the invite is claimed, declined, revoked, expired or spent.
+- Origin sessions record `auth_time`, `amr` and `last_seen_time`, set by the sign-in method: passkey, one-time code, password, email link or federated sign-in.
+- The operator can conduct an existing link stored with the empty mask when the person who added it holds Share or Admin on what it links, through `conduct_existing_links` in `services/authority_ledger`.
+
+### Changed
+- An access check on a node now follows every edge into it by its mask, not only the creation edge. A deny on the node itself still refuses, and a deny higher up cuts only the paths through it.
+- Restoring an orphaned creation edge is refused when the node already has one, or when no container holds it.
+- Invite emails and the grantee name shown for a user grant use the sender's display name, or else the verified address.
+
+### Breaking
+- New required setting: `CHAIR_EMAIL` names the chair by a verified address. Without it every `/notes` route answers 503. `FEEDBACK_BOT_ID` and `FEEDBACK_COLLECTION_ID` are needed for feedback to be accepted.
+- Migrations `0033_invite_addresses` and `0034_chair_notes` add tables and nullable `origin_sessions` columns. Neither downgrade drops them, so a rollback needs only `alembic stamp`.
+
 ## [0.2.25] - 2026-11-14
 
 ### Added
