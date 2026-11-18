@@ -93,7 +93,7 @@ def test_a_held_grant_exchanges_for_the_child_only(custody_client, people):
     assert _child(c, "crystal", subject, "other", "wf").status_code == 403
 
 
-def test_the_same_exchange_at_the_token_endpoint(custody_client, people, crystal_key):
+def test_the_same_exchange_at_the_token_endpoint(custody_client, people, crystal_key):  # noqa: F811
     c, alice = custody_client, people["alice"]
     _tree(c, alice, "wf", "step")
     subject = _crystal(c, alice)
