@@ -13,6 +13,11 @@ reaches exactly what the child holds grants on, and the child as the parent hold
 what the person reaches; anything else is refused. It lives five minutes and never past the
 subject, and carries `act.sub` = the parent. A child's token exchanges again only for that child's
 own children, and the hop to the persona that runs the child keeps the parent on `act`.
+
+Ikailo, 2026-11-17: whichever artifact holds a step holds that step's grants. A workflow with
+inline steps is itself the holder: it holds Invoke on each operator and Read on each document its
+steps read, and the person's delegation exchanges for the workflow's own token, with no extra hop.
+A step that is its own artifact holds its own grants, and the workflow's token exchanges for it.
 """
 from __future__ import annotations
 
@@ -251,6 +256,76 @@ def test_another_persona_cannot_exchange_crystal_s_token(custody_client, people)
     _tree(c, alice, "wf", "step")
     af.ok(_hold(c, alice, "wf", "step"))
     assert _child(c, "lumen", _crystal(c, alice), "step", "wf").status_code == 403
+
+
+# -- the holder: a workflow with inline steps holds their grants ------------------------------------
+
+def test_a_workflow_s_own_token_reaches_what_the_workflow_holds(custody_client, people):
+    c, alice = custody_client, people["alice"]
+    _tree(c, alice, "wf", "op", "doc", "other")
+    af.ok(_hold(c, alice, "wf", "op"))
+    af.ok(_hold(c, alice, "wf", "doc", actions=("read",)))
+    subject = _crystal(c, alice)
+    r = _child(c, "crystal", subject, "wf")
+    assert r.status_code == 200, r.text
+    claims = jose_jwt.get_unverified_claims(r.json()["access_token"])
+    assert claims["act"] == {"sub": "wf", "act": {"sub": "crystal"}} and claims["artifact"] == "wf"
+    assert claims["reach_by"] == {"doc": ["read"], "op": ["invoke"]}
+    assert claims["job_reach"] == ["doc", "op"] and "job_grant" not in claims
+    assert claims["exp"] <= jose_jwt.get_unverified_claims(subject)["exp"]
+    # Naming the workflow as its own parent is the same exchange.
+    same = jose_jwt.get_unverified_claims(_child(c, "crystal", subject, "wf", "wf")
+                                          .json()["access_token"])
+    assert same["reach_by"] == claims["reach_by"]
+
+
+def test_a_holder_needs_the_person_s_invoke_and_the_subject_s_reach(custody_client, people):
+    c, alice, bob = custody_client, people["alice"], people["bob"]
+    _tree(c, bob, "bobs-wf")
+    r = _child(c, "crystal", _crystal(c, alice), "bobs-wf")
+    assert r.status_code == 403 and "no invoke on the parent" in r.text
+
+
+def test_a_child_s_token_is_never_exchanged_for_itself(custody_client, people):
+    c, alice = custody_client, people["alice"]
+    _tree(c, alice, "wf", "step")
+    af.ok(_hold(c, alice, "wf", "step"))
+    child = _child(c, "crystal", _crystal(c, alice), "step", "wf").json()["access_token"]
+    assert _child(c, "crystal", child, "step").status_code == 400
+
+
+def test_a_nested_step_holds_its_own_grants_under_the_workflow_s_token(custody_client, people):
+    c, alice = custody_client, people["alice"]
+    _tree(c, alice, "wf", "step", "op", "doc")
+    af.ok(_hold(c, alice, "wf", "step"))
+    af.ok(_hold(c, alice, "step", "op"))
+    af.ok(_hold(c, alice, "step", "doc", actions=("read",)))
+    own = _child(c, "crystal", _crystal(c, alice), "wf").json()["access_token"]
+    assert jose_jwt.get_unverified_claims(own)["reach_by"] == {"step": ["invoke"]}
+    r = _child(c, "crystal", own, "step")
+    assert r.status_code == 200, r.text
+    claims = jose_jwt.get_unverified_claims(r.json()["access_token"])
+    assert claims["act"] == {"sub": "wf", "act": {"sub": "crystal"}}
+    assert claims["reach_by"] == {"doc": ["read"], "op": ["invoke"], "step": ["invoke"]}
+    r = _child(c, "crystal", r.json()["access_token"], "op")
+    assert r.status_code == 200, r.text
+    assert jose_jwt.get_unverified_claims(r.json()["access_token"])["act"]["sub"] == "step"
+
+
+def test_a_holder_s_token_opens_keys_only_for_what_it_holds_read_on(custody_client, people):
+    c, alice = custody_client, people["alice"]
+    _tree(c, alice, alice[0], "wf", "op", "doc")
+    af.ok(af.store_share(c, alice[0], alice[1]))
+    af.ok(_hold(c, alice, "wf", "op"))
+    af.ok(_hold(c, alice, "wf", "doc", "ag-wf-doc", actions=("read",)))
+    held = {"doc": ["read"], "op": ["invoke"]}
+    tok = _server_delegation(alice[0], "wf", "wf", None, reach_by=held)
+    assert af.release(c, alice[0], tok, artifact="doc").status_code == 200
+    for artifact in ("wf", "op"):
+        assert af.release(c, alice[0], tok, artifact=artifact).status_code == 403
+    af.ok(af.session_submit(c, alice[0], af.grant("ag-wf-doc", "wf", "doc", ("read",),
+                                                  grantee_type="artifact", state="revoked")))
+    assert af.release(c, alice[0], tok, artifact="doc").status_code == 403
 
 
 # -- the child's token at a key share release -------------------------------------------------------

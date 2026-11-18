@@ -387,14 +387,16 @@ def _live_grant_row(db: Session, grant_id: Optional[str], *, job: Optional[str] 
 
 
 def carries_job_grant(token: str) -> bool:
-    """Does `token` name a job grant (unverified: only which verifier to try)?"""
+    """Does `token` name a job grant, or a holder artifact's own token (unverified: only which
+    verifier to try)?"""
     from jose import jwt as _jose_jwt
 
     try:
         claims = _jose_jwt.get_unverified_claims(token)
     except Exception:  # noqa: BLE001 — not a JWT: the ordinary verifier refuses it
         return False
-    return isinstance(claims, dict) and bool(claims.get("job_grant")) and "job_reach" in claims
+    return isinstance(claims, dict) and "job_reach" in claims and bool(
+        claims.get("job_grant") or claims.get("artifact"))
 
 
 def verify_job_credential(db: Session, token: str) -> VerifiedCredential:
@@ -448,15 +450,17 @@ def verify_job_credential(db: Session, token: str) -> VerifiedCredential:
 def _verify_child_credential(db: Session, claims: dict, persona, reach) -> VerifiedCredential:
     """A child's token its parent artifact exchanged for (FR-007), as a key share release's acting
     credential: only while the parent still holds the invoke grant the token names on that child
-    and the person still reaches Invoke on it. It opens what the token reaches with Read that the
-    child still holds now (`authority_ledger.held_reach`), and nothing else."""
+    (none for a holder's own token, whose parent is itself) and the person still reaches Invoke on
+    it. It opens what the token reaches with Read that the child still holds now
+    (`authority_ledger.held_reach`), and nothing else."""
     from origin.services import auth_service, authority_ledger
 
     child = str(claims.get("artifact") or "")
     parent = str(claims.get("parent") or "")
-    grant = authority_ledger.held_artifact_grant(db, parent, child)
-    if grant is None or grant.grant_id != str(claims.get("job_grant") or ""):
-        raise CredentialRefused("the parent no longer holds the grant this token names")
+    if parent != child or claims.get("job_grant"):
+        grant = authority_ledger.held_artifact_grant(db, parent, child)
+        if grant is None or grant.grant_id != str(claims.get("job_grant") or ""):
+            raise CredentialRefused("the parent no longer holds the grant this token names")
     rc = authority_ledger.reach(db)
     if not rc.reaches(persona.subject, child, "invoke"):
         raise CredentialRefused("the person holds no invoke on the child")

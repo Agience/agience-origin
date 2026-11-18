@@ -581,7 +581,13 @@ def _artifact_hop(db: Session, caller: str, subject_token: str, child: str,
     reaches only what the child holds grants on and the child itself as the parent holds it, each
     action only as far as the person reaches it (`authority_ledger.held_reach`, as `job_reach` and
     `reach_by`), lives five minutes and never past the subject, and carries `act.sub` = the parent
-    acting through `caller`. Each exchange is recorded (`narrow_hops`)."""
+    acting through `caller`. Each exchange is recorded (`narrow_hops`).
+
+    Whichever artifact holds a step holds that step's grants. From the person's delegation with no
+    `parent` (or `parent` the resource itself), the resource is the holder: the artifact running,
+    inside the subject's reach, which the person reaches Invoke on. Its token acts as itself and
+    reaches what it holds grants on, with no grant on itself to name; a child's token exchanges
+    only for that child's children, never for itself."""
     from jose import jwt as _jose_jwt
 
     from origin.models.narrow_hop import NarrowHop
@@ -604,14 +610,13 @@ def _artifact_hop(db: Session, caller: str, subject_token: str, child: str,
                                 "that child's own children")
         parent = held
     elif (claims.get("act") or {}).get("sub") == caller and not claims.get("hop"):
-        parent = str(parent or "").strip()
-        if not parent:
-            raise HTTPException(status_code=400, detail="parent names the artifact running")
+        parent = str(parent or "").strip() or child
     else:
         raise HTTPException(status_code=403, detail="a persona hop's result is not exchanged "
                             "again")
-    if not child or child == parent:
+    if not child or (from_child and child == parent):
         raise HTTPException(status_code=400, detail="resource names the child to invoke")
+    holder = child == parent
     if _not_before.ended(db, claims):
         raise HTTPException(status_code=401, detail="this sign-in has ended; sign in again")
     person = db_persons.get_by_id(db, str(claims.get("sub") or ""))
@@ -633,8 +638,8 @@ def _artifact_hop(db: Session, caller: str, subject_token: str, child: str,
                                     "subject's reach")
         if not rc.reaches(str(person.id), parent, "invoke"):
             raise HTTPException(status_code=403, detail="the person holds no invoke on the parent")
-    grant = _ledger.held_artifact_grant(db, parent, child)
-    if grant is None:
+    grant = None if holder else _ledger.held_artifact_grant(db, parent, child)
+    if not holder and grant is None:
         raise HTTPException(status_code=403, detail="the parent holds no invoke grant on this "
                             "child")
     if not rc.reaches(str(person.id), child, "invoke"):
@@ -647,7 +652,7 @@ def _artifact_hop(db: Session, caller: str, subject_token: str, child: str,
         hop={"from": caller, "jti": str(claims.get("jti") or ""), "kind": "artifact",
              "parent": parent},
         **_child_reach(_ledger.held_reach(db, rc, str(person.id), parent, child)),
-        job_grant=grant.grant_id, parent=parent, artifact=child)
+        job_grant=grant.grant_id if grant else None, parent=parent, artifact=child)
     issued = _jose_jwt.get_unverified_claims(token)
     db.add(NarrowHop(jti=str(issued["jti"]), sub=str(person.id),
                      subject_jti=str(claims.get("jti") or ""), from_aud=parent[:128],
