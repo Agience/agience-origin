@@ -401,11 +401,16 @@ def make_grant(request: Request, body: dict = Body(...), db: Session = Depends(g
     effect = body.get("effect") or "allow"
     if effect not in ("allow", "deny"):
         raise HTTPException(status_code=400, detail="effect is allow or deny")
-    if _may_share(db, person, resource_id):
+    # A person, or a parent artifact that may invoke this one (FR-007): the parent's grant opens
+    # nothing to anyone, so it shows no preview; the ledger's own rule decides it.
+    grantee_type = body.get("grantee_type") or "user"
+    if grantee_type not in ("user", "artifact"):
+        raise HTTPException(status_code=400, detail="grantee_type is user or artifact")
+    if grantee_type == "user" and _may_share(db, person, resource_id):
         # One who may not share is refused by the ledger's own rule, previewed or not.
         _confirmed_preview(db, resource_id, body)
     entry = {"kind": "grant", "grant_id": f"g-{_uuid.uuid4()}", "grantee_id": grantee_id,
-             "grantee_type": "user", "resource_id": resource_id,
+             "grantee_type": grantee_type, "resource_id": resource_id,
              "actions": _actions(body.get("actions")), "effect": effect, "state": "active",
              "expires_at": body.get("expires_at"), "target": None, "max_claims": None}
     return {**_append(db, person, entry), "grant_id": entry["grant_id"]}

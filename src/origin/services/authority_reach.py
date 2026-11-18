@@ -467,9 +467,11 @@ class Reach:
 
     # `grant_service.user_has_any_action`: direct grants on the resource, any grantee type.
     def _direct(self, subject: str, resource_id: str) -> List[Mask]:
-        # An invite is no principal's grant until claimed (`lattice_api` reads it the same way).
+        # An invite is no principal's grant until claimed (`lattice_api` reads it the same way),
+        # and an artifact's grant is read only at its exchange.
         return [mask_of(g) for g in self.r.grants_held_by(str(subject))
-                if g.resource_id == resource_id and _active(g) and g.grantee_type != "invite"]
+                if g.resource_id == resource_id and _active(g)
+                and g.grantee_type not in ("invite", "artifact")]
 
     def has_any_action(self, subject: str, resource_id: str, *actions: str) -> bool:
         if not subject or self.gone(str(resource_id)):

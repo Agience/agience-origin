@@ -435,6 +435,10 @@ def internal_issue_delegation_token(
         narrowed_scope = str(claims.get("scope") or "")
         # A timer's delegation keeps its reach on every exchange: never wider than its grant.
         job = origin_auth_service.job_reach_of(claims) or {}
+        # A child's token (FR-007) keeps the child and the parent that invoked it.
+        if job and claims.get("artifact"):
+            job = {**job, "artifact": str(claims["artifact"]),
+                   "parent": str(((claims.get("act") or {}).get("sub")) or "")}
         claims = {**claims, "principal_type": "user", "aud": config.AUTHORITY_ISSUER,
                   "act": None}
     if claims.get("principal_type") in _NON_USER_PRINCIPALS:
@@ -483,8 +487,12 @@ class _NarrowHopRequest(BaseModel):
     """Body for POST /internal/narrow-hop."""
     model_config = ConfigDict(extra="forbid")
     subject_token: str
-    audience: str
+    audience: str = ""
     scope: Optional[str] = None
+    #: A parent artifact's exchange for its child (`_artifact_hop`): the child, and the parent
+    #: when the subject is the person's own delegation.
+    resource: Optional[str] = None
+    parent: Optional[str] = None
 
 
 def _narrow_hop(db: Session, caller: str, subject_token: str, audience: str,
@@ -492,8 +500,9 @@ def _narrow_hop(db: Session, caller: str, subject_token: str, audience: str,
     """One hop of cross-persona work (review 12, decision 2), for the persona `caller` whose own
     signature the route has already proven.
 
-    The subject must be a delegation Origin narrowed to `caller` itself (not a hop's result, which
-    is not exchanged again). The result is narrowed to `audience`: the same person, scope
+    The subject must be a delegation Origin narrowed to `caller` itself, or a child's token its
+    parent artifact exchanged for through `caller` (`_artifact_hop`), whose parent stays on `act`
+    (not a persona hop's result, which is not exchanged again). The result is narrowed to `audience`: the same person, scope
     `persona:<audience>` only, five minutes and never past the subject, no refresh token, never
     `platform:admin`, and only along the pairs Origin lists (`config.NARROW_HOPS`: Crystal to each
     persona, Lumen to Sage). Each hop is recorded (`narrow_hops`)."""
@@ -506,8 +515,10 @@ def _narrow_hop(db: Session, caller: str, subject_token: str, audience: str,
     claims = verify_token(subject_token)
     if not claims:
         raise HTTPException(status_code=401, detail="Invalid or expired subject token")
+    child_token = _artifact_hop_of(claims, caller)
     if (not _is_narrowed(claims) or claims.get("aud") != caller
-            or (claims.get("act") or {}).get("sub") != caller or claims.get("hop")):
+            or (not child_token
+                and ((claims.get("act") or {}).get("sub") != caller or claims.get("hop")))):
         raise HTTPException(status_code=403, detail="a hop starts from a delegation narrowed to "
                             "the asking persona itself")
     if audience not in (config.NARROW_HOPS.get(caller) or []):
@@ -528,12 +539,114 @@ def _narrow_hop(db: Session, caller: str, subject_token: str, audience: str,
     token = origin_auth_service.issue_narrow_delegation(
         str(person.id), audience, wanted, expires_at=ends,
         hop={"from": caller, "jti": str(claims.get("jti") or "")},
-        **(origin_auth_service.job_reach_of(claims) or {}))
+        **(origin_auth_service.job_reach_of(claims) or {}),
+        **({"parent": str(claims["act"]["sub"]), "artifact": str(claims["artifact"])}
+           if child_token else {}))
     issued = _jose_jwt.get_unverified_claims(token)
     db.add(NarrowHop(jti=str(issued["jti"]), sub=str(person.id),
                      subject_jti=str(claims.get("jti") or ""), from_aud=caller, to_aud=audience))
     db.commit()
     logger.info("narrow hop %s -> %s for %s", caller, audience, person.id)
+    return JSONResponse(content={
+        "access_token": token, "issued_token_type": _ACCESS_TOKEN_TYPE, "token_type": "bearer",
+        "expires_in": max(0, int(issued["exp"] - datetime.now(timezone.utc).timestamp())),
+        "scope": " ".join(wanted)})
+
+
+def _artifact_hop_of(claims: dict, caller: str) -> bool:
+    """Is `claims` a child's token its parent artifact exchanged for through `caller`?"""
+    hop, act = claims.get("hop") or {}, claims.get("act") or {}
+    return (isinstance(hop, dict) and isinstance(act, dict) and hop.get("kind") == "artifact"
+            and bool(claims.get("artifact")) and bool(act.get("sub"))
+            and act.get("sub") == hop.get("parent")
+            and (act.get("act") or {}).get("sub") == caller and hop.get("from") == caller)
+
+
+def _artifact_hop(db: Session, caller: str, subject_token: str, child: str,
+                  parent: Optional[str]) -> JSONResponse:
+    """A parent artifact's exchange for the token its child runs on (FR-007; review 12, decision 2),
+    for the persona `caller` whose own signature the route has already proven.
+
+    The subject is narrowed to `caller`: the person's delegation (then `parent` names the artifact
+    running, which the person reaches Invoke on, inside the subject's reach when it has one), or a
+    child's token from an earlier exchange (then the parent is that child). Origin refuses unless
+    the parent holds a live invoke grant on the child (`authority_ledger.held_artifact_grant`) and
+    the person reaches Invoke on the child. The token is narrowed to `caller` as the subject is,
+    reaches the child only, lives five minutes and never past the subject, and carries `act.sub` =
+    the parent acting through `caller`. Each exchange is recorded (`narrow_hops`)."""
+    from jose import jwt as _jose_jwt
+
+    from origin.models.narrow_hop import NarrowHop
+    from origin.services import authority_ledger as _ledger
+    from origin.services import not_before as _not_before
+    from origin.services.dependencies import _is_narrowed
+
+    claims = verify_token(subject_token)
+    if not claims:
+        raise HTTPException(status_code=401, detail="Invalid or expired subject token")
+    if not _is_narrowed(claims) or claims.get("aud") != caller:
+        raise HTTPException(status_code=403, detail="an artifact's exchange starts from a "
+                            "delegation narrowed to the asking persona")
+    child = str(child or "").strip()
+    from_child = _artifact_hop_of(claims, caller)
+    if from_child:
+        held = str(claims.get("artifact"))
+        if parent and parent != held:
+            raise HTTPException(status_code=403, detail="a child's token is exchanged only for "
+                                "that child's own children")
+        parent = held
+    elif (claims.get("act") or {}).get("sub") == caller and not claims.get("hop"):
+        parent = str(parent or "").strip()
+        if not parent:
+            raise HTTPException(status_code=400, detail="parent names the artifact running")
+    else:
+        raise HTTPException(status_code=403, detail="a persona hop's result is not exchanged "
+                            "again")
+    if not child or child == parent:
+        raise HTTPException(status_code=400, detail="resource names the child to invoke")
+    if _not_before.ended(db, claims):
+        raise HTTPException(status_code=401, detail="this sign-in has ended; sign in again")
+    person = db_persons.get_by_id(db, str(claims.get("sub") or ""))
+    if person is None:
+        raise HTTPException(status_code=401, detail="Invalid subject")
+    refuse_if_deactivated(person)
+    rc = _ledger.reach(db)
+    subject_reach = origin_auth_service.job_reach_of(claims)
+    if not from_child:
+        if subject_reach is not None:
+            listed = {str(r) for r in (subject_reach.get("job_reach") or [])}
+            try:
+                inside = parent in listed or any(str(r) in listed
+                                                 for r in rc.chain(parent, "read"))
+            except Exception:  # noqa: BLE001 — a walk that fails opens nothing
+                inside = False
+            if not inside:
+                raise HTTPException(status_code=403, detail="the parent is outside the "
+                                    "subject's reach")
+        if not rc.reaches(str(person.id), parent, "invoke"):
+            raise HTTPException(status_code=403, detail="the person holds no invoke on the parent")
+    grant = _ledger.held_artifact_grant(db, parent, child)
+    if grant is None:
+        raise HTTPException(status_code=403, detail="the parent holds no invoke grant on this "
+                            "child")
+    if not rc.reaches(str(person.id), child, "invoke"):
+        raise HTTPException(status_code=403, detail="the person holds no invoke on the child")
+    scopes = origin_auth_service.narrow_audiences().get(caller) or []
+    wanted = [s for s in str(claims.get("scope") or "").split() if s in scopes]
+    ends = datetime.fromtimestamp(float(claims.get("exp") or 0), timezone.utc)
+    token = origin_auth_service.issue_narrow_delegation(
+        str(person.id), caller, wanted, expires_at=ends,
+        hop={"from": caller, "jti": str(claims.get("jti") or ""), "kind": "artifact",
+             "parent": parent},
+        job_reach=[child], job_grant=grant.grant_id,
+        reach_actions=(subject_reach or {}).get("reach_actions"),
+        parent=parent, artifact=child)
+    issued = _jose_jwt.get_unverified_claims(token)
+    db.add(NarrowHop(jti=str(issued["jti"]), sub=str(person.id),
+                     subject_jti=str(claims.get("jti") or ""), from_aud=parent[:128],
+                     to_aud=child[:128]))
+    db.commit()
+    logger.info("artifact hop %s -> %s through %s for %s", parent, child, caller, person.id)
     return JSONResponse(content={
         "access_token": token, "issued_token_type": _ACCESS_TOKEN_TYPE, "token_type": "bearer",
         "expires_in": max(0, int(issued["exp"] - datetime.now(timezone.utc).timestamp())),
@@ -548,6 +661,8 @@ def internal_narrow_hop(body: _NarrowHopRequest, auth: AuthContext = Depends(get
     if auth.principal_type != "service" or (caller not in config.NARROW_HOPS
                                             and caller not in config.PERSONA_AUDIENCES):
         raise HTTPException(status_code=403, detail="a hop is a persona's own exchange")
+    if body.resource:
+        return _artifact_hop(db, caller, body.subject_token, body.resource, body.parent)
     return _narrow_hop(db, caller, body.subject_token, body.audience, body.scope)
 
 
@@ -2377,6 +2492,8 @@ async def token_endpoint(
     client_assertion: Optional[str] = Form(None),
     actor_token: Optional[str] = Form(None),
     actor_token_type: Optional[str] = Form(None),
+    resource: Optional[str] = Form(None),
+    parent: Optional[str] = Form(None),
     db: Session = Depends(get_db),
 ):
     if grant_type == _TOKEN_EXCHANGE and actor_token_type == _agent_sessions.KEY_TOKEN_TYPE:
@@ -2416,6 +2533,9 @@ async def token_endpoint(
             return _ember_for_mantle(db, subject_token or "", actor_token)
         if narrowed_subject and subject_token_type == _ACCESS_TOKEN_TYPE:
             caller = _hop_caller(db, subject_token or "", client_assertion_type, client_assertion)
+            if resource:
+                # A parent artifact's exchange for the child it invokes (FR-007).
+                return _artifact_hop(db, caller, subject_token or "", resource, parent)
             return _narrow_hop(db, caller, subject_token or "", audience or "", scope)
         return _grant_token_exchange(db, subject_token, subject_token_type, audience, scope)
     if grant_type == "authorization_code":

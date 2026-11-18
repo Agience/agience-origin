@@ -427,6 +427,8 @@ def verify_job_credential(db: Session, token: str) -> VerifiedCredential:
     reach = claims.get("job_reach")
     if not isinstance(reach, list) or not reach:
         raise CredentialRefused("a job's delegation with no reach")
+    if claims.get("artifact"):
+        return _verify_child_credential(db, claims, persona, reach)
     grant = _live_grant_row(db, str(claims.get("job_grant") or ""))
     if grant is None or not authority_ledger.is_reach_job(str(grant.job)):
         raise CredentialRefused("the job grant this delegation names is revoked, over, or not a "
@@ -441,6 +443,24 @@ def verify_job_credential(db: Session, token: str) -> VerifiedCredential:
     # release's own walk decide.
     return VerifiedCredential(persona.subject, "job", persona.jti,
                               reach=tuple(sorted({str(r) for r in granted})))
+
+
+def _verify_child_credential(db: Session, claims: dict, persona, reach) -> VerifiedCredential:
+    """A child's token its parent artifact exchanged for (FR-007), as a key share release's acting
+    credential: only while the parent still holds the invoke grant the token names on that child,
+    the person still reaches Invoke on the child, and the token reaches that child alone."""
+    from origin.services import authority_ledger
+
+    child = str(claims.get("artifact") or "")
+    parent = str(claims.get("parent") or "")
+    if [str(r) for r in reach] != [child]:
+        raise CredentialRefused("a child's token whose reach is not that child")
+    grant = authority_ledger.held_artifact_grant(db, parent, child)
+    if grant is None or grant.grant_id != str(claims.get("job_grant") or ""):
+        raise CredentialRefused("the parent no longer holds the grant this token names")
+    if not authority_ledger.reach(db).reaches(persona.subject, child, "invoke"):
+        raise CredentialRefused("the person holds no invoke on the child")
+    return VerifiedCredential(persona.subject, "job", persona.jti, reach=(child,))
 
 
 def _held_in_reach(artifact_id: str, reach, rc) -> bool:

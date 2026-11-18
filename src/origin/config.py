@@ -300,7 +300,8 @@ def _narrow_hops_from_env() -> dict:
     return {str(k): [str(x) for x in v] for k, v in parsed.items()}
 
 
-#: The cross-persona hops Origin makes (`/internal/narrow-hop`), and only these.
+#: The cross-persona hops Origin makes (`/internal/narrow-hop`), and only these. A parent
+#: artifact's exchange for its child goes along the grant the parent holds instead (FR-007).
 NARROW_HOPS: dict = _narrow_hops_from_env()
 
 

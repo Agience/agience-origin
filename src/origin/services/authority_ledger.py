@@ -800,6 +800,64 @@ def _grantee_exists(rc: Reach, new: Grant) -> bool:
     return False
 
 
+#: A grant held by an artifact (FR-007): the parent artifact (`grantee_id`) may invoke the child
+#: (`resource_id`). It opens nothing in reach; Origin reads it only when the parent exchanges for
+#: the child's token (`held_artifact_grant`).
+ARTIFACT_GRANTEE = "artifact"
+
+
+def _decide_artifact_grant(rc: Reach, ctx: Context, prior: Optional[Grant],
+                           new: Grant) -> Optional[str]:
+    """A parent artifact's invoke grant on a child: made in the person's Origin session, Invoke
+    only, allow only, by one who reaches Invoke on the child and Update on the parent. It is
+    retired by whoever made it, by Admin on the child, or by Update on the parent."""
+    actor, child, parent = ctx.actor, new.resource_id, str(new.grantee_id)
+    if ctx.kind not in (ORIGIN_SESSION, ORIGIN_PAGE):
+        raise _session_only("an artifact's grant")
+    if new.actions != frozenset({"invoke"}) or new.effect != "allow":
+        raise EntryRefused("an artifact holds Invoke on a child, allow only", 400)
+    if parent == child:
+        raise EntryRefused("an artifact holds no grant on itself", 400)
+    if prior is not None and new.state != _ACTIVE:
+        if actor == prior.created_by:
+            return "the grant's maker retires it"
+        if rc.gone(child) or rc.gone(parent):
+            return "retired on an artifact deleted at Origin"
+        if rc.has_any_action(actor, child, "admin") or rc.reaches(actor, parent, "update"):
+            return "admin on the child, or update on the parent, retires it"
+        raise EntryRefused("an artifact's grant is retired by its maker, admin on the child, "
+                           "or update on the parent")
+    if not _seen(rc, parent) or rc.gone(parent):
+        raise EntryRefused("the parent artifact is unknown to Origin's replica", 409)
+    if not rc.reaches(actor, child, "invoke"):
+        raise EntryRefused("the actor holds no invoke on the child")
+    if not rc.reaches(actor, parent, "update"):
+        raise EntryRefused("the actor holds no update on the parent")
+    return "invoke on the child and update on the parent"
+
+
+def held_artifact_grant(db: Session, parent: str, child: str):
+    """The live grant by which `parent` may invoke `child`, or None: active, unexpired, Invoke,
+    the child not deleted at Origin, and its maker still reaching Invoke on the child."""
+    from origin.models.authority_ledger import AuthorityGrant
+
+    rows = (db.query(AuthorityGrant)
+            .filter(AuthorityGrant.grantee_type == ARTIFACT_GRANTEE,
+                    AuthorityGrant.grantee_id == str(parent),
+                    AuthorityGrant.resource_id == str(child),
+                    AuthorityGrant.state == _ACTIVE, AuthorityGrant.effect == "allow")
+            .order_by(AuthorityGrant.seq))
+    rc = None
+    for row in rows:
+        if "invoke" not in (row.actions or "").split(",") or not unexpired(row.expires_at):
+            continue
+        rc = rc or reach(db)
+        if rc.gone(str(child)) or not rc.reaches(str(row.created_by), str(child), "invoke"):
+            continue
+        return row
+    return None
+
+
 def _decide_grant(rc: Reach, ctx: Context, b: dict) -> Optional[str]:
     actor = ctx.actor
     new = _grant_from_body(b)
@@ -854,6 +912,8 @@ def _decide_grant(rc: Reach, ctx: Context, b: dict) -> Optional[str]:
                            "only by its own root or creation edge")
     if ctx.bootstrap:
         return "bootstrap"
+    if new.grantee_type == ARTIFACT_GRANTEE:
+        return _decide_artifact_grant(rc, ctx, prior, new)
     widening = _widens(prior, new)
     # A deny is changed only by Admin on the resource, whoever issued it (architecture §51:
     # created_by grants nothing), and never on a token Mantle holds (review 15); a background
