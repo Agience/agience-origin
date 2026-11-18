@@ -800,22 +800,27 @@ def _grantee_exists(rc: Reach, new: Grant) -> bool:
     return False
 
 
-#: A grant held by an artifact (FR-007): the parent artifact (`grantee_id`) may invoke the child
-#: (`resource_id`). It opens nothing in reach; Origin reads it only when the parent exchanges for
-#: the child's token (`held_artifact_grant`).
+#: A grant held by an artifact (FR-007): the artifact (`grantee_id`) holds the grant's actions on
+#: the resource (`resource_id`). It opens nothing in a person's reach. Origin reads it when a
+#: parent exchanges for a child's token: the parent must hold Invoke on the child
+#: (`held_artifact_grant`), and the child's token reaches what the child holds (`held_reach`).
 ARTIFACT_GRANTEE = "artifact"
+#: What an artifact may hold on another: never delete, evict, share or admin.
+ARTIFACT_ACTIONS = AGENT_WINDOW_ACTIONS
 
 
 def _decide_artifact_grant(rc: Reach, ctx: Context, prior: Optional[Grant],
                            new: Grant) -> Optional[str]:
-    """A parent artifact's invoke grant on a child: made in the person's Origin session, Invoke
-    only, allow only, by one who reaches Invoke on the child and Update on the parent. It is
-    retired by whoever made it, by Admin on the child, or by Update on the parent."""
+    """An artifact's grant on another artifact (the child, here): made in the person's Origin
+    session, allow only, of actions in `ARTIFACT_ACTIONS`, by one who reaches each of them on the
+    child and Update on the parent. It is retired by whoever made it, by Admin on the child, or
+    by Update on the parent."""
     actor, child, parent = ctx.actor, new.resource_id, str(new.grantee_id)
     if ctx.kind not in (ORIGIN_SESSION, ORIGIN_PAGE):
         raise _session_only("an artifact's grant")
-    if new.actions != frozenset({"invoke"}) or new.effect != "allow":
-        raise EntryRefused("an artifact holds Invoke on a child, allow only", 400)
+    if not new.actions or not new.actions <= ARTIFACT_ACTIONS or new.effect != "allow":
+        raise EntryRefused("an artifact holds create, read, update, invoke or add on another, "
+                           "allow only", 400)
     if parent == child:
         raise EntryRefused("an artifact holds no grant on itself", 400)
     if prior is not None and new.state != _ACTIVE:
@@ -829,11 +834,12 @@ def _decide_artifact_grant(rc: Reach, ctx: Context, prior: Optional[Grant],
                            "or update on the parent")
     if not _seen(rc, parent) or rc.gone(parent):
         raise EntryRefused("the parent artifact is unknown to Origin's replica", 409)
-    if not rc.reaches(actor, child, "invoke"):
-        raise EntryRefused("the actor holds no invoke on the child")
+    for action in sorted(new.actions):
+        if not rc.reaches(actor, child, action):
+            raise EntryRefused(f"the actor holds no {action} on the child")
     if not rc.reaches(actor, parent, "update"):
         raise EntryRefused("the actor holds no update on the parent")
-    return "invoke on the child and update on the parent"
+    return "the actions on the child and update on the parent"
 
 
 def held_artifact_grant(db: Session, parent: str, child: str):
@@ -856,6 +862,33 @@ def held_artifact_grant(db: Session, parent: str, child: str):
             continue
         return row
     return None
+
+
+def held_reach(db: Session, rc: Reach, person: str, parent: str, child: str) -> dict:
+    """What a child's token reaches, as {artifact: sorted actions}: each live grant the child
+    holds (`grantee_type` `artifact`), and the child itself with what the parent holds on it, each
+    action only while the grant's maker still reaches it and the person reaches it too, never on
+    an artifact deleted at Origin."""
+    from origin.models.authority_ledger import AuthorityGrant
+
+    rows = (db.query(AuthorityGrant)
+            .filter(AuthorityGrant.grantee_type == ARTIFACT_GRANTEE,
+                    AuthorityGrant.state == _ACTIVE, AuthorityGrant.effect == "allow")
+            .filter(((AuthorityGrant.grantee_id == str(child))
+                     | ((AuthorityGrant.grantee_id == str(parent))
+                        & (AuthorityGrant.resource_id == str(child)))))
+            .order_by(AuthorityGrant.seq))
+    out: dict = {}
+    for row in rows:
+        rid = str(row.resource_id)
+        if rid == str(parent) or not unexpired(row.expires_at) or rc.gone(rid):
+            continue
+        for action in (row.actions or "").split(","):
+            action = action.strip()
+            if (action in ARTIFACT_ACTIONS and rc.reaches(str(row.created_by), rid, action)
+                    and rc.reaches(str(person), rid, action)):
+                out.setdefault(rid, set()).add(action)
+    return {rid: sorted(acts) for rid, acts in sorted(out.items())}
 
 
 def _decide_grant(rc: Reach, ctx: Context, b: dict) -> Optional[str]:

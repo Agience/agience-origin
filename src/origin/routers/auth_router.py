@@ -553,6 +553,12 @@ def _narrow_hop(db: Session, caller: str, subject_token: str, audience: str,
         "scope": " ".join(wanted)})
 
 
+def _child_reach(held: dict) -> dict:
+    """A child's token's reach claims from what it holds (`authority_ledger.held_reach`)."""
+    return {"job_reach": sorted(held), "reach_by": held,
+            "reach_actions": sorted({a for acts in held.values() for a in acts})}
+
+
 def _artifact_hop_of(claims: dict, caller: str) -> bool:
     """Is `claims` a child's token its parent artifact exchanged for through `caller`?"""
     hop, act = claims.get("hop") or {}, claims.get("act") or {}
@@ -572,8 +578,10 @@ def _artifact_hop(db: Session, caller: str, subject_token: str, child: str,
     child's token from an earlier exchange (then the parent is that child). Origin refuses unless
     the parent holds a live invoke grant on the child (`authority_ledger.held_artifact_grant`) and
     the person reaches Invoke on the child. The token is narrowed to `caller` as the subject is,
-    reaches the child only, lives five minutes and never past the subject, and carries `act.sub` =
-    the parent acting through `caller`. Each exchange is recorded (`narrow_hops`)."""
+    reaches only what the child holds grants on and the child itself as the parent holds it, each
+    action only as far as the person reaches it (`authority_ledger.held_reach`, as `job_reach` and
+    `reach_by`), lives five minutes and never past the subject, and carries `act.sub` = the parent
+    acting through `caller`. Each exchange is recorded (`narrow_hops`)."""
     from jose import jwt as _jose_jwt
 
     from origin.models.narrow_hop import NarrowHop
@@ -638,9 +646,8 @@ def _artifact_hop(db: Session, caller: str, subject_token: str, child: str,
         str(person.id), caller, wanted, expires_at=ends,
         hop={"from": caller, "jti": str(claims.get("jti") or ""), "kind": "artifact",
              "parent": parent},
-        job_reach=[child], job_grant=grant.grant_id,
-        reach_actions=(subject_reach or {}).get("reach_actions"),
-        parent=parent, artifact=child)
+        **_child_reach(_ledger.held_reach(db, rc, str(person.id), parent, child)),
+        job_grant=grant.grant_id, parent=parent, artifact=child)
     issued = _jose_jwt.get_unverified_claims(token)
     db.add(NarrowHop(jti=str(issued["jti"]), sub=str(person.id),
                      subject_jti=str(claims.get("jti") or ""), from_aud=parent[:128],

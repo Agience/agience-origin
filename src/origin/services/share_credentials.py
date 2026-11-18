@@ -447,20 +447,25 @@ def verify_job_credential(db: Session, token: str) -> VerifiedCredential:
 
 def _verify_child_credential(db: Session, claims: dict, persona, reach) -> VerifiedCredential:
     """A child's token its parent artifact exchanged for (FR-007), as a key share release's acting
-    credential: only while the parent still holds the invoke grant the token names on that child,
-    the person still reaches Invoke on the child, and the token reaches that child alone."""
-    from origin.services import authority_ledger
+    credential: only while the parent still holds the invoke grant the token names on that child
+    and the person still reaches Invoke on it. It opens what the token reaches with Read that the
+    child still holds now (`authority_ledger.held_reach`), and nothing else."""
+    from origin.services import auth_service, authority_ledger
 
     child = str(claims.get("artifact") or "")
     parent = str(claims.get("parent") or "")
-    if [str(r) for r in reach] != [child]:
-        raise CredentialRefused("a child's token whose reach is not that child")
     grant = authority_ledger.held_artifact_grant(db, parent, child)
     if grant is None or grant.grant_id != str(claims.get("job_grant") or ""):
         raise CredentialRefused("the parent no longer holds the grant this token names")
-    if not authority_ledger.reach(db).reaches(persona.subject, child, "invoke"):
+    rc = authority_ledger.reach(db)
+    if not rc.reaches(persona.subject, child, "invoke"):
         raise CredentialRefused("the person holds no invoke on the child")
-    return VerifiedCredential(persona.subject, "job", persona.jti, reach=(child,))
+    claimed = auth_service.reach_by_of(claims.get("reach_by"))
+    listed = {str(r) for r in reach}
+    held = authority_ledger.held_reach(db, rc, persona.subject, parent, child)
+    opens = sorted(rid for rid, acts in held.items()
+                   if "read" in acts and rid in listed and "read" in claimed.get(rid, []))
+    return VerifiedCredential(persona.subject, "job", persona.jti, reach=tuple(opens))
 
 
 def _held_in_reach(artifact_id: str, reach, rc) -> bool:
