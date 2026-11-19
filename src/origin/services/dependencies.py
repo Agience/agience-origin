@@ -284,6 +284,9 @@ async def get_person(
     person = person_service.get_user_by_id(db, auth.user_id)
     if person is None:
         raise HTTPException(status_code=404, detail="User not found")
+    # A token minted before deactivation still verifies; the account itself answers to no one.
+    from origin.services.auth_service import refuse_if_deactivated
+    refuse_if_deactivated(person)
     return person
 
 

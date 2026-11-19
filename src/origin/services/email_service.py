@@ -45,6 +45,23 @@ def _provider() -> str:
     return (settings.get("email.provider") or os.getenv("EMAIL_PROVIDER", "") or "").strip().lower()
 
 
+#: Providers that hand a message to a real mail system.
+REAL_PROVIDERS = frozenset({"smtp", "ses", "sendgrid", "resend", "gmail"})
+
+#: True only in a test that has replaced a real provider's transport with a fake. Under pytest every
+#: other send through a real provider raises, so a suite that inherits the operator's
+#: `EMAIL_PROVIDER` fails loudly instead of mailing a real address.
+REAL_PROVIDER_UNDER_TEST = False
+
+
+def refuse_a_real_provider_under_test(provider: str) -> None:
+    """Raise when pytest is running and ``provider`` would send real mail."""
+    if (provider in REAL_PROVIDERS and os.getenv("PYTEST_CURRENT_TEST")
+            and not REAL_PROVIDER_UNDER_TEST):
+        raise RuntimeError(f"email provider {provider!r} would send real mail under test; "
+                           "a test stack uses EMAIL_PROVIDER=outbox")
+
+
 def _from_address() -> str:
     return settings.get("email.from_address") or os.getenv("PLATFORM_EMAIL_ADDRESS", "") or ""
 
@@ -123,6 +140,7 @@ async def send_email(
     if not provider:
         logger.warning("Email not configured — cannot send to %s", to_email)
         return False
+    refuse_a_real_provider_under_test(provider)
     try:
         if provider == "smtp":
             return await _send_smtp(cfg, to_email, subject, html_body, text_body)
@@ -304,6 +322,7 @@ async def send_invite(
 
 async def test_connection(provider_config: dict) -> tuple[bool, Optional[str]]:
     provider = provider_config.get("provider", "")
+    refuse_a_real_provider_under_test(provider)
     try:
         if provider == "smtp":
             smtp = aiosmtplib.SMTP(

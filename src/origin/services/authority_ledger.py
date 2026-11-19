@@ -145,8 +145,10 @@ _FIELDS = {
 KINDS = frozenset(_FIELDS)
 #: Fields an entry may carry beyond `_FIELDS`, kept in its body only when given, so an entry made
 #: before the field existed hashes as it did. A job grant's `reach` (John, 2026-11-10): the ids a
-#: timer's delegation may touch, and nothing outside them.
-_OPTIONAL: Dict[str, frozenset] = {"job_grant": frozenset({"reach"}), "key": frozenset({"agent"})}
+#: timer's delegation may touch, and nothing outside them. Its `actions`: the most an agent window's
+#: sessions may do there (FR-032).
+_OPTIONAL: Dict[str, frozenset] = {"job_grant": frozenset({"reach", "actions"}),
+                                   "key": frozenset({"agent"})}
 TARGET_KINDS = frozenset({"user_id", "email", "domain"})
 
 
@@ -293,6 +295,10 @@ def normalise(body: Any, *, canonical_times: bool = True) -> dict:
                 raise EntryRefused("reach is a list of at most 64 ids", 400)
             if reach_ids:
                 out["reach"] = sorted(set(reach_ids))
+        if body.get("actions") is not None:
+            acts = _actions(body["actions"], "actions")
+            if acts:
+                out["actions"] = sorted(acts)
         exp = body["expires_at"]
         try:
             parse_time(exp) if isinstance(exp, str) else (_ for _ in ()).throw(ValueError())
@@ -322,6 +328,21 @@ TIMER_JOB_PREFIX = "lumen.timer."
 #: ends within `RUN_GRANT_MAX_MINUTES`, and only one delegation is ever minted under it, to Crystal.
 RUN_JOB_PREFIX = "lumen.run."
 RUN_GRANT_MAX_MINUTES = 15
+
+
+#: An agent window's standing grant (FR-032): `agent.window.<jkt>`, where `jkt` is the RFC 7638
+#: thumbprint of the key the window made at sign-in. It names a `reach` (the collections its
+#: sessions may work in) and `actions` (the most they may do there), over the person's own key and
+#: no collection, for at most `AGENT_WINDOW_MAX_DAYS`. Only that key signs a session's ask under it,
+#: and it never releases a key share.
+AGENT_WINDOW_PREFIX = "agent.window."
+AGENT_WINDOW_MAX_DAYS = 7
+#: What an agent window's sessions may ever be granted: never delete, evict, share or admin.
+AGENT_WINDOW_ACTIONS = frozenset({"create", "read", "update", "invoke", "add"})
+
+
+def is_agent_window_job(job: str) -> bool:
+    return str(job or "").startswith(AGENT_WINDOW_PREFIX)
 
 
 def is_reach_job(job: str) -> bool:
@@ -779,6 +800,97 @@ def _grantee_exists(rc: Reach, new: Grant) -> bool:
     return False
 
 
+#: A grant held by an artifact (FR-007): the artifact (`grantee_id`) holds the grant's actions on
+#: the resource (`resource_id`). It opens nothing in a person's reach. Origin reads it when a
+#: parent exchanges for a child's token: the parent must hold Invoke on the child
+#: (`held_artifact_grant`), and the child's token reaches what the child holds (`held_reach`).
+ARTIFACT_GRANTEE = "artifact"
+#: What an artifact may hold on another: never delete, evict, share or admin.
+ARTIFACT_ACTIONS = AGENT_WINDOW_ACTIONS
+
+
+def _decide_artifact_grant(rc: Reach, ctx: Context, prior: Optional[Grant],
+                           new: Grant) -> Optional[str]:
+    """An artifact's grant on another artifact (the child, here): made in the person's Origin
+    session, allow only, of actions in `ARTIFACT_ACTIONS`, by one who reaches each of them on the
+    child and Update on the parent. It is retired by whoever made it, by Admin on the child, or
+    by Update on the parent."""
+    actor, child, parent = ctx.actor, new.resource_id, str(new.grantee_id)
+    if ctx.kind not in (ORIGIN_SESSION, ORIGIN_PAGE):
+        raise _session_only("an artifact's grant")
+    if not new.actions or not new.actions <= ARTIFACT_ACTIONS or new.effect != "allow":
+        raise EntryRefused("an artifact holds create, read, update, invoke or add on another, "
+                           "allow only", 400)
+    if parent == child:
+        raise EntryRefused("an artifact holds no grant on itself", 400)
+    if prior is not None and new.state != _ACTIVE:
+        if actor == prior.created_by:
+            return "the grant's maker retires it"
+        if rc.gone(child) or rc.gone(parent):
+            return "retired on an artifact deleted at Origin"
+        if rc.has_any_action(actor, child, "admin") or rc.reaches(actor, parent, "update"):
+            return "admin on the child, or update on the parent, retires it"
+        raise EntryRefused("an artifact's grant is retired by its maker, admin on the child, "
+                           "or update on the parent")
+    if not _seen(rc, parent) or rc.gone(parent):
+        raise EntryRefused("the parent artifact is unknown to Origin's replica", 409)
+    for action in sorted(new.actions):
+        if not rc.reaches(actor, child, action):
+            raise EntryRefused(f"the actor holds no {action} on the child")
+    if not rc.reaches(actor, parent, "update"):
+        raise EntryRefused("the actor holds no update on the parent")
+    return "the actions on the child and update on the parent"
+
+
+def held_artifact_grant(db: Session, parent: str, child: str):
+    """The live grant by which `parent` may invoke `child`, or None: active, unexpired, Invoke,
+    the child not deleted at Origin, and its maker still reaching Invoke on the child."""
+    from origin.models.authority_ledger import AuthorityGrant
+
+    rows = (db.query(AuthorityGrant)
+            .filter(AuthorityGrant.grantee_type == ARTIFACT_GRANTEE,
+                    AuthorityGrant.grantee_id == str(parent),
+                    AuthorityGrant.resource_id == str(child),
+                    AuthorityGrant.state == _ACTIVE, AuthorityGrant.effect == "allow")
+            .order_by(AuthorityGrant.seq))
+    rc = None
+    for row in rows:
+        if "invoke" not in (row.actions or "").split(",") or not unexpired(row.expires_at):
+            continue
+        rc = rc or reach(db)
+        if rc.gone(str(child)) or not rc.reaches(str(row.created_by), str(child), "invoke"):
+            continue
+        return row
+    return None
+
+
+def held_reach(db: Session, rc: Reach, person: str, parent: str, child: str) -> dict:
+    """What a child's token reaches, as {artifact: sorted actions}: each live grant the child
+    holds (`grantee_type` `artifact`), and the child itself with what the parent holds on it, each
+    action only while the grant's maker still reaches it and the person reaches it too, never on
+    an artifact deleted at Origin."""
+    from origin.models.authority_ledger import AuthorityGrant
+
+    rows = (db.query(AuthorityGrant)
+            .filter(AuthorityGrant.grantee_type == ARTIFACT_GRANTEE,
+                    AuthorityGrant.state == _ACTIVE, AuthorityGrant.effect == "allow")
+            .filter(((AuthorityGrant.grantee_id == str(child))
+                     | ((AuthorityGrant.grantee_id == str(parent))
+                        & (AuthorityGrant.resource_id == str(child)))))
+            .order_by(AuthorityGrant.seq))
+    out: dict = {}
+    for row in rows:
+        rid = str(row.resource_id)
+        if rid == str(parent) or not unexpired(row.expires_at) or rc.gone(rid):
+            continue
+        for action in (row.actions or "").split(","):
+            action = action.strip()
+            if (action in ARTIFACT_ACTIONS and rc.reaches(str(row.created_by), rid, action)
+                    and rc.reaches(str(person), rid, action)):
+                out.setdefault(rid, set()).add(action)
+    return {rid: sorted(acts) for rid, acts in sorted(out.items())}
+
+
 def _decide_grant(rc: Reach, ctx: Context, b: dict) -> Optional[str]:
     actor = ctx.actor
     new = _grant_from_body(b)
@@ -833,6 +945,8 @@ def _decide_grant(rc: Reach, ctx: Context, b: dict) -> Optional[str]:
                            "only by its own root or creation edge")
     if ctx.bootstrap:
         return "bootstrap"
+    if new.grantee_type == ARTIFACT_GRANTEE:
+        return _decide_artifact_grant(rc, ctx, prior, new)
     widening = _widens(prior, new)
     # A deny is changed only by Admin on the resource, whoever issued it (architecture §51:
     # created_by grants nothing), and never on a token Mantle holds (review 15); a background
@@ -1194,7 +1308,8 @@ def _decide_job_grant(rc: Reach, ctx: Context, b: dict) -> Optional[str]:
     if prior is not None:
         same = {k: prior[k] for k in ("job", "principal", "collections", "expires_at")}
         if (same != {k: b[k] for k in same}
-                or sorted(prior.get("reach") or []) != list(b.get("reach") or [])):
+                or sorted(prior.get("reach") or []) != list(b.get("reach") or [])
+                or sorted(prior.get("actions") or []) != list(b.get("actions") or [])):
             raise EntryRefused("a job grant does not change; grant a new one", 409)
         if prior["state"] == b["state"]:
             return None
@@ -1214,7 +1329,16 @@ def _decide_job_grant(rc: Reach, ctx: Context, b: dict) -> Optional[str]:
     if not _job_scope(rc, ctx.actor, b["principal"], b["collections"]):
         raise EntryRefused("a job grant is made by the person whose key it is, or an Admin of "
                            "each collection it names")
-    timer = is_reach_job(b["job"])
+    window = is_agent_window_job(b["job"])
+    timer = is_reach_job(b["job"]) or window
+    if window != bool(b.get("actions")):
+        raise EntryRefused("an agent window's job grant names its actions, and only one does", 400)
+    if window and not set(b["actions"]) <= AGENT_WINDOW_ACTIONS:
+        raise EntryRefused("an agent window's actions are drawn from "
+                           + ", ".join(sorted(AGENT_WINDOW_ACTIONS)), 400)
+    if window and until > now + timedelta(days=AGENT_WINDOW_MAX_DAYS):
+        raise EntryRefused(f"an agent window's job grant ends within {AGENT_WINDOW_MAX_DAYS} days",
+                           400)
     if b["job"].startswith(RUN_JOB_PREFIX) and until > now + timedelta(minutes=RUN_GRANT_MAX_MINUTES):
         raise EntryRefused(f"a run's job grant ends within {RUN_GRANT_MAX_MINUTES} minutes", 400)
     if timer != bool(b.get("reach")):
@@ -1580,6 +1704,7 @@ def job_grant_view(row) -> dict:
     return {"grant_id": row.grant_id, "job": row.job, "principal": row.principal,
             "collections": json.loads(row.collections or "[]"), "expires_at": row.expires_at,
             "reach": json.loads(getattr(row, "reach", None) or "[]"),
+            "actions": json.loads(getattr(row, "actions", None) or "[]"),
             "state": row.state, "created_by": row.created_by, "seq": row.seq}
 
 
@@ -1588,7 +1713,8 @@ def _job_grant_body(v: dict, state: str) -> dict:
     return {"kind": "job_grant", "grant_id": v["grant_id"], "job": v["job"],
             "principal": v["principal"], "collections": v["collections"],
             "expires_at": v["expires_at"], "state": state,
-            **({"reach": v["reach"]} if v.get("reach") else {})}
+            **({"reach": v["reach"]} if v.get("reach") else {}),
+            **({"actions": v["actions"]} if v.get("actions") else {})}
 
 
 def _held_for_tests(grant_id: str) -> bool:
@@ -1695,13 +1821,14 @@ def person_job_grants(db: Session, person_id: str) -> list:
 
 def page_job_grant(db: Session, person_id: str, *, job: str, expires_at: str,
                    principal: Optional[str] = None, collections: Optional[list] = None,
-                   reach: Optional[list] = None) -> dict:
+                   reach: Optional[list] = None, actions: Optional[list] = None) -> dict:
     """A job grant the person makes at Origin's own page (their session and a step-up, checked by
     the route), appended as theirs."""
     entry = {"kind": "job_grant", "grant_id": "jg-" + secrets.token_hex(8), "job": job,
              "principal": principal or person_id, "collections": list(collections or []),
              "expires_at": expires_at, "state": _ACTIVE,
-             **({"reach": list(reach)} if reach else {})}
+             **({"reach": list(reach)} if reach else {}),
+             **({"actions": list(actions)} if actions else {})}
     return append(db, entry, actor=Actor(person_id, ORIGIN_PAGE, f"page:{person_id}"))
 
 
@@ -2395,7 +2522,7 @@ def _decide_operator(rc: Reach, ctx: "Context", b: dict) -> Optional[str]:
             if b["state"] == "revoked":
                 return "the operator revokes a job grant"
             raise EntryRefused("a revoked job grant stays revoked", 409)
-        if is_reach_job(b["job"]) or b.get("reach"):
+        if is_reach_job(b["job"]) or is_agent_window_job(b["job"]) or b.get("reach"):
             raise EntryRefused("a timer's job grant is the person's own, made at Origin's page")
         system = service_identity.get_system_principal_id()
         if (system and b["principal"] != system and b["job"] == NON_PERSON_CUSTODY_JOB
@@ -2440,7 +2567,7 @@ def _decide_operator(rc: Reach, ctx: "Context", b: dict) -> Optional[str]:
         prior = rc.r.grant(b["grant_id"])
         new = _grant_from_body(b)
         if prior is None and new.state == _ACTIVE:
-            why = _new_account_grant(rc, ctx.actor, b)
+            why = _new_account_grant(rc, ctx.actor, b) or _definitions_grant(rc, ctx.actor, b)
             if why:
                 return why
         if (prior is not None and ctx.retiring and prior.resource_id == ctx.retiring
@@ -2453,21 +2580,36 @@ def _decide_operator(rc: Reach, ctx: "Context", b: dict) -> Optional[str]:
     raise EntryRefused("the operator only revokes grants and removes edges here", 403)
 
 
-#: The most a new account receives on any one member, whatever the edge conducts.
-NEW_ACCOUNT_CEILING = frozenset({"read", "invoke"})
-
-
 def new_accounts_receive_id(operator: str) -> str:
     """The operator's "New accounts receive" collection. Its edges are the list: every new account
-    receives, on each member, what the edge into it conducts, within `NEW_ACCOUNT_CEILING` and
-    what the operator itself reaches. The id is derived from the operator's, so Mantle and Origin
-    name the same collection without a setting."""
+    receives, on each member, what the edge into it conducts, within the ceiling
+    (`new_account_ceiling_id`) and what the operator itself reaches. The id is derived from the
+    operator's, so Mantle and Origin name the same collection without a setting."""
     return str(uuid.uuid5(uuid.NAMESPACE_URL, f"agience://new-accounts-receive/{operator}"))
 
 
-def _new_account_actions(rc: Reach, operator: str, member: str, propagate) -> frozenset:
+def new_account_ceiling_id(operator: str) -> str:
+    """The operator's "New account ceiling" collection. The edge from it into "New accounts
+    receive" is the most a new account receives on any one member: its mask bounds every edge
+    of the list. No such edge, or a ceiling someone other than the operator made, gives none."""
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"agience://new-account-ceiling/{operator}"))
+
+
+def _new_account_ceiling(rc: Reach, operator: str, coll: str) -> frozenset:
     from origin.services.authority_reach import Mask
-    edge = Mask.from_propagate(propagate).actions & NEW_ACCOUNT_CEILING
+    ceiling = new_account_ceiling_id(operator)
+    if (rc.r.node(ceiling) or {}).get("created_by") != operator or rc.gone(ceiling):
+        return frozenset()
+    edge = rc.r.edge(ceiling, coll)
+    if edge is None:
+        return frozenset()
+    return frozenset(Mask.from_propagate(edge.get("propagate")).actions)
+
+
+def _new_account_actions(rc: Reach, operator: str, member: str, propagate,
+                         ceiling: frozenset) -> frozenset:
+    from origin.services.authority_reach import Mask
+    edge = frozenset(Mask.from_propagate(propagate).actions) & ceiling
     return frozenset(a for a in edge if rc.reaches(operator, member, a))
 
 
@@ -2477,9 +2619,10 @@ def _new_account_list(rc: Reach, operator: str) -> list:
     coll = new_accounts_receive_id(operator)
     if (rc.r.node(coll) or {}).get("created_by") != operator or rc.gone(coll):
         return []
+    ceiling = _new_account_ceiling(rc, operator, coll)
     out = []
     for member, propagate in rc.r.children(coll):
-        acts = _new_account_actions(rc, operator, str(member), propagate)
+        acts = _new_account_actions(rc, operator, str(member), propagate, ceiling)
         if acts and not rc.gone(str(member)):
             out.append((str(member), acts))
     return out
@@ -2539,6 +2682,87 @@ def grant_new_account(db: Session, person_id: str, ref: str) -> list:
         return []
     return [append(db, body, actor=Actor(operator, "operator", ref), submitted_jti=f"new:{ref}")
             for body in new_account_grant_bodies(db, person_id, operator)]
+
+
+#: What the operator definitions' publisher, the platform's system principal, is given on the
+#: platform operators' collection: create, and nothing more. Create does not carry read, so it
+#: reaches only what its own creation grants give it.
+DEFINITIONS_ACTIONS = frozenset({"create"})
+
+
+def platform_operators_id() -> Optional[str]:
+    """The platform operators' collection: Mantle's seed id for `platform/platform-operators` under
+    the instance namespace, or None without one."""
+    from origin import service_identity
+    ns = service_identity.get_instance_namespace()
+    return str(uuid.uuid5(ns, "platform/platform-operators")) if ns else None
+
+
+def _definitions_grant_id(operator: str, collection: str, system: str) -> str:
+    return str(uuid.uuid5(uuid.NAMESPACE_URL,
+                          f"agience://operator-definitions/{operator}/{collection}/{system}"))
+
+
+def _definitions_target(rc: Reach, operator: str) -> Optional[tuple]:
+    """(collection, system principal) when the operator made the platform operators' collection,
+    still holds create on it, and the node has a system principal; else None."""
+    from origin import service_identity
+    system = service_identity.get_system_principal_id() or ""
+    coll = platform_operators_id()
+    if not system or not coll or not operator or system == operator:
+        return None
+    if (rc.r.node(coll) or {}).get("created_by") != operator or rc.gone(coll):
+        return None
+    if not rc.reaches(operator, coll, "create"):
+        return None
+    return coll, system
+
+
+def _definitions_grant(rc: Reach, operator: str, b: dict) -> Optional[str]:
+    """Why the operator's grant `b` is the definitions publisher's, or None: the system principal,
+    allow, create alone, no expiry, target or claim limit, on the platform operators' collection
+    the operator made."""
+    target = _definitions_target(rc, operator)
+    if target is None:
+        return None
+    coll, system = target
+    if (b.get("grantee_type") != "user" or str(b.get("grantee_id")) != system
+            or str(b.get("resource_id")) != coll or b.get("effect") != "allow"):
+        return None
+    if b.get("expires_at") or b.get("target") or b.get("max_claims") is not None:
+        return None
+    if frozenset(b.get("actions") or ()) != DEFINITIONS_ACTIONS:
+        return None
+    return "the operator gives the platform's principal create on the platform operators' collection"
+
+
+def definitions_grant_body(db: Session, operator: str, rc: Optional[Reach] = None) -> Optional[dict]:
+    """The definitions publisher's grant body, with a stable id, or None when it is held already
+    or cannot be made here."""
+    rc = rc or reach(db)
+    target = _definitions_target(rc, operator)
+    if target is None:
+        return None
+    coll, system = target
+    gid = _definitions_grant_id(operator, coll, system)
+    prior = rc.r.grant(gid)
+    if prior is not None and prior.state == _ACTIVE:
+        return None
+    return {"kind": "grant", "grant_id": gid, "grantee_id": system, "grantee_type": "user",
+            "resource_id": coll, "actions": sorted(DEFINITIONS_ACTIONS), "effect": "allow",
+            "state": _ACTIVE, "expires_at": None, "target": None, "max_claims": None}
+
+
+def grant_definitions_publisher(db: Session, ref: str) -> list:
+    """Append, as the operator's own entry, the system principal's create grant on the platform
+    operators' collection. Returns the receipts; none when it is held already or cannot be made."""
+    operator = _operator()
+    if not operator:
+        return []
+    body = definitions_grant_body(db, operator)
+    if body is None:
+        return []
+    return [append(db, body, actor=Actor(operator, "operator", ref), submitted_jti=f"defs:{ref}")]
 
 
 def _structure_key(g) -> tuple:
@@ -2799,7 +3023,12 @@ def _apply(db: Session, b: dict, seq: int, ctx: Context) -> None:
         row.job, row.principal = b["job"], b["principal"]
         row.collections, row.expires_at = json.dumps(b["collections"]), b["expires_at"]
         row.reach = json.dumps(b["reach"]) if b.get("reach") else None
+        row.actions = json.dumps(b["actions"]) if b.get("actions") else None
         row.state, row.seq = b["state"], seq
+        if row.state != _ACTIVE and is_agent_window_job(row.job):
+            # An agent window's grant ends: every approval made under it ends with it (FR-032).
+            from origin.services.agent_sessions import revoke_approvals
+            revoke_approvals(db, grant_id=row.grant_id)
     elif kind == "key":
         from origin.models.authority_ledger import AuthorityKey
         row = db.get(AuthorityKey, b["grant_id"])

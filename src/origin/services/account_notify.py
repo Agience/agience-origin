@@ -64,7 +64,11 @@ def _describe(person: Any) -> tuple[str, str]:
     verified = bool(getattr(person, "email_verified", False))
     created = getattr(person, "created_time", "") or ""
 
-    subject = f"{os.getenv('ACCOUNT_NOTIFY_SUBJECT', '[Agience]')} New account: {email}"
+    # FR-027: what made the sign-up look like a bot's (`signup_guard.soft_signals`). It blocks
+    # nothing; it marks the notice.
+    signals = list(getattr(person, "_signup_signals", None) or [])
+    flag = "[SPAM?] " if signals else ""
+    subject = f"{os.getenv('ACCOUNT_NOTIFY_SUBJECT', '[Agience]')} {flag}New account: {email}"
     body = "\n".join([
         "A new account was created on origin.agience.ai.",
         "",
@@ -77,7 +81,7 @@ def _describe(person: Any) -> tuple[str, str]:
         f"verified  : {verified}",
         f"created   : {created}",
         f"id        : {getattr(person, 'id', '')}",
-    ])
+    ] + ([f"signals   : {'; '.join(signals)}"] if signals else []))
     return subject, body
 
 

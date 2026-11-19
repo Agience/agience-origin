@@ -470,6 +470,20 @@ def verify_reach(request: Request, body: dict = Body(...), db: Session = Depends
     return {"match": match, "replica": mine}
 
 
+@authority_router.post("/definitions-grant")
+def definitions_grant(db: Session = Depends(get_db), auth: AuthContext = Depends(_require_mantle)):
+    """The platform's system principal's create grant on the platform operators' collection, made
+    by Origin as the operator's own entry, so the operator definitions the services carry are
+    published into it. Mantle names nothing; Mantle then applies the entry from the ledger. Held
+    already, or not possible yet, is answered with none."""
+    try:
+        receipts = authority_ledger.grant_definitions_publisher(db, "definitions-grant")
+    except authority_ledger.EntryRefused as exc:
+        logger.warning("definitions grant refused: %s", exc)
+        raise HTTPException(status_code=exc.status, detail=str(exc))
+    return {"granted": len(receipts), "seqs": [r.get("seq") for r in receipts]}
+
+
 @authority_router.post("/new-person-grants")
 def new_person_grants(body: dict = Body(...), db: Session = Depends(get_db),
                       auth: AuthContext = Depends(_require_mantle)):

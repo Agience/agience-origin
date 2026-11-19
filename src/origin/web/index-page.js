@@ -249,12 +249,14 @@ fetch("/auth/signup-form", {cache: "no-store"}).then((r) => r.json())
 $("#registerForm").addEventListener("submit", async (e) => {
   e.preventDefault(); beginSignIn();
   const email = $("#remail").value.trim().toLowerCase();
+  const name = $("#rname").value.trim();
+  if (!name) { show("Enter your name.","err"); return; }
   if (!email || email.indexOf("@") < 1) { show("Enter a valid email.","err"); return; }
   if ($("#rpassword").value.length < 12) { show("Password must be at least 12 characters.","err"); return; }
   const b=$("#registerBtn"); b.disabled=true; show("Creating account…");
   const nonce = newNonce();
   const r = await post("/auth/password/register", {
-    username: email, name: "",
+    username: email, name: name,
     password: $("#rpassword").value, email: email, verify_nonce: nonce,
     form_token: FORM_TOKEN, website: ($("#rwebsite") || {}).value || "",
   });

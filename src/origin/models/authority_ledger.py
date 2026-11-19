@@ -215,6 +215,8 @@ class AuthorityJobGrant(Base):
     collections = Column(Text, nullable=False, default="[]")     # JSON list of collection ids
     #: A timer's grant: the JSON list of ids its delegations may touch (`job_reach`); else null.
     reach = Column(Text, nullable=True)
+    #: An agent window's grant: the JSON list of actions its sessions may be granted; else null.
+    actions = Column(Text, nullable=True)
     expires_at = Column(String(64), nullable=False)
     state = Column(String(32), nullable=False)
     created_by = Column(String(128), nullable=False)

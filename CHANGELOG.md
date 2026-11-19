@@ -5,6 +5,31 @@ All notable changes to `agience-origin` are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-11-18
+
+### Added
+- Agent keys. An agent can be given its own key, and that key is an artifact. Archiving the key ends it.
+- Invites in your Inbox. Accept or decline an invite there, and an accepted invite opens the shared item.
+- Approval levels. Every request and approval records the level it was decided at.
+
+### Changed
+- New accounts give a name at sign-up.
+- An account that has not confirmed its email address within 7 days expires.
+- Sign-up is protected against automated abuse.
+- The account page always shows who is signed in.
+- When an app sends you to sign in from an address that has not been registered, the sign-in page names that address.
+- The sign-in chooser labels each field and button once.
+- A grant page opened from an app closes when you are done. One opened from a command-line window tells you to close it.
+- Whoever holds update on a request's resource may approve it, including the account that filed it. While the request is open, its filer may also withdraw it.
+- A filer who is refused on decide is told why: someone else approves the request, and the filer can withdraw it.
+- The approval tables are named for what they hold: `decision_requests`, `decision_notes` and `decision_spends`, with their indexes named after them. Migration `0034` is now `0034_decision_notes` and creates the tables under those names; `0035_request_resource` uses them.
+- Migration `0036_agent_approvals` adds the `agent_approvals` table and a nullable `actions` column on `authority_job_grants`. It is additive and kept on rollback: rolling back is `alembic stamp 0035_request_resource`.
+- Migration `0037_decision_tables` renames existing `chair_requests`, `chair_notes` and `chair_spends` tables, and their `ix_chair_*` indexes, to the `decision_*` names, keeping their rows. A node it renames records that in the one-row table `alembic_0037_renamed`, and on such a node the downgrade renames them back. A node that already has the `decision_*` tables is left as it is.
+
+### Fixed
+- Workflow steps run with the access their workflow was given.
+- A person's own key is refused at the agent-key exchange. A person's key is used at Mantle as it is.
+
 ## [0.3.0] - 2026-11-16
 
 ### Added

@@ -68,13 +68,26 @@ if (regBack) regBack.onclick = () => {
 let FORM_TOKEN = "";
 fetch("/auth/signup-form", {cache: "no-store"}).then((r) => r.json())
   .then((d) => { FORM_TOKEN = (d && d.form_token) || ""; }).catch(() => {});
+/* The verification nonce, kept where /verify-email reads it (`stashVerification` in app.js): the
+   emailed link signs in only this browser, and asks it for no password. */
+function stashNonce(email){
+  const v = new Uint8Array(32); crypto.getRandomValues(v);
+  const n = Array.from(v, (b) => b.toString(16).padStart(2, "0")).join("");
+  try {
+    localStorage.setItem("agience.verify", JSON.stringify({n, e: (email || "").toLowerCase(),
+      rd: "", st: "", ts: Date.now()}));
+  } catch (_) {}
+  return n;
+}
 const regForm = $("#regForm");
 if (regForm) regForm.onsubmit = async (e) => {
   e.preventDefault();
   const btn = $("#regBtn"); btn.disabled = true; say("Creating your account…");
+  const nonce = stashNonce($("#remail").value.trim());
   try {
     const d = await post("/auth/authorize/register", {oauth_state: S,
-      email: $("#remail").value.trim(), password: $("#rpassword").value,
+      verify_nonce: nonce,
+      name: $("#rname").value.trim(), email: $("#remail").value.trim(), password: $("#rpassword").value,
       form_token: FORM_TOKEN, website: ($("#rwebsite") || {}).value || ""});
     if (d.verification_required) {
       $("#reg").classList.add("hidden");

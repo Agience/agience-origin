@@ -13,7 +13,14 @@
   const reach = (q.get("reach") || "").split(",").map(function (s) { return s.trim(); })
     .filter(Boolean);
   const title = q.get("title") || job;
-  const days = Math.max(1, Math.min(30, parseInt(q.get("days") || "30", 10) || 30));
+  /* An agent window (FR-032): a CLI opens this page for its window key's job, with the actions
+   * its sessions may ask for; it has no app to answer, and its grant lasts at most seven days. */
+  const isWindow = job.indexOf("agent.window.") === 0;
+  const actions = (q.get("actions") || "").split(",").map(function (s) { return s.trim(); })
+    .filter(Boolean);
+  const maxDays = isWindow ? 7 : 30;
+  const days = Math.max(1, Math.min(maxDays, parseInt(q.get("days") || String(maxDays), 10)
+                                             || maxDays));
   /* A workflow's one run, now: ten minutes, and used once (John, 2026-11-10). */
   const isRun = job.indexOf("lumen.run.") === 0;
   const PATH = "/auth/me/job-grants";
@@ -33,14 +40,16 @@
   }
   function done(message) {
     answer(message);
-    setTimeout(function () { window.close(); }, 600);
+    /* A CLI's window page has no app to return to; it says so instead of closing. */
+    if (back) setTimeout(function () { window.close(); }, 600);
+    else msg.textContent += " You can close this window.";
   }
 
   /* The body a step-up was taken over is kept until the request is sent: a re-authentication
    * leaves this page, and the request sent on return must be the same bytes. */
   /* Kept under the exact grant shown (job, reach and term), and only while a re-authentication for
    * it is pending: a page opened for another grant, or after one closed, starts from what it shows. */
-  const KEY = "job_grant_body:" + JSON.stringify([job, reach, isRun ? "run" : days]);
+  const KEY = "job_grant_body:" + JSON.stringify([job, reach, actions, isRun ? "run" : days]);
   if (!sessionStorage.getItem("pending_step_up")) {
     Object.keys(sessionStorage).forEach(function (k) {
       if (k.indexOf("job_grant_body:") === 0) sessionStorage.removeItem(k);
@@ -53,7 +62,9 @@
     /* An hour inside the term, so a clock running a little fast still asks for one Origin takes. */
     const until = new Date(isRun ? Date.now() + 10 * 60000
                                  : Date.now() + days * 86400000 - 3600000).toISOString();
-    const body = JSON.stringify({ job: job, expires_at: until, reach: reach });
+    const grant = { job: job, expires_at: until, reach: reach };
+    if (isWindow) grant.actions = actions;
+    const body = JSON.stringify(grant);
     sessionStorage.setItem(key, body);
     return body;
   }
@@ -74,6 +85,12 @@
         "operations in these items and what they contain, and nowhere else:";
       $("#until").textContent = "This run only, and only until " + JSON.parse(bodyFor()).expires_at +
         ". Mantle still holds it to what you yourself may do.";
+    } else if (isWindow) {
+      $("#heading").textContent = "Let agents work from a window";
+      $("#what").textContent = "Agent sessions started from “" + title + "” may ask to " +
+        actions.join(", ") + " as you, in these items and what they contain, and nowhere else:";
+      $("#until").textContent = "Until " + JSON.parse(bodyFor()).expires_at +
+        ", or until you sign the window out. Each session's token says it is the agent, never you.";
     } else {
       $("#what").textContent = "While you are away, the timer “" + title + "” reads, " +
         "writes and runs operations as you, in these items and what they contain, and nowhere else:";
@@ -104,7 +121,8 @@
     done({ type: "agience.job-grant", job: job, grant_id: out.data && out.data.grant_id });
   }
 
-  if (!back || (!revoke && (!job || !reach.length))) {
+  if ((!back && !isWindow) || (!revoke && (!job || !reach.length))
+      || (isWindow && !actions.length)) {
     show("This page was opened without a grant to approve.", "err");
     return;
   }

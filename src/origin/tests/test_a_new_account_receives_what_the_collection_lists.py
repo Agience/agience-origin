@@ -1,7 +1,8 @@
 """A new account receives what the operator's "New accounts receive" collection lists (BUG-091).
 
 The collection's edges are the list: on each member, the person receives what the edge into it
-conducts, within read and invoke and within what the operator reaches. Origin makes the grants as
+conducts, within the ceiling (the mask on the edge from the operator's "New account ceiling" into
+the list) and within what the operator reaches. Origin makes the grants as
 the operator's own entries; Mantle names only the person.
 """
 from __future__ import annotations
@@ -25,6 +26,16 @@ def _root(c, who, rid, actions=EVERY):
     af.ok(af.submit(c, who[1], af.grant(f"g-{rid}", who[0], rid, actions), batch=f"r-{rid}"))
 
 
+def _ceiling(c, op_token, n, mask=("read", "invoke"), maker=af.OPERATOR):
+    """Make the operator's "New account ceiling" and its edge into `n` with `mask`."""
+    import origin.services.authority_ledger as L
+    ceiling = L.new_account_ceiling_id(af.OPERATOR)
+    af.ok(af.submit(c, op_token, af.edge(maker, ceiling), batch="ceil"))
+    af.ok(af.submit(c, op_token, af.edge(ceiling, n, origin=False, propagate=list(mask)),
+                    batch="ceil"))
+    return ceiling
+
+
 @pytest.fixture()
 def platform(custody_client, monkeypatch):
     """The operator makes "New accounts receive" (N), the operators' collection C with op-1 and
@@ -44,6 +55,7 @@ def platform(custody_client, monkeypatch):
                     batch="ln"))
     af.ok(af.submit(c, op_token, af.edge(n, "S-seed", origin=False, propagate=["read"]),
                     batch="ln"))
+    _ceiling(c, op_token, n)
     return c, n, op_token
 
 
@@ -98,10 +110,42 @@ def test_nothing_beyond_what_the_operator_itself_reaches(custody_client, monkeyp
         af.ok(af.submit(c, op_token, af.edge(af.OPERATOR, node), batch="mk"))
     af.ok(af.submit(c, op_token, af.edge(n, "C-ops", origin=False, propagate=["read", "invoke"]),
                     batch="ln"))
+    _ceiling(c, op_token, n)
     alice, _ = af.person("alice")
     with SessionLocal() as db:
         L.grant_new_account(db, alice, "t1")
     assert _grants(alice) == [("C-ops", "read")]
+
+
+def test_the_ceiling_edge_sets_the_most_a_member_gives(platform):
+    import origin.services.authority_ledger as L
+    from origin.db.session import SessionLocal
+    c, n, op_token = platform
+    ceiling = L.new_account_ceiling_id(af.OPERATOR)
+    af.ok(af.submit(c, op_token, af.unedge(ceiling, n), batch="lower"))
+    af.ok(af.submit(c, op_token, af.edge(ceiling, n, origin=False, propagate=["read"]),
+                    batch="lower2"))
+    alice, _ = af.person("alice")
+    with SessionLocal() as db:
+        L.grant_new_account(db, alice, "t1")
+    assert _grants(alice) == [("C-ops", "read"), ("S-seed", "read")]
+
+
+def test_no_ceiling_edge_gives_nothing(custody_client, monkeypatch):
+    import origin.services.authority_ledger as L
+    from origin.db.session import SessionLocal
+    c = custody_client
+    op_token = af.operator(monkeypatch)
+    _root(c, (af.OPERATOR, op_token), af.OPERATOR)
+    n = L.new_accounts_receive_id(af.OPERATOR)
+    for node in (n, "C-ops"):
+        af.ok(af.submit(c, op_token, af.edge(af.OPERATOR, node), batch="mk"))
+    af.ok(af.submit(c, op_token, af.edge(n, "C-ops", origin=False, propagate=["read", "invoke"]),
+                    batch="ln"))
+    alice, _ = af.person("alice")
+    with SessionLocal() as db:
+        assert L.grant_new_account(db, alice, "t1") == []
+    assert _grants(alice) == []
 
 
 def _operator_grant(db, body):

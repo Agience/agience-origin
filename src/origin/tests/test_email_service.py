@@ -146,6 +146,7 @@ def test_provider_and_gmail_config_fall_back_to_env(monkeypatch):
 @pytest.mark.asyncio
 async def test_gmail_send_exchanges_token_then_calls_gmail_api(monkeypatch):
     monkeypatch.setattr(email_service, "settings", _gmail_cache())
+    monkeypatch.setattr(email_service, "REAL_PROVIDER_UNDER_TEST", True)  # httpx is faked below
 
     calls: list[tuple[str, dict]] = []
 

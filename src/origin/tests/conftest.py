@@ -8,7 +8,6 @@ import os as _os
 # Never load a real dev `.env` into the test environment — tests set their own env explicitly, and a
 # machine-local `.env` (real creds) must not leak in (see origin.config.load_env).
 _os.environ.setdefault("AGIENCE_NO_DOTENV", "1")
-
 import base64
 import hashlib
 import json
@@ -28,6 +27,13 @@ _RUN_TMP = _tmp_tempfile.mkdtemp(prefix="origin-tests-")
 _tmp_tempfile.tempdir = _RUN_TMP
 _os.environ["TMPDIR"] = _RUN_TMP
 _tmp_atexit.register(_tmp_shutil.rmtree, _RUN_TMP, ignore_errors=True)
+# The operator's shell may export a real mail sender (`EMAIL_PROVIDER=gmail`, its address and
+# credentials). None of it reaches this run or a process it starts; a send that still selects a real
+# provider raises (`email_service.refuse_a_real_provider_under_test`).
+for _name in ("EMAIL_PROVIDER", "PLATFORM_EMAIL_ADDRESS", "GMAIL_OAUTH_CLIENT_ID",
+              "GMAIL_OAUTH_CLIENT_SECRET", "GMAIL_OAUTH_REFRESH_TOKEN", "GOOGLE_OAUTH_REFRESH_TOKEN",
+              "SMTP_HOST", "SMTP_USERNAME", "SMTP_PASSWORD", "SENDGRID_API_KEY", "RESEND_API_KEY"):
+    _os.environ.pop(_name, None)
 
 #: The test node's own redirect URIs (`CLIENT_REDIRECT_URIS`), on the in-code default host
 #: (`FACET_URI` = `ORIGIN_URI` = http://localhost:8080): a callback, the web app's callback and
@@ -224,14 +230,22 @@ def client(origin_app):
 def pytest_configure(config):
     config.addinivalue_line("markers", "real_signup_form: run the FR-027 sign-up form check as "
                                        "production does, instead of the suite's stand-in")
+    config.addinivalue_line("markers", "real_signup_limits: run the FR-027 per-client, per-network "
+                                       "and per-address limits as production does")
 
 
 @pytest.fixture(autouse=True)
 def _signup_form_stand_in(request, monkeypatch):
     """FR-027: a sign-up is mailed only for a form a person filled in. Tests that register are not
     about that check, so here a form passes when its hidden field is empty; the check's own tests
-    (`real_signup_form`) run it as production does. The hourly ceiling starts fresh in every test."""
+    (`real_signup_form`) run it as production does. The hourly ceiling starts fresh in every test.
+    Every test client signs up from one host, `testclient`, so the per-client, per-network and
+    per-address limits admit everything here; their own tests (`real_signup_limits`) run them."""
     from origin.services import signup_guard
     signup_guard._reset_for_tests()
     if request.node.get_closest_marker("real_signup_form") is None:
         monkeypatch.setattr(signup_guard, "form_is_real", lambda token, honeypot, now=None: not honeypot)
+    if request.node.get_closest_marker("real_signup_limits") is None:
+        monkeypatch.setattr(signup_guard, "signup_from_admitted", lambda client, now=None: (True, False))
+        monkeypatch.setattr(signup_guard, "verification_mail_admitted",
+                            lambda email, created_time=None, now=None: True)

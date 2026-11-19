@@ -1,7 +1,7 @@
-"""chair_notes: requests for the chair's approval, the notes an approval mints, their spends; and
+"""decision_notes: requests for a decision, the notes an approval mints, their spends; and
 how and when an Origin session's sign-in happened (phone approvals, FR-024).
 
-Revision ID: 0034_chair_notes
+Revision ID: 0034_decision_notes
 Revises: 0033_invite_addresses
 
 Additive: three new tables, Origin's own and never ledger entries, and three nullable columns on
@@ -14,7 +14,7 @@ from typing import Sequence, Union
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "0034_chair_notes"
+revision: str = "0034_decision_notes"
 down_revision: Union[str, None] = "0033_invite_addresses"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
@@ -27,9 +27,9 @@ def upgrade() -> None:
                        ("last_seen_time", sa.DateTime(timezone=True))):
         if name not in have:
             op.add_column("origin_sessions", sa.Column(name, kind, nullable=True))
-    if not inspect.has_table("chair_requests"):
+    if not inspect.has_table("decision_requests"):
         op.create_table(
-            "chair_requests",
+            "decision_requests",
             sa.Column("id", sa.String(64), primary_key=True),
             sa.Column("kind", sa.String(32), nullable=False),
             sa.Column("level", sa.String(16), nullable=False),
@@ -52,9 +52,9 @@ def upgrade() -> None:
             sa.Column("answer", sa.String(64), nullable=True),
             sa.Column("note_jti", sa.String(64), nullable=True),
         )
-    if not inspect.has_table("chair_notes"):
+    if not inspect.has_table("decision_notes"):
         op.create_table(
-            "chair_notes",
+            "decision_notes",
             sa.Column("jti", sa.String(64), primary_key=True),
             sa.Column("req", sa.String(64), nullable=False, index=True),
             sa.Column("person_id", sa.String(64), nullable=False, index=True),
@@ -64,9 +64,9 @@ def upgrade() -> None:
             sa.Column("expires_time", sa.DateTime(timezone=True), nullable=False),
             sa.Column("revoked_time", sa.DateTime(timezone=True), nullable=True),
         )
-    if not inspect.has_table("chair_spends"):
+    if not inspect.has_table("decision_spends"):
         op.create_table(
-            "chair_spends",
+            "decision_spends",
             sa.Column("jti", sa.String(64), primary_key=True),
             sa.Column("action", sa.String(80), primary_key=True),
             sa.Column("id", sa.String(64), nullable=False, unique=True),

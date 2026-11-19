@@ -4,14 +4,14 @@ and their spends.
 An account files a request against a resource (a workspace or collection it can read) with the
 exact fields of what it will do, a level label and an expiry. Origin computes their digest
 (`action_digest`). Whoever holds `update` on that resource, through the ordinary grants, approves
-on Origin's own page; the approval mints one signed note (`chair-note+jwt`) bound to that digest,
+on Origin's own page; the approval mints one signed note (`decision-note+jwt`) bound to that digest,
 valid until the request's expiry and never longer than `MAX_NOTE_LIFE`. The agent that acts
 spends the note once per action.
 
 The kinds, levels and expiries are the filer's data. Origin names no approver and holds no
 process of its own.
 
-A note is never a bearer token: it carries `token_type: "chair_note"`, which every bearer check
+A note is never a bearer token: it carries `token_type: "decision_note"`, which every bearer check
 refuses.
 """
 from __future__ import annotations
@@ -27,10 +27,10 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from origin import config
-from origin.models.chair_note import ChairNote, ChairRequest, ChairSpend
+from origin.models.decision_note import DecisionNote, DecisionRequest, DecisionSpend
 
-NOTE_TYP = "chair-note+jwt"
-TOKEN_TYPE = "chair_note"
+NOTE_TYP = "decision-note+jwt"
+TOKEN_TYPE = "decision_note"
 
 #: The longest a request stays open and a note stays valid.
 MAX_NOTE_LIFE = timedelta(days=7)
@@ -124,19 +124,19 @@ def _reaches(db: Session, person_id: str, resource_id: Optional[str], action: st
 APPROVER_LOST_UPDATE = "the approver no longer holds update on the request's resource"
 
 
-def can_approve(db: Session, person_id: str, req: ChairRequest) -> bool:
+def can_approve(db: Session, person_id: str, req: DecisionRequest) -> bool:
     """Does `person_id` hold `update` on the request's resource? Nothing else decides it."""
     return _reaches(db, person_id, req.resource_id, APPROVE_ACTION)
 
 
-def can_see(db: Session, person_id: str, req: ChairRequest) -> bool:
+def can_see(db: Session, person_id: str, req: DecisionRequest) -> bool:
     """The filer, and anyone who can read the request's resource, sees the request."""
     return person_id == req.filed_by_account         or _reaches(db, person_id, req.resource_id, SEE_ACTION)
 
 
 # --- requests -------------------------------------------------------------------------------------
 
-def file_request(db: Session, *, filer_id: str, filer_name: str, body: dict) -> ChairRequest:
+def file_request(db: Session, *, filer_id: str, filer_name: str, body: dict) -> DecisionRequest:
     """File a request. `body` holds `resource` (a workspace or collection the filer can read),
     `kind`, `fields` (with `steps` when the request covers several actions), `expires`, and
     optionally `level`, `summary`, `evidence`, `aud`, `options`, `default`."""
@@ -186,7 +186,7 @@ def file_request(db: Session, *, filer_id: str, filer_name: str, body: dict) -> 
     claimed = body.get("digest")
     if claimed is not None and not isinstance(claimed, str):
         raise NoteRefused(422, "digest is the filer's own sha256:<hex>, for comparison")
-    req = ChairRequest(
+    req = DecisionRequest(
         id=str(uuid.uuid4()), kind=kind, level=level, fields=fields, digest=digest,
         steps=steps_out, summary=summary, aud=aud, options=options, default_option=default,
         filed_by=filer_name[:200], filed_by_account=filer_id, created_time=now,
@@ -246,16 +246,16 @@ def _evidence(raw: Any) -> list[dict]:
     return out
 
 
-def get_request(db: Session, req_id: str) -> Optional[ChairRequest]:
-    req = db.get(ChairRequest, req_id)
+def get_request(db: Session, req_id: str) -> Optional[DecisionRequest]:
+    req = db.get(DecisionRequest, req_id)
     return settle(db, req) if req is not None else None
 
 
-def is_open(req: ChairRequest, now: Optional[datetime] = None) -> bool:
+def is_open(req: DecisionRequest, now: Optional[datetime] = None) -> bool:
     return req.state == "pending" and _aware(req.expires_time) > (now or _now())
 
 
-def settle(db: Session, req: ChairRequest) -> ChairRequest:
+def settle(db: Session, req: DecisionRequest) -> DecisionRequest:
     """A question past its expiry takes its default, when it has one."""
     if req.kind == "question" and req.state == "pending" and req.default_option \
             and not is_open(req):
@@ -265,7 +265,7 @@ def settle(db: Session, req: ChairRequest) -> ChairRequest:
     return req
 
 
-def request_view(db: Session, req: ChairRequest) -> dict:
+def request_view(db: Session, req: DecisionRequest) -> dict:
     out: dict[str, Any] = {
         "id": req.id, "kind": req.kind, "level": req.level, "fields": req.fields,
         "resource": req.resource_id,
@@ -282,26 +282,28 @@ def request_view(db: Session, req: ChairRequest) -> dict:
     if req.state == "answered":
         out["answer"] = req.answer
     if req.note_jti:
-        note = db.get(ChairNote, req.note_jti)
+        note = db.get(DecisionNote, req.note_jti)
         if note is not None:
             out["note"] = note.token
             out["revoked"] = note.revoked_time is not None
             out["note_jti"] = note.jti
-            out["spent"] = db.query(ChairSpend).filter(ChairSpend.jti == note.jti).first() is not None
+            out["spent"] = db.query(DecisionSpend).filter(DecisionSpend.jti == note.jti).first() is not None
     return out
 
 
 # --- decisions ------------------------------------------------------------------------------------
 
 CANNOT_APPROVE = "You can't approve this request. Approving needs Editor access to it."
+FILER_CANNOT_APPROVE = CANNOT_APPROVE + " You can withdraw it."
 
 
-def _decidable(db: Session, req: Optional[ChairRequest], person_id: str,
-               digest: Optional[str]) -> ChairRequest:
+def _decidable(db: Session, req: Optional[DecisionRequest], person_id: str,
+               digest: Optional[str]) -> DecisionRequest:
     if req is None:
         raise NoteRefused(404, "no such request")
     if not can_approve(db, person_id, req):
-        raise NoteRefused(403, CANNOT_APPROVE)
+        raise NoteRefused(403, FILER_CANNOT_APPROVE if person_id == req.filed_by_account
+                          else CANNOT_APPROVE)
     if not is_open(req):
         raise NoteRefused(409, "this request is no longer open")
     if digest is not None and digest != req.digest:
@@ -309,8 +311,8 @@ def _decidable(db: Session, req: Optional[ChairRequest], person_id: str,
     return req
 
 
-def approve(db: Session, req: Optional[ChairRequest], *, person_id: str, digest: str,
-            auth_time: datetime, amr: list[str], option: Optional[str] = None) -> ChairRequest:
+def approve(db: Session, req: Optional[DecisionRequest], *, person_id: str, digest: str,
+            auth_time: datetime, amr: list[str], option: Optional[str] = None) -> DecisionRequest:
     """Approve: mint the note. For a question, record the option (no note is minted)."""
     req = _decidable(db, req, person_id, digest)
     now = _now()
@@ -342,7 +344,7 @@ def approve(db: Session, req: Optional[ChairRequest], *, person_id: str, digest:
         payload["action"] = action
     token = jwt.encode(payload, get_private_key_pem(), algorithm="RS256",
                        headers={"kid": get_key_id(), "typ": NOTE_TYP})
-    db.add(ChairNote(jti=jti, req=req.id, person_id=person_id, level=req.level, token=token,
+    db.add(DecisionNote(jti=jti, req=req.id, person_id=person_id, level=req.level, token=token,
                      issued_time=now, expires_time=exp))
     req.state = "answered" if req.kind == "question" else "approved"
     req.note_jti = jti
@@ -351,7 +353,7 @@ def approve(db: Session, req: Optional[ChairRequest], *, person_id: str, digest:
     return req
 
 
-def withdraw(db: Session, req: Optional[ChairRequest], *, person_id: str) -> ChairRequest:
+def withdraw(db: Session, req: Optional[DecisionRequest], *, person_id: str) -> DecisionRequest:
     """The filer takes back a request nobody has decided yet."""
     if req is None:
         raise NoteRefused(404, "no such request")
@@ -365,8 +367,8 @@ def withdraw(db: Session, req: Optional[ChairRequest], *, person_id: str) -> Cha
     return req
 
 
-def decline(db: Session, req: Optional[ChairRequest], *, person_id: str, digest: str,
-            reason: str = "") -> ChairRequest:
+def decline(db: Session, req: Optional[DecisionRequest], *, person_id: str, digest: str,
+            reason: str = "") -> DecisionRequest:
     req = _decidable(db, req, person_id, digest)
     req.state, req.decline_reason = "declined", (reason or "")[:2000]
     req.decided_time, req.decided_by = _now(), person_id
@@ -382,17 +384,17 @@ def _verify(token: str) -> dict:
     try:
         header = jwt.get_unverified_header(token)
     except JWTError:
-        raise NoteRefused(400, "not a chair note")
+        raise NoteRefused(400, "not a decision note")
     if header.get("typ") != NOTE_TYP:
-        raise NoteRefused(400, "not a chair note")
+        raise NoteRefused(400, "not a decision note")
     try:
         claims = jwt.decode(token, {"keys": published_jwks()}, algorithms=["RS256"],
                             issuer=config.AUTHORITY_ISSUER,
                             options={"verify_aud": False, "verify_exp": False})
     except (JWTError, TypeError, ValueError):
-        raise NoteRefused(400, "not a chair note")
+        raise NoteRefused(400, "not a decision note")
     if claims.get("token_type") != TOKEN_TYPE or not claims.get("jti"):
-        raise NoteRefused(400, "not a chair note")
+        raise NoteRefused(400, "not a decision note")
     return claims
 
 
@@ -408,19 +410,19 @@ def spend(db: Session, token: str, action: str) -> dict:
 
     The approver must still hold update on the request's resource when the note is spent."""
     claims = _verify(token)
-    note = db.get(ChairNote, claims["jti"])
+    note = db.get(DecisionNote, claims["jti"])
     if note is None:
-        raise NoteRefused(400, "not a chair note")
+        raise NoteRefused(400, "not a decision note")
     now = _now()
     if note.revoked_time is not None or _aware(note.expires_time) <= now \
             or claims.get("exp", 0) <= now.timestamp():
         raise NoteRefused(410, "revoked" if note.revoked_time is not None else "expired")
-    req = db.get(ChairRequest, note.req)
+    req = db.get(DecisionRequest, note.req)
     if req is None or not can_approve(db, note.person_id, req):
         raise NoteRefused(403, APPROVER_LOST_UPDATE)
     if not isinstance(action, str) or not covers(claims, action):
         raise NoteRefused(422, "action not covered by the note")
-    row = ChairSpend(jti=note.jti, action=action, id=str(uuid.uuid4()), req=note.req,
+    row = DecisionSpend(jti=note.jti, action=action, id=str(uuid.uuid4()), req=note.req,
                      spent_time=now)
     db.add(row)
     try:
@@ -436,11 +438,11 @@ def spend(db: Session, token: str, action: str) -> dict:
 
 def revoke(db: Session, jti: str, *, person_id: str) -> bool:
     """Revoke a note: the one who approved it, or an approver on its request's resource."""
-    note = db.get(ChairNote, jti)
+    note = db.get(DecisionNote, jti)
     if note is None:
         return False
     if note.person_id != person_id:
-        req = db.get(ChairRequest, note.req)
+        req = db.get(DecisionRequest, note.req)
         if req is None or not can_approve(db, person_id, req):
             return False
     if note.revoked_time is None:
@@ -453,8 +455,8 @@ def revoke_all(db: Session, *, person_id: str) -> int:
     """Revoke every unspent, unexpired note `person_id` approved."""
     now = _now()
     n = 0
-    for note in db.query(ChairNote).filter(ChairNote.person_id == person_id,
-                                           ChairNote.revoked_time.is_(None)):
+    for note in db.query(DecisionNote).filter(DecisionNote.person_id == person_id,
+                                           DecisionNote.revoked_time.is_(None)):
         if _aware(note.expires_time) > now:
             note.revoked_time = now
             n += 1
@@ -462,17 +464,17 @@ def revoke_all(db: Session, *, person_id: str) -> int:
     return n
 
 
-def pending_for(db: Session, person_id: str) -> list[ChairRequest]:
+def pending_for(db: Session, person_id: str) -> list[DecisionRequest]:
     """The open requests `person_id` can approve, oldest first."""
     now = _now()
-    rows = db.query(ChairRequest).filter(ChairRequest.state == "pending",
-                                         ChairRequest.resource_id.isnot(None)) \
-        .order_by(ChairRequest.created_time).all()
+    rows = db.query(DecisionRequest).filter(DecisionRequest.state == "pending",
+                                         DecisionRequest.resource_id.isnot(None)) \
+        .order_by(DecisionRequest.created_time).all()
     return [r for r in rows if _aware(r.expires_time) > now and can_approve(db, person_id, r)]
 
 
-def live_notes(db: Session, person_id: str) -> list[ChairNote]:
+def live_notes(db: Session, person_id: str) -> list[DecisionNote]:
     now = _now()
-    rows = db.query(ChairNote).filter(ChairNote.person_id == person_id,
-                                      ChairNote.revoked_time.is_(None)).all()
+    rows = db.query(DecisionNote).filter(DecisionNote.person_id == person_id,
+                                      DecisionNote.revoked_time.is_(None)).all()
     return [n for n in rows if _aware(n.expires_time) > now]

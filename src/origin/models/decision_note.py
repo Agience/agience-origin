@@ -4,7 +4,7 @@ and each spend.
 A request is filed by an account (`POST /notes/requests`) against a resource it can read, with the
 exact fields of what it will do; Origin computes their digest. Whoever holds update on that resource
 approves or declines it on Origin's own page, in their Origin session; an approval mints one signed
-note (`chair-note+jwt`) bound to that digest. The agent that acts spends the note at Origin once
+note (`decision-note+jwt`) bound to that digest. The agent that acts spends the note at Origin once
 per action (`POST /notes/spend`).
 
 These are Origin's own tables, never ledger entries: Mantle has no part in them.
@@ -20,8 +20,8 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
-class ChairRequest(Base):
-    __tablename__ = "chair_requests"
+class DecisionRequest(Base):
+    __tablename__ = "decision_requests"
 
     id = Column(String(64), primary_key=True)
     #: The filer's name for the action, or `question`.
@@ -54,8 +54,8 @@ class ChairRequest(Base):
     resource_id = Column(String(64), nullable=True, index=True)
 
 
-class ChairNote(Base):
-    __tablename__ = "chair_notes"
+class DecisionNote(Base):
+    __tablename__ = "decision_notes"
 
     jti = Column(String(64), primary_key=True)
     req = Column(String(64), nullable=False, index=True)
@@ -68,9 +68,9 @@ class ChairNote(Base):
     revoked_time = Column(DateTime(timezone=True), nullable=True)
 
 
-class ChairSpend(Base):
+class DecisionSpend(Base):
     """One use of a note for one action: the key is (jti, action), so a second spend is refused."""
-    __tablename__ = "chair_spends"
+    __tablename__ = "decision_spends"
 
     jti = Column(String(64), primary_key=True)
     action = Column(String(80), primary_key=True)

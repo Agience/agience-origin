@@ -3,6 +3,7 @@
 <title>Account · Agience</title><link rel="icon" href="/web/favicon.png"><link rel="stylesheet" href="/web/app.css">
 <style>
   #sessionActions { margin-top: 28px; padding-top: 12px; border-top: 1px solid #e5e7eb; }
+  #sessionActions h2 { font-size: 15px; font-weight: 600; margin: 0 0 4px; }
   .link.danger { color: #b91c1c; min-height: 44px; }
 </style>
 </head><body>
@@ -16,10 +17,11 @@
   <a class="primary hidden" id="continue" href="/">Continue to Agience</a>
   <div class="row"><button class="link" type="button" id="changePw">Change password</button></div>
   <div class="row"><button class="link" id="signout">Sign out</button></div>
-  <div id="sessionActions" class="hidden">
+  <section id="sessionActions" class="hidden" aria-labelledby="sessionActionsHeading">
+    <h2 id="sessionActionsHeading">Every device and approval</h2>
     <div class="row"><button class="link danger" type="button" id="revokeAll">Revoke all unspent approvals</button></div>
     <div class="row"><button class="link danger" type="button" id="signOutAll">Sign out everywhere</button></div>
-  </div>
+  </section>
   <div class="msg" id="msg"></div>
 </div>
 

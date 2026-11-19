@@ -387,14 +387,16 @@ def _live_grant_row(db: Session, grant_id: Optional[str], *, job: Optional[str] 
 
 
 def carries_job_grant(token: str) -> bool:
-    """Does `token` name a job grant (unverified: only which verifier to try)?"""
+    """Does `token` name a job grant, or a holder artifact's own token (unverified: only which
+    verifier to try)?"""
     from jose import jwt as _jose_jwt
 
     try:
         claims = _jose_jwt.get_unverified_claims(token)
     except Exception:  # noqa: BLE001 — not a JWT: the ordinary verifier refuses it
         return False
-    return isinstance(claims, dict) and bool(claims.get("job_grant")) and "job_reach" in claims
+    return isinstance(claims, dict) and "job_reach" in claims and bool(
+        claims.get("job_grant") or claims.get("artifact"))
 
 
 def verify_job_credential(db: Session, token: str) -> VerifiedCredential:
@@ -427,6 +429,8 @@ def verify_job_credential(db: Session, token: str) -> VerifiedCredential:
     reach = claims.get("job_reach")
     if not isinstance(reach, list) or not reach:
         raise CredentialRefused("a job's delegation with no reach")
+    if claims.get("artifact"):
+        return _verify_child_credential(db, claims, persona, reach)
     grant = _live_grant_row(db, str(claims.get("job_grant") or ""))
     if grant is None or not authority_ledger.is_reach_job(str(grant.job)):
         raise CredentialRefused("the job grant this delegation names is revoked, over, or not a "
@@ -441,6 +445,31 @@ def verify_job_credential(db: Session, token: str) -> VerifiedCredential:
     # release's own walk decide.
     return VerifiedCredential(persona.subject, "job", persona.jti,
                               reach=tuple(sorted({str(r) for r in granted})))
+
+
+def _verify_child_credential(db: Session, claims: dict, persona, reach) -> VerifiedCredential:
+    """A child's token its parent artifact exchanged for (FR-007), as a key share release's acting
+    credential: only while the parent still holds the invoke grant the token names on that child
+    (none for a holder's own token, whose parent is itself) and the person still reaches Invoke on
+    it. It opens what the token reaches with Read that the child still holds now
+    (`authority_ledger.held_reach`), and nothing else."""
+    from origin.services import auth_service, authority_ledger
+
+    child = str(claims.get("artifact") or "")
+    parent = str(claims.get("parent") or "")
+    if parent != child or claims.get("job_grant"):
+        grant = authority_ledger.held_artifact_grant(db, parent, child)
+        if grant is None or grant.grant_id != str(claims.get("job_grant") or ""):
+            raise CredentialRefused("the parent no longer holds the grant this token names")
+    rc = authority_ledger.reach(db)
+    if not rc.reaches(persona.subject, child, "invoke"):
+        raise CredentialRefused("the person holds no invoke on the child")
+    claimed = auth_service.reach_by_of(claims.get("reach_by"))
+    listed = {str(r) for r in reach}
+    held = authority_ledger.held_reach(db, rc, persona.subject, parent, child)
+    opens = sorted(rid for rid, acts in held.items()
+                   if "read" in acts and rid in listed and "read" in claimed.get(rid, []))
+    return VerifiedCredential(persona.subject, "job", persona.jti, reach=tuple(opens))
 
 
 def _held_in_reach(artifact_id: str, reach, rc) -> bool:
@@ -511,7 +540,7 @@ def mint_background_delegation(db: Session, principal_id: str, job: str,
     why_not = custody_plane.custody_refusal()
     if why_not:
         raise CredentialRefused(why_not)
-    if authority_ledger.is_reach_job(job):
+    if authority_ledger.is_reach_job(job) or authority_ledger.is_agent_window_job(job):
         # A timer's grant opens content within its reach, as the person, through Lumen; it never
         # releases a key share, whoever asks.
         raise CredentialRefused(f"job {job!r} is a timer's, and releases no key share")

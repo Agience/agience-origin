@@ -26,7 +26,7 @@ class OriginSession(Base):
     revoked_time = Column(DateTime(timezone=True), nullable=True)
     #: When the sign-in that started the session happened, and how (RFC 8176 values: `pop` and
     #: `mfa` for a passkey with user verification, `otp`, `pwd`, `fed` for a federated sign-in).
-    #: A chair note carries both.
+    #: A decision note carries both.
     auth_time = Column(DateTime(timezone=True), nullable=True)
     amr = Column(JSON, nullable=True)
     #: The session's last use, for the idle timeout.

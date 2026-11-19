@@ -130,3 +130,16 @@ def test_login_is_the_form_even_WITH_a_session():
     c = _client()
     c.cookies.set("session", _signed_session({"user_id": "u-1"}))
     assert "<title>Sign in \u00b7 Agience</title>" in c.get("/login").text
+
+
+def test_the_everywhere_actions_sit_under_their_own_heading():
+    """BUG-141: revoking every approval and signing out everywhere are a named group, so a screen
+    reader announces what the two buttons act on."""
+    import re
+    page = (_WEB_DIR / "account.html").read_text(encoding="utf-8")
+    group = re.search(r'<section id="sessionActions"[^>]*aria-labelledby="(\w+)"[^>]*>(.*?)</section>',
+                      page, re.S)
+    assert group, "the everywhere actions are a labelled section"
+    heading = re.search(r'<h2 id="%s">([^<]+)</h2>' % group.group(1), group.group(2))
+    assert heading and heading.group(1).strip()
+    assert 'id="revokeAll"' in group.group(2) and 'id="signOutAll"' in group.group(2)

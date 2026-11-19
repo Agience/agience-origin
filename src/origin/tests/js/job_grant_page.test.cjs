@@ -18,13 +18,13 @@ function el() {
   };
 }
 
-function page(postResult) {
+function page(postResult, search) {
   const els = {};
   const store = new Map();
   const sent = [];
   const ctx = {
     document: { querySelector: (s) => (els[s] = els[s] || el()), createElement: () => el() },
-    location: { search: "?back=https%3A%2F%2Fmy.agience.test&job=lumen.run.w1.n1&reach=w1&title=Check" },
+    location: { search: search || "?back=https%3A%2F%2Fmy.agience.test&job=lumen.run.w1.n1&reach=w1&title=Check" },
     sessionStorage: {
       getItem: (k) => (store.has(k) ? store.get(k) : null), setItem: (k, v) => store.set(k, String(v)),
       removeItem: (k) => store.delete(k),
@@ -56,4 +56,13 @@ test("an approved grant keeps Approve as it was until the window closes", async 
   await new Promise((r) => setImmediate(r));
   assert.strictEqual(els["#msg"].textContent, "Approved.");
   assert.ok(!els["#approveBtn"].classList.has("hidden"));
+});
+
+test("an agent window's grant, with no app to return to, says the window may be closed", async () => {
+  const { els, sent } = page({ ok: true, data: { grant_id: "g2" } },
+    "?job=agent.window.abc&reach=c1&actions=read,create&title=Terminal");
+  await els["#approveBtn"].handlers.click();
+  await new Promise((r) => setImmediate(r));
+  assert.deepStrictEqual(sent, [["POST", "/auth/me/job-grants"]]);
+  assert.strictEqual(els["#msg"].textContent, "Approved. You can close this window.");
 });

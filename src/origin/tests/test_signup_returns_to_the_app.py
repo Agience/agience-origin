@@ -228,6 +228,33 @@ def test_authorize_register_refuses_a_taken_address_with_the_same_sentence(db_cl
     assert r.json()["detail"] == _REFUSED
 
 
+def test_the_name_given_at_sign_up_is_the_account_s_name(db_client):
+    """BUG-088: the person names themselves at sign-up; the account carries that name, never the
+    address's local part."""
+    from origin.db import persons as db_persons
+    from origin.db.session import SessionLocal
+
+    r = db_client.post("/auth/authorize/register", json={
+        "oauth_state": _oauth_state(db_client), "name": "  Ada Lovelace ",
+        "email": "ada@example.com", "password": "a-long-enough-password",
+    })
+    assert r.status_code == 200, r.text
+    with SessionLocal() as db:
+        assert db_persons.get_by_email(db, "ada@example.com").name == "Ada Lovelace"
+
+
+def test_both_sign_up_forms_ask_for_a_name():
+    """The chooser on /authorize and the /login page each ask for the person's name."""
+    from pathlib import Path
+    import origin.routers.auth_router as ar
+
+    assert 'id="rname"' in ar._REGISTER_BLOCK and "required" in ar._REGISTER_BLOCK
+    web = Path(ar.__file__).resolve().parent.parent / "web"
+    assert 'id="rname"' in (web / "index.html").read_text(encoding="utf-8")
+    assert "name: name" in (web / "index-page.js").read_text(encoding="utf-8")
+    assert '$("#rname")' in (web / "authorize.js").read_text(encoding="utf-8")
+
+
 # ---------------------------------------------------------------------------
 # Login CSRF: a link signs in only the browser that started the verification
 # ---------------------------------------------------------------------------
@@ -298,6 +325,33 @@ def test_the_starting_browser_with_its_nonce_is_signed_in(db_client):
     assert r.json()["access_token"]
     assert r.json()["verified"] is True
     assert r.json()["email"] == "owner@example.com"
+
+
+def test_the_starting_browser_confirms_without_the_password_again(db_client):
+    """BUG-089: the browser that registered holds the nonce and chose the password; the link it
+    opens confirms the address and signs it in without asking for the password again."""
+    token = _register_and_capture_link(db_client, "again@example.com", "again-browser-nonce")
+    r = db_client.post("/auth/email/verify-confirm",
+                       json={"token": token, "verify_nonce": "again-browser-nonce"})
+    assert r.status_code == 200, r.text
+    assert r.json()["verified"] is True and r.json()["access_token"]
+    assert _is_verified("again@example.com")
+
+
+def test_the_in_flow_sign_up_binds_its_link_to_the_browser_s_nonce(db_client):
+    """The /authorize chooser's sign-up carries a nonce too, so its link signs that browser in."""
+    sent = MagicMock()
+    with patch("origin.routers.auth_router.email_verification_required", return_value=True),             patch("origin.routers.auth_router.email_service.send_email_verification", sent):
+        r = db_client.post("/auth/authorize/register", json={
+            "oauth_state": _oauth_state(db_client), "name": "In Flow",
+            "email": "inflow@example.com", "password": "a-long-enough-password",
+            "verify_nonce": "inflow-nonce",
+        })
+    assert r.status_code == 200, r.text
+    token = parse_qs(urlparse(sent.call_args.args[1]).query)["token"][0]
+    r = db_client.post("/auth/email/verify-confirm",
+                       json={"token": token, "verify_nonce": "inflow-nonce"})
+    assert r.json()["access_token"], r.text
 
 
 def test_a_link_minted_without_a_nonce_never_signs_in(db_client):

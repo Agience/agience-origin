@@ -18,7 +18,7 @@ from typing import Optional
 from sqlalchemy.orm import Session
 
 from origin.services import authority_ledger as L
-from origin.services import chair_notes as notes
+from origin.services import decision_notes as notes
 
 KIND = "new-accounts-backfill"
 STEP = "new-account-grant"
@@ -70,7 +70,7 @@ def file(db: Session, person_id: str, filer_name: str, expires: Optional[str] = 
         return {"collection": nar, "grants": [], "request": None}
     accounts = len({b["grantee_id"] for b in bodies})
     req = notes.file_request(db, filer_id=str(person_id), filer_name=filer_name, body={
-        "resource": nar, "kind": KIND, "level": "Governance",
+        "resource": nar, "kind": KIND, "level": "access",
         "fields": {"collection": nar, "operator": operator},
         "steps": [_step(b) for b in bodies],
         "aud": [str(person_id)],
@@ -92,8 +92,8 @@ def run(db: Session, person_id: str, req_id: str) -> dict:
         raise BackfillRefused(403, "the note is not addressed to you")
     if req.state != "approved" or not req.note_jti:
         raise BackfillRefused(409, f"the request is {req.state}, not approved")
-    from origin.models.chair_note import ChairNote
-    token = db.get(ChairNote, req.note_jti).token
+    from origin.models.decision_note import DecisionNote
+    token = db.get(DecisionNote, req.note_jti).token
     granted, held, refused = 0, 0, []
     for st in req.steps or []:
         fields = st.get("fields") or {}
